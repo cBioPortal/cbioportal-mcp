@@ -1,1 +1,0 @@
-"""Backend queries ported from cBioPortal MyBatis mappers."""
