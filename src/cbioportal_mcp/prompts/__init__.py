@@ -1,0 +1,1 @@
+"""System prompts and guidance for cBioPortal MCP tools."""

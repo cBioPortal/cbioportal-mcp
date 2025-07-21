@@ -1,0 +1,50 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cbioportal-mcp"
+version = "0.1.0"
+description = "A specialized MCP interface for cBioPortal data analysis"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [
+    { name = "cBioPortal MCP Contributors" }
+]
+dependencies = [
+    "fastmcp",
+    "mcp-clickhouse",
+    "clickhouse-driver>=0.2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "black",
+    "ruff",
+]
+
+[project.scripts]
+cbioportal-mcp = "cbioportal_mcp.server:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cbioportal_mcp"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src",
+    "/README.md",
+    "/pyproject.toml",
+]
+
+[tool.black]
+line-length = 100
+target-version = ["py310"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+select = ["E", "F", "W", "B", "I"]
+ignore = []
