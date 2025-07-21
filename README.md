@@ -2,7 +2,7 @@
 
 > **WARNING ⚠️: This is still under construction**
 
-This server is a wrapper around the mcp-clickhouse server and provides [a cBioPortal-specific system prompt](https://github.com/cBioPortal/cbioportal-mcp/blob/main/src/cbioportal_mcp/prompts/cbioportal_prompt.py).
+A wrapper around the mcp-clickhouse server adding a [cBioPortal-specific system prompt](https://github.com/cBioPortal/cbioportal-mcp/blob/main/src/cbioportal_mcp/prompts/cbioportal_prompt.py).
 
 ## Installation
 
