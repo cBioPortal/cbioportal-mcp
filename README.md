@@ -39,7 +39,8 @@ export CLICKHOUSE_PORT=9000
 export CLICKHOUSE_USER=your-username
 export CLICKHOUSE_PASSWORD=your-password
 export CLICKHOUSE_DATABASE=your-cbioportal-database  # e.g., cgds_public_2025_06_24
-export CLICKHOUSE_SECURE=false  # or true for secure connections
+export CLICKHOUSE_SECURE=true  # or false for insecure connections
+export CLICKHOUSE_MCP_SERVER_TRANSPORT=stdio # or http or sse
 ```
 
 ## Development
@@ -51,6 +52,13 @@ python -m cbioportal_mcp.server
 
 # Or using the installed script
 cbioportal-mcp
+```
+
+### Running in Docker
+```bash
+# Build the image
+docker build -t cbioportal-mcp -f docker/Dockerfile .
+docker run -i -p 8000:8000 cbioportal-mcp
 ```
 
 ## License

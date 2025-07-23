@@ -8,6 +8,8 @@ from fastmcp import FastMCP
 from mcp_clickhouse.mcp_server import run_select_query
 from cbioportal_mcp.prompts.cbioportal_prompt import CBIOPORTAL_SYSTEM_PROMPT
 
+from .env import get_mcp_config, TransportType
+
 logger = logging.getLogger(__name__)
 
 # Create FastMCP instance
@@ -20,10 +22,23 @@ def main():
     """Main entry point for the server."""
     logging.basicConfig(level=logging.INFO)
     logger.info("🚀 Starting cBioPortal MCP Server with FastMCP...")
-    
-    # Run the FastMCP server
-    mcp.run()
 
+    # Get config
+    config = get_mcp_config()
+    transport = config.mcp_server_transport
+
+    # For HTTP and SSE transports, we need to specify host and port
+    http_transports = [TransportType.HTTP.value, TransportType.SSE.value]
+    if transport in http_transports:
+        # Use the configured bind host (defaults to 127.0.0.1, can be set to 0.0.0.0)
+        # and bind port (defaults to 8000)
+        mcp.run(transport=transport, host=config.mcp_bind_host, port=config.mcp_bind_port)
+    else:
+        # For stdio transport, no host or port is needed
+        mcp.run(transport=transport)
+
+    # Run the FastMCP server
+    mcp.run(transport=transport)
 
 @mcp.tool()
 def clickhouse_run_select_query(query: str) -> dict:
