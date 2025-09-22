@@ -37,9 +37,6 @@ def main():
         # For stdio transport, no host or port is needed
         mcp.run(transport=transport)
 
-    # Run the FastMCP server
-    mcp.run(transport=transport)
-
 @mcp.tool()
 def clickhouse_run_select_query(query: str) -> dict:
     """
