@@ -96,27 +96,20 @@ def clickhouse_run_select_query(query: str) -> dict:
 
 
 @mcp.tool()
-def clickhouse_list_tables(database: Optional[str] = None) -> dict:
+def clickhouse_list_tables() -> dict:
     """
-    List tables in a specific database or the current database.
-    
-    Args:
-        database: Optional database name. If not provided, uses the current database.
+    List tables in the current database.
     
     Returns:
         Dictionary containing list of tables
     """
-    logger.info(f"clickhouse_list_tables called with database: {database}")
+    logger.info(f"clickhouse_list_tables called")
     
     try:
-        if database:
-            query = f"SHOW TABLES FROM {database}"
-        else:
-            query = "SHOW TABLES"
-        result = run_select_query(query)
+        result = run_select_query("SHOW TABLES")
         return {
             "success": True,
-            "message": f"Successfully retrieved tables from {'specified database' if database else 'current database'}",
+            "message": f"Successfully retrieved tables from current database",
             "data": result,
             "tables": [row[0] for row in result] if isinstance(result, list) else []
         }
