@@ -76,12 +76,12 @@ def clickhouse_run_select_query(query: str) -> dict:
                 "data": None
             }
         logger.debug("clickhouse_run_select_query: delegate the query to run_select_query tool of ClickHouse MCP")
-        result = run_select_query(query)
+        query_result = run_select_query(query)
         result = {
             "success": True,
             "message": "Query executed successfully",
-            "data": result,
-            "row_count": len(result) if isinstance(result, list) else 0
+            "data": query_result,
+            "row_count": len(query_result) if isinstance(query_result, list) else 0
         }
         logger.debug(f"clickhouse_run_select_query returns {result}")
         return result
@@ -95,33 +95,39 @@ def clickhouse_run_select_query(query: str) -> dict:
         }
 
 
-@mcp.tool()
-def clickhouse_list_tables() -> dict:
-    """
-    List tables in the current database.
-    
+@mcp.tool(description="""
+    Retrieve a list of all tables in the current database.
+
     Returns:
-        Dictionary containing list of tables
-    """
-    logger.info(f"clickhouse_list_tables called")
+        object with a single field "result":
+            - array: On success, an array of table metadata objects with fields:
+                - name: Table name.
+                - primary_key: Name of the table primary key column(s), if defined.
+                - total_rows: Number of rows in the table.
+                - comment: Table comment or description, if available.
+            - string: On failure, an error message describing the problem.
+""")
+def clickhouse_list_tables() -> dict[str, list[dict] | str]:
+    logger.info(f"clickhouse_list_tables: called")
     
     try:
-        result = run_select_query("SHOW TABLES")
-        return {
-            "success": True,
-            "message": f"Successfully retrieved tables from current database",
-            "data": result,
-            "tables": [row[0] for row in result] if isinstance(result, list) else []
-        }
+        query = "SELECT name, primary_key, total_rows, comment FROM system.tables WHERE database = currentDatabase()"
+        query_result = run_select_query(query)
+        result = zip_select_query_result(query_result)
+        logger.debug(f"clickhouse_list_tables result: {result}")
+        return { "result": result }
     except Exception as e:
-        original_error_message = str(e)
-        logger.error(f"clickhouse_list_tables: {original_error_message}")
-        return {
-            "success": False,
-            "message": f"Error listing tables: {original_error_message}",
-            "data": None
-        }
+        error_message = str(e)
+        logger.error(f"clickhouse_list_tables: {error_message}")
+        return {"result": error_message}
 
+def zip_select_query_result(result):
+    columns = result["columns"]
+    rows = result["rows"]
+    result = []
+    for row in rows:
+        result.append({k: v for k, v in zip(columns, row) if v not in ("", None)}) # skipping key value pairs if value is empty string or None to save context
+    return result
 
 if __name__ == "__main__":
     main()
