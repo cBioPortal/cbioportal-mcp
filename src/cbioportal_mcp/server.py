@@ -5,7 +5,6 @@ import logging
 from typing import Optional
 from fastmcp import FastMCP 
 
-from mcp_clickhouse.mcp_server import run_select_query
 
 from cbioportal_mcp.env import get_mcp_config, TransportType
 
@@ -56,88 +55,97 @@ def main():
         mcp.run(transport=transport)
 
 @mcp.tool(description="""
-    Execute arbitrary ClickHouse SQL SELECT query.
+    Execute a ClickHouse SQL SELECT query.
 
     Returns:
-        object with a single field "result":
-            - array: On success, an array of table rows.
-            - string: On failure, an error message describing the problem.
+        - On success: an object with a single field "rows" containing an array of result rows.
+        - On failure: an object with a single field "error_message" containing a string describing the error.
 """)
 def clickhouse_run_select_query(query: str) -> dict[str, list[dict] | str]:
     try:
-        if not query.strip().upper().startswith("SELECT"):
-            raise ValueError(f"Non select queries are forbidden: '{query}'. Skipping the query.")
-        logger.debug("clickhouse_run_select_query: delegate the query to run_select_query tool of ClickHouse MCP")
-        query_result = run_select_query(query)
-        result = zip_select_query_result(query_result)
+        result = run_select_query(query)
         logger.debug(f"clickhouse_run_select_query returns {result}")
-        return {"result": result}
+        return {"rows": result}
     except Exception as e:
         error_message = str(e)
         logger.error(f"clickhouse_run_select_query: {error_message}")
-        return {"result": error_message}
+        return {"error_message": error_message}
 
 @mcp.tool(description="""
     Retrieve a list of all tables in the current database.
 
     Returns:
-        object with a single field "result":
-            - array: On success, an array of table metadata objects with fields:
-                - name: Table name.
-                - primary_key: Name of the table primary key column(s), if defined.
-                - total_rows: Number of rows in the table.
-                - comment: Table description, if available.
-            - string: On failure, an error message describing the problem.
+        - On success: an object with a single field "tables" containing an array of objects with the following fields:
+            - name: Table name.
+            - primary_key: Name of the table primary key column(s), if defined.
+            - total_rows: Number of rows in the table.
+            - comment: Table description, if available.
+        - On failure: an object with a single field "error_message" containing a string describing the error.
 """)
 def clickhouse_list_tables() -> dict[str, list[dict] | str]:
     logger.info(f"clickhouse_list_tables: called")
     
     try:
         query = "SELECT name, primary_key, total_rows, comment FROM system.tables WHERE database = currentDatabase()"
-        query_result = run_select_query(query)
-        result = zip_select_query_result(query_result)
+        result = run_select_query(query)
         logger.debug(f"clickhouse_list_tables result: {result}")
-        return { "result": result }
+        return { "tables": result }
     except Exception as e:
         error_message = str(e)
         logger.error(f"clickhouse_list_tables: {error_message}")
-        return {"result": error_message}
-
-def zip_select_query_result(result):
-    columns = result["columns"]
-    rows = result["rows"]
-    result = []
-    for row in rows:
-        result.append({k: v for k, v in zip(columns, row) if v not in ("", None)}) # skipping key value pairs if value is empty string or None to save context
-    return result
+        return {"error_message": error_message}
 
 @mcp.tool(description="""
     Retrieve a list of all columns for the table in the current database.
 
     Returns:
-        object with a single field "result":
-            - array: On success, an array of table column objects with fields:
-                - name: Column name.
-                - type: ClickHouse data type of the column.
-                - comment: Column description, if available.
-            - string: On failure, an error message describing the problem.
+        - On success: an object with a single field "columns" containing an array of objects with the following fields:
+            - name: Column name.
+            - type: ClickHouse data type of the column.
+            - comment: Column description, if available.
+        - On failure: an object with a single field "error_message" containing a string describing the error.
 """)
 def clickhouse_list_table_columns(table: str) -> dict[str, list[dict] | str]:
     logger.info(f"clickhouse_list_table_columns: called")
 
     try:
-        if "\"" in table or " " in table:
+        if any(char in table for char in ['"', "'", " "]):
             raise ValueError(f"Invalid table name: {table}")
         # FIXME be aware of sql injections! sanitize the table better
         query = f"SELECT name, type, comment FROM system.columns WHERE table='{table}' and database = currentDatabase()"
-        query_result = run_select_query(query)
-        result = zip_select_query_result(query_result)
+        result = run_select_query(query)
         logger.debug(f"clickhouse_list_table_columns result: {result}")
-        return { "result": result }
+        return { "columns": result }
     except Exception as e:
         error_message = str(e)
         logger.error(f"clickhouse_list_table_columns: {error_message}")
-        return {"result": error_message}
+        return {"error_message": error_message}
+
+def run_select_query(query: str) -> list[dict]:
+    """
+    Execute arbitrary ClickHouse SQL SELECT query.
+
+    Returns:
+        list: A list of rows, where each row is a dictionary with column names as keys and corresponding values.
+    """
+    from mcp_clickhouse.mcp_server import run_select_query
+    if not query.strip().upper().startswith("SELECT"):
+        raise ValueError(f"Non select queries are forbidden: '{query}'. Skipping the query.")
+    logger.debug("run_select_query: delegate the query to run_select_query tool of ClickHouse MCP")
+    ch_query_result = run_select_query(query)
+    result = zip_select_query_result(ch_query_result)
+    return result
+
+def zip_select_query_result(ch_query_result) -> list[dict]:
+    """
+    Join columns and corresponding row values into dictionaries skipping dictionary entries if value is emtpy or None
+    """
+    columns = ch_query_result["columns"]
+    rows = ch_query_result["rows"]
+    result = []
+    for row in rows:
+        result.append({k: v for k, v in zip(columns, row) if v not in ("", None)})
+    return result
 
 if __name__ == "__main__":
     main()
