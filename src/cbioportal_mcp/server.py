@@ -55,45 +55,27 @@ def main():
         # For stdio transport, no host or port is needed
         mcp.run(transport=transport)
 
-@mcp.tool()
-def clickhouse_run_select_query(query: str) -> dict:
-    """
-    Execute any ClickHouse SQL query.
-    
-    Args:
-        query: The SQL query to execute
-    
+@mcp.tool(description="""
+    Execute arbitrary ClickHouse SQL SELECT query.
+
     Returns:
-        Dictionary containing query results
-    """
-    
+        object with a single field "result":
+            - array: On success, an array of table rows.
+            - string: On failure, an error message describing the problem.
+""")
+def clickhouse_run_select_query(query: str) -> dict[str, list[dict] | str]:
     try:
         if not query.strip().upper().startswith("SELECT"):
-            logger.warning(f"clickhouse_run_select_query called with non select query: {query}. Skipping the query.")
-            return {
-                "success": False,
-                "message": "Only SELECT queries are allowed.",
-                "data": None
-            }
+            raise ValueError(f"Non select queries are forbidden: '{query}'. Skipping the query.")
         logger.debug("clickhouse_run_select_query: delegate the query to run_select_query tool of ClickHouse MCP")
         query_result = run_select_query(query)
-        result = {
-            "success": True,
-            "message": "Query executed successfully",
-            "data": query_result,
-            "row_count": len(query_result) if isinstance(query_result, list) else 0
-        }
+        result = zip_select_query_result(query_result)
         logger.debug(f"clickhouse_run_select_query returns {result}")
-        return result
+        return {"result": result}
     except Exception as e:
-        original_error_message = str(e)
-        logger.error(f"clickhouse_run_select_query: {original_error_message}")
-        return {
-            "success": False,
-            "message": f"Error executing query: {original_error_message}",
-            "data": None
-        }
-
+        error_message = str(e)
+        logger.error(f"clickhouse_run_select_query: {error_message}")
+        return {"result": error_message}
 
 @mcp.tool(description="""
     Retrieve a list of all tables in the current database.
