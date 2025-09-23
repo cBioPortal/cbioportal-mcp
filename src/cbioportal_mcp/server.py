@@ -104,7 +104,7 @@ def clickhouse_run_select_query(query: str) -> dict:
                 - name: Table name.
                 - primary_key: Name of the table primary key column(s), if defined.
                 - total_rows: Number of rows in the table.
-                - comment: Table comment or description, if available.
+                - comment: Table description, if available.
             - string: On failure, an error message describing the problem.
 """)
 def clickhouse_list_tables() -> dict[str, list[dict] | str]:
@@ -128,6 +128,34 @@ def zip_select_query_result(result):
     for row in rows:
         result.append({k: v for k, v in zip(columns, row) if v not in ("", None)}) # skipping key value pairs if value is empty string or None to save context
     return result
+
+@mcp.tool(description="""
+    Retrieve a list of all columns for the table in the current database.
+
+    Returns:
+        object with a single field "result":
+            - array: On success, an array of table column objects with fields:
+                - name: Column name.
+                - type: ClickHouse data type of the column.
+                - comment: Column description, if available.
+            - string: On failure, an error message describing the problem.
+""")
+def clickhouse_list_table_columns(table: str) -> dict[str, list[dict] | str]:
+    logger.info(f"clickhouse_list_table_columns: called")
+
+    try:
+        if "\"" in table or " " in table:
+            raise ValueError(f"Invalid table name: {table}")
+        # FIXME be aware of sql injections! sanitize the table better
+        query = f"SELECT name, type, comment FROM system.columns WHERE table='{table}' and database = currentDatabase()"
+        query_result = run_select_query(query)
+        result = zip_select_query_result(query_result)
+        logger.debug(f"clickhouse_list_table_columns result: {result}")
+        return { "result": result }
+    except Exception as e:
+        error_message = str(e)
+        logger.error(f"clickhouse_list_table_columns: {error_message}")
+        return {"result": error_message}
 
 if __name__ == "__main__":
     main()
