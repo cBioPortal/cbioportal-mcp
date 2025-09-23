@@ -66,26 +66,31 @@ def clickhouse_run_select_query(query: str) -> dict:
     Returns:
         Dictionary containing query results
     """
-    logger.info(f"clickhouse_run_select_query called with query: {query}")
     
     try:
         if not query.strip().upper().startswith("SELECT"):
+            logger.warning(f"clickhouse_run_select_query called with non select query: {query}. Skipping the query.")
             return {
                 "success": False,
                 "message": "Only SELECT queries are allowed.",
                 "data": None
             }
+        logger.debug("clickhouse_run_select_query: delegate the query to run_select_query tool of ClickHouse MCP")
         result = run_select_query(query)
-        return {
+        result = {
             "success": True,
             "message": "Query executed successfully",
             "data": result,
             "row_count": len(result) if isinstance(result, list) else 0
         }
+        logger.debug(f"clickhouse_run_select_query returns {result}")
+        return result
     except Exception as e:
+        original_error_message = str(e)
+        logger.error(f"clickhouse_run_select_query: {original_error_message}")
         return {
             "success": False,
-            "message": f"Error executing query: {str(e)}",
+            "message": f"Error executing query: {original_error_message}",
             "data": None
         }
 
@@ -116,9 +121,11 @@ def clickhouse_list_tables(database: Optional[str] = None) -> dict:
             "tables": [row[0] for row in result] if isinstance(result, list) else []
         }
     except Exception as e:
+        original_error_message = str(e)
+        logger.error(f"clickhouse_list_tables: {original_error_message}")
         return {
             "success": False,
-            "message": f"Error listing tables: {str(e)}",
+            "message": f"Error listing tables: {original_error_message}",
             "data": None
         }
 
