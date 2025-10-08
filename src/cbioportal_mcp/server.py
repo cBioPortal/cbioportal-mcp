@@ -131,8 +131,6 @@ def run_select_query(query: str) -> list[dict]:
         list: A list of rows, where each row is a dictionary with column names as keys and corresponding values.
     """
     from mcp_clickhouse.mcp_server import run_select_query
-    if not query.strip().upper().startswith("SELECT"):
-        raise ValueError(f"Non select queries are forbidden: '{query}'. Skipping the query.")
     logger.debug("run_select_query: delegate the query to run_select_query tool of ClickHouse MCP")
     ch_query_result = run_select_query(query)
     result = zip_select_query_result(ch_query_result)
