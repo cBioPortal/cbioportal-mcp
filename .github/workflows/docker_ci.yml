@@ -8,8 +8,8 @@ on:
     inputs:
       ref:
         description: 'Git ref to build and tag the image (branch, tag, or commit SHA)'
+        type: string
         required: true
-        default: ''
 
 jobs:
   docker-build:
@@ -18,7 +18,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v3
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.ref || github.ref }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.ref != '' && github.event.inputs.ref || github.ref }}
       - name: Set image tag
         id: set-tag
         run: |
