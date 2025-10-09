@@ -1,0 +1,50 @@
+name: Build and Push Docker Image
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Git ref to build and tag the image (branch, tag, or commit SHA)'
+        required: false
+        default: ''
+
+jobs:
+  docker-build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+      - name: Set image tag
+        id: set-tag
+        run: |
+          if [ -n "${{ github.event.inputs.ref }}" ]; then
+            echo "IMAGE_TAG=${{ github.event.inputs.ref }}" >> $GITHUB_ENV
+          else
+            echo "IMAGE_TAG=latest" >> $GITHUB_ENV
+          fi
+          echo "Using IMAGE_TAG=$IMAGE_TAG"
+
+      - name: Log in to DockerHub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push multi-arch image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          file: docker/Dockerfile
+          cache-from: type=gha
+          cache-to: type=gha
+          tags: cbioportal/mcp:${{ env.IMAGE_TAG }}
