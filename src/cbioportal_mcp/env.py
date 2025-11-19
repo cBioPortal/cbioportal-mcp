@@ -18,10 +18,10 @@ class TransportType(str, Enum):
         """Get all valid transport values."""
         return [transport.value for transport in cls]
 
+
 @dataclass
 class McpConfig:
-    """Configuration for Mcp connection settings.
-    """
+    """Configuration for Mcp connection settings."""
 
     def __init__(self):
         """Initialize the configuration from environment variables."""
@@ -59,8 +59,28 @@ class McpConfig:
         """
         return int(os.getenv("CLICKHOUSE_MCP_BIND_PORT", "8000"))
 
+    @property
+    def mcp_user(self) -> str:
+        """Get the clickhouse user for which the MCP server is running for.
+
+        Default: "app_user"
+        """
+
+        return str(os.getenv("CLICKHOUSE_USER", "app_user"))
+
+    @property
+    def mcp_database(self) -> str:
+        """Get the clickhouse db for which the MCP server is running against
+
+        Default: "cgds_public_2025_06_24"
+        """
+
+        return str(os.getenv("CLICKHOUSE_DATABASE", "cgds_public_2025_06_24"))
+
+
 # Global instance placeholders for the singleton pattern
 _MCP_CONFIG_INSTANCE = None
+
 
 def get_mcp_config():
     """
