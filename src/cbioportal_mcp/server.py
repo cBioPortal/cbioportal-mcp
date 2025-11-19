@@ -2,11 +2,13 @@
 """cBioPortal MCP Server - FastMCP implementation."""
 
 import logging
+import sys
 from typing import Optional
-from fastmcp import FastMCP 
+from fastmcp import FastMCP
 
 
 from cbioportal_mcp.env import get_mcp_config, TransportType
+from cbioportal_mcp.authentication.permissions import ensure_db_permissions
 
 logger = logging.getLogger(__name__)
 
@@ -34,8 +36,9 @@ mcp = FastMCP(
         7. If a user asks something outside the database, respond clearly that it cannot be answered via this MCP.
 
         Maintain a helpful, concise, and professional tone.
-    """
+    """,
 )
+
 
 def main():
     """Main entry point for the server."""
@@ -44,6 +47,13 @@ def main():
 
     # Get config
     config = get_mcp_config()
+
+    try:
+        ensure_db_permissions(config=config)
+    except PermissionError as e:
+        logger.critical("❌ ClickHouse permission check failed: %s", e)
+        sys.exit(2)
+
     transport = config.mcp_server_transport
 
     # For HTTP and SSE transports, we need to specify host and port
@@ -56,13 +66,16 @@ def main():
         # For stdio transport, no host or port is needed
         mcp.run(transport=transport)
 
-@mcp.tool(description="""
+
+@mcp.tool(
+    description="""
     Execute a ClickHouse SQL SELECT query.
 
     Returns:
         - On success: an object with a single field "rows" containing an array of result rows.
         - On failure: an object with a single field "error_message" containing a string describing the error.
-""")
+"""
+)
 def clickhouse_run_select_query(query: str) -> dict[str, list[dict] | str]:
     try:
         result = run_select_query(query)
@@ -73,7 +86,9 @@ def clickhouse_run_select_query(query: str) -> dict[str, list[dict] | str]:
         logger.error(f"clickhouse_run_select_query: {error_message}")
         return {"error_message": error_message}
 
-@mcp.tool(description="""
+
+@mcp.tool(
+    description="""
     Retrieve a list of all tables in the current database.
 
     Returns:
@@ -83,21 +98,24 @@ def clickhouse_run_select_query(query: str) -> dict[str, list[dict] | str]:
             - total_rows: Number of rows in the table.
             - comment: Table description, if available.
         - On failure: an object with a single field "error_message" containing a string describing the error.
-""")
+"""
+)
 def clickhouse_list_tables() -> dict[str, list[dict] | str]:
     logger.info(f"clickhouse_list_tables: called")
-    
+
     try:
         query = "SELECT name, primary_key, total_rows, comment FROM system.tables WHERE database = currentDatabase()"
         result = run_select_query(query)
         logger.debug(f"clickhouse_list_tables result: {result}")
-        return { "tables": result }
+        return {"tables": result}
     except Exception as e:
         error_message = str(e)
         logger.error(f"clickhouse_list_tables: {error_message}")
         return {"error_message": error_message}
 
-@mcp.tool(description="""
+
+@mcp.tool(
+    description="""
     Retrieve a list of all columns for the table in the current database.
 
     Returns:
@@ -106,7 +124,8 @@ def clickhouse_list_tables() -> dict[str, list[dict] | str]:
             - type: ClickHouse data type of the column.
             - comment: Column description, if available.
         - On failure: an object with a single field "error_message" containing a string describing the error.
-""")
+"""
+)
 def clickhouse_list_table_columns(table: str) -> dict[str, list[dict] | str]:
     logger.info(f"clickhouse_list_table_columns: called")
 
@@ -117,11 +136,12 @@ def clickhouse_list_table_columns(table: str) -> dict[str, list[dict] | str]:
         query = f"SELECT name, type, comment FROM system.columns WHERE table='{table}' and database = currentDatabase()"
         result = run_select_query(query)
         logger.debug(f"clickhouse_list_table_columns result: {result}")
-        return { "columns": result }
+        return {"columns": result}
     except Exception as e:
         error_message = str(e)
         logger.error(f"clickhouse_list_table_columns: {error_message}")
         return {"error_message": error_message}
+
 
 def run_select_query(query: str) -> list[dict]:
     """
@@ -131,12 +151,14 @@ def run_select_query(query: str) -> list[dict]:
         list: A list of rows, where each row is a dictionary with column names as keys and corresponding values.
     """
     from mcp_clickhouse.mcp_server import run_select_query
+
     if not query.strip().upper().startswith("SELECT"):
         raise ValueError(f"Non select queries are forbidden: '{query}'. Skipping the query.")
     logger.debug("run_select_query: delegate the query to run_select_query tool of ClickHouse MCP")
     ch_query_result = run_select_query(query)
     result = zip_select_query_result(ch_query_result)
     return result
+
 
 def zip_select_query_result(ch_query_result) -> list[dict]:
     """
@@ -148,6 +170,7 @@ def zip_select_query_result(ch_query_result) -> list[dict]:
     for row in rows:
         result.append({k: v for k, v in zip(columns, row) if v not in ("", None)})
     return result
+
 
 if __name__ == "__main__":
     main()
