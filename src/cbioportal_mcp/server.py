@@ -134,6 +134,9 @@ def _sample_filtering_guide_text() -> str:
 def _common_pitfalls_guide_text() -> str:
     return _load_resource("common-pitfalls.md")
 
+def _treatment_guide_text() -> str:
+    return _load_resource("treatment-guide.md")
+
 # --- MCP resources (decorator registers them) --------------------------------
 @mcp.resource("cbioportal://mutation-frequency-guide")
 def mutation_frequency_guide() -> str:
@@ -291,6 +294,10 @@ def list_mcp_resources() -> list[dict]:
             "description": "Guide to avoid common mistakes when querying cBioPortal data"
         },
         {
+            "uri": "cbioportal://treatment-guide",
+            "description": "Guide for querying treatment/clinical event data including drug agents, timelines, and linking to genomic data"
+        },
+        {
             "uri": "cbioportal://study-guide/{study_id}",
             "description": "Dynamic study-specific guide - use get_study_guide(study_id) tool to generate"
         }
@@ -311,7 +318,8 @@ def read_mcp_resource(uri: str) -> str:
         "cbioportal://mutation-frequency-guide": _mutation_frequency_guide_text(),
         "cbioportal://clinical-data-guide": _clinical_data_guide_text(),
         "cbioportal://sample-filtering-guide": _sample_filtering_guide_text(),
-        "cbioportal://common-pitfalls": _common_pitfalls_guide_text()
+        "cbioportal://common-pitfalls": _common_pitfalls_guide_text(),
+        "cbioportal://treatment-guide": _treatment_guide_text()
     }
 
     if uri not in resources:

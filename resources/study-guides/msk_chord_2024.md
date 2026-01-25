@@ -62,21 +62,58 @@ This study uses multiple MSK-IMPACT panel versions:
 | `HR` | Hormone receptor status |
 
 ## Treatment Data
-Treatment information is stored in **clinical_event** tables, not clinical attributes.
+
+MSK-CHORD has **detailed treatment data** stored in clinical_event tables. This is one of the most comprehensive treatment datasets in cBioPortal.
+
+### Treatment Event Keys
+
+| Key | Description | Example Values |
+|-----|-------------|----------------|
+| `AGENT` | Drug/treatment name | FLUOROURACIL, PEMBROLIZUMAB, OXALIPLATIN |
+| `SUBTYPE` | Treatment category | Chemo, Immuno, Targeted, Hormone, Radiation Therapy |
+| `RX_INVESTIGATIVE` | Investigational drug flag | Y, N |
+| `FLAG_OROTOPICAL` | Oral/topical administration | 0, 1 |
+| `TREATMENT_TYPE` | Broad treatment type | Medical Therapy |
+| `PRIOR_MED_TO_MSK` | Prior medications flag | Indicates meds before MSK care |
+| `INFERRED_TX_PROB` | NLP inference probability | Confidence score for NLP-extracted data |
+
+### Treatment Subtypes
+
+| Subtype | Description |
+|---------|-------------|
+| `Chemo` | Cytotoxic chemotherapy |
+| `Targeted` | Molecularly targeted agents (TKIs, etc.) |
+| `Immuno` | Immunotherapy (checkpoint inhibitors, etc.) |
+| `Hormone` | Hormonal therapy |
+| `Radiation Therapy` | Radiation treatment |
+| `Biologic` | Biologic agents |
+| `Investigational` | Investigational/trial drugs |
+| `Bone Treatment` | Bone-targeted agents (bisphosphonates, etc.) |
+| `Prior Medications to MSK` | Medications before MSK treatment |
+
+### Query Examples
 
 ```sql
--- Get treatment agents for this study
-SELECT ced.value as agent, COUNT(DISTINCT ce.patient_id) as patients
+-- Get treatments by subtype
+SELECT 
+    subtype.value as treatment_type,
+    agent.value as agent,
+    COUNT(DISTINCT ce.patient_id) as patients
 FROM clinical_event ce
-JOIN clinical_event_data ced ON ce.clinical_event_id = ced.clinical_event_id
+JOIN clinical_event_data agent ON ce.clinical_event_id = agent.clinical_event_id AND agent.key = 'AGENT'
+JOIN clinical_event_data subtype ON ce.clinical_event_id = subtype.clinical_event_id AND subtype.key = 'SUBTYPE'
 JOIN patient p ON ce.patient_id = p.internal_id
 JOIN cancer_study cs ON p.cancer_study_id = cs.cancer_study_id
 WHERE cs.cancer_study_identifier = 'msk_chord_2024'
   AND ce.event_type IN ('Treatment', 'TREATMENT')
-  AND ced.key = 'AGENT'
-GROUP BY ced.value
-ORDER BY patients DESC;
+GROUP BY subtype.value, agent.value
+ORDER BY treatment_type, patients DESC;
 ```
+
+### Treatment Data Caveats
+- Some treatment data is NLP-extracted (`INFERRED_TX_PROB` indicates confidence)
+- `PRIOR_MED_TO_MSK` captures pre-MSK treatments separately
+- Treatment timing (start_date, stop_date) is in days from diagnosis
 
 ## Notes & Caveats
 - Some clinical annotations are NLP-derived and may have extraction errors
