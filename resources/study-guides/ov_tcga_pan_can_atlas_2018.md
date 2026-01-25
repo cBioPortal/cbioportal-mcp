@@ -1,64 +1,41 @@
 # Ovarian Serous Cystadenocarcinoma (TCGA, PanCancer Atlas)
 
 **Study ID:** `ov_tcga_pan_can_atlas_2018`
-**Cancer Type:** hgsoc
-**Patients:** 601
-**Samples:** 586
 
-## Description
-Ovarian Serous Cystadenocarcinoma TCGA PanCancer data. The original data is <a href="https://gdc.cancer.gov/about-data/publications/pancanatlas">here</a>. The publications are <a href="https://www.cell.com/pb-assets/consortium/pancanceratlas/pancani3/index.html">here</a>.
+See `_tcga_pancan_template.md` for common TCGA clinical attributes.
 
-## Gene Panels
-- **WES**: 585 samples
+## Study-Specific Attributes
 
-## Available Clinical Attributes
-- MUTATION_COUNT (585 samples)
-- TBL_SCORE (585 samples)
-- CANCER_TYPE (585 samples)
-- SOMATIC_STATUS (585 samples)
-- MSI_SENSOR_SCORE (585 samples)
-- TISSUE_SOURCE_SITE (585 samples)
-- TISSUE_SOURCE_SITE_CODE (585 samples)
-- SAMPLE_TYPE (585 samples)
-- TMB_NONSYNONYMOUS (585 samples)
-- ONCOTREE_CODE (585 samples)
-- TISSUE_PROSPECTIVE_COLLECTION_INDICATOR (585 samples)
-- MSI_SCORE_MANTIS (585 samples)
-- TISSUE_RETROSPECTIVE_COLLECTION_INDICATOR (585 samples)
-- TUMOR_TISSUE_SITE (585 samples)
-- TUMOR_TYPE (585 samples)
+### Histology
+| Attribute | Description | Notes |
+|-----------|-------------|-------|
+| `HISTOLOGICAL_GRADE` | Tumor grade | High-grade serous predominant |
 
-## Top Mutated Genes
-- TP53: 373 samples
-- TTN: 110 samples
-- FLG2: 41 samples
-- MUC16: 41 samples
-- CSMD3: 38 samples
-- HMCN1: 34 samples
-- USH2A: 32 samples
-- AHNAK2: 30 samples
-- NF1: 30 samples
-- FLG: 30 samples
+### Treatment Response
+| Attribute | Description |
+|-----------|-------------|
+| `PLATINUM_STATUS` | Platinum sensitivity | Sensitive, Resistant, Refractory |
+| `RESIDUAL_DISEASE` | Post-surgical residual | Optimal (<1cm), Suboptimal |
 
-## Sample Types
-- Primary: 583 samples
-- Recurrence: 2 samples
+### Molecular Features
+| Attribute | Description |
+|-----------|-------------|
+| `BRCA_STATUS` | BRCA1/2 mutation status |
+| `HRD_STATUS` | Homologous recombination deficiency |
 
-## Query Examples
-
-```sql
--- Get all samples
-SELECT DISTINCT sample_unique_id, patient_unique_id
-FROM clinical_data_derived
-WHERE cancer_study_identifier = 'ov_tcga_pan_can_atlas_2018';
-
--- Get mutations for a gene
-SELECT sample_unique_id, hugo_gene_symbol, mutation_variant, mutation_type
-FROM genomic_event_derived
-WHERE cancer_study_identifier = 'ov_tcga_pan_can_atlas_2018'
-  AND hugo_gene_symbol = 'TP53'
-  AND variant_type = 'mutation';
-```
+## Key Genes
+| Gene | Frequency | Notes |
+|------|-----------|-------|
+| TP53 | ~96% | Near-universal in high-grade serous |
+| BRCA1 | ~10% germline | PARP inhibitor sensitivity |
+| BRCA2 | ~6% germline | PARP inhibitor sensitivity |
+| NF1 | ~4% | RAS pathway |
+| RB1 | ~2% | Cell cycle |
+| CDK12 | ~3% | DNA repair |
 
 ## Notes
-<!-- Add study-specific notes, caveats, or tips here -->
+- High-grade serous ovarian cancer (HGSOC) is genomically distinct from other ovarian subtypes
+- TP53 is mutated in virtually all HGSOC
+- BRCA1/2 mutations (germline or somatic) predict PARP inhibitor response
+- HRD score predicts platinum and PARP sensitivity even without BRCA mutation
+- Copy number alterations more prominent than mutations (except TP53)

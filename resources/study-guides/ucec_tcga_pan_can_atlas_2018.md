@@ -1,63 +1,44 @@
 # Uterine Corpus Endometrial Carcinoma (TCGA, PanCancer Atlas)
 
 **Study ID:** `ucec_tcga_pan_can_atlas_2018`
-**Cancer Type:** ucec
-**Patients:** 560
-**Samples:** 530
 
-## Description
-Uterine Corpus Endometrial Carcinoma TCGA PanCancer data. The original data is <a href="https://gdc.cancer.gov/about-data/publications/pancanatlas">here</a>. The publications are <a href="https://www.cell.com/pb-assets/consortium/pancanceratlas/pancani3/index.html">here</a>.
+See `_tcga_pancan_template.md` for common TCGA clinical attributes.
 
-## Gene Panels
-- **WES**: 529 samples
+## Study-Specific Attributes
 
-## Available Clinical Attributes
-- MUTATION_COUNT (529 samples)
-- TBL_SCORE (529 samples)
-- CANCER_TYPE (529 samples)
-- SOMATIC_STATUS (529 samples)
-- MSI_SENSOR_SCORE (529 samples)
-- TISSUE_SOURCE_SITE (529 samples)
-- TISSUE_SOURCE_SITE_CODE (529 samples)
-- SAMPLE_TYPE (529 samples)
-- TMB_NONSYNONYMOUS (529 samples)
-- ONCOTREE_CODE (529 samples)
-- TISSUE_PROSPECTIVE_COLLECTION_INDICATOR (529 samples)
-- MSI_SCORE_MANTIS (529 samples)
-- TISSUE_RETROSPECTIVE_COLLECTION_INDICATOR (529 samples)
-- TUMOR_TISSUE_SITE (529 samples)
-- TUMOR_TYPE (529 samples)
+### Molecular Classification (TCGA)
+| Attribute | Description | Values |
+|-----------|-------------|--------|
+| `SUBTYPE` | TCGA molecular subtype | POLE (ultramutated), MSI (hypermutated), CN-low, CN-high |
 
-## Top Mutated Genes
-- PTEN: 337 samples
-- PIK3CA: 259 samples
-- ARID1A: 227 samples
-- TTN: 206 samples
-- TP53: 193 samples
-- PIK3R1: 159 samples
-- KMT2D: 143 samples
-- MUC16: 142 samples
-- CTNNB1: 133 samples
-- CTCF: 127 samples
+### Histology
+| Attribute | Description | Values |
+|-----------|-------------|--------|
+| `HISTOLOGICAL_TYPE` | Histological subtype | Endometrioid, Serous, Mixed |
 
-## Sample Types
-- Primary: 529 samples
+## Molecular Subtypes
+| Subtype | Characteristics | Prognosis |
+|---------|-----------------|-----------|
+| **POLE** | Ultra-hypermutated (>100 mut/Mb), POLE exonuclease mutations | Excellent |
+| **MSI** | Hypermutated, microsatellite instability, MLH1 silencing | Intermediate |
+| **CN-low** | Microsatellite stable, few copy number alterations | Intermediate |
+| **CN-high** | Serous-like, TP53 mutations, extensive CNA | Poor |
 
-## Query Examples
-
-```sql
--- Get all samples
-SELECT DISTINCT sample_unique_id, patient_unique_id
-FROM clinical_data_derived
-WHERE cancer_study_identifier = 'ucec_tcga_pan_can_atlas_2018';
-
--- Get mutations for a gene
-SELECT sample_unique_id, hugo_gene_symbol, mutation_variant, mutation_type
-FROM genomic_event_derived
-WHERE cancer_study_identifier = 'ucec_tcga_pan_can_atlas_2018'
-  AND hugo_gene_symbol = 'TP53'
-  AND variant_type = 'mutation';
-```
+## Key Genes
+| Gene | Frequency | Subtype Association |
+|------|-----------|---------------------|
+| PTEN | ~65% | CN-low, MSI |
+| PIK3CA | ~50% | All subtypes |
+| PIK3R1 | ~30% | CN-low |
+| ARID1A | ~35% | MSI |
+| TP53 | ~25% | CN-high (>90% in this subtype) |
+| KRAS | ~20% | Various |
+| CTNNB1 | ~20% | CN-low |
+| POLE | ~7% | Defines POLE subtype |
 
 ## Notes
-<!-- Add study-specific notes, caveats, or tips here -->
+- TCGA molecular classification has prognostic value and guides treatment
+- POLE and MSI subtypes are hypermutated but have different mechanisms
+- TP53 mutations with CN-high pattern indicate serous-like behavior regardless of histology
+- POLE mutations should be in exonuclease domain (proofreading) to be driver
+- MSI-H tumors respond well to immunotherapy

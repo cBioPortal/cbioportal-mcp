@@ -1,70 +1,84 @@
 # MSK-CHORD (MSK, Nature 2024)
 
 **Study ID:** `msk_chord_2024`
-**Cancer Type:** mixed
-**Patients:** 24950
-**Samples:** 25041
 
-## Description
-Targeted sequencing of 25040 tumors from 24950 patients and their matched normals via MSK-IMPACT, along with clinical annotations, some of which are derived from natural language processing (denoted NLP). This data is available under the <a href="https://creativecommons.org/licenses/by-nc-nd/4.0/deed.en">Creative Commons BY-NC-ND 4.0 license</a>. For commercial use, please contact <a href="mailto: datarequests@mskcc.org">datarequests@mskcc.org</a>
+## Overview
+Targeted sequencing via MSK-IMPACT panels. Clinical annotations include some derived from natural language processing (denoted NLP).
 
 ## Gene Panels
-- **IMPACT468**: 12891 samples
-- **IMPACT505**: 7155 samples
-- **IMPACT410**: 3973 samples
-- **IMPACT341**: 1019 samples
-- **IMPACT-HEME-400**: 2 samples
+This study uses multiple MSK-IMPACT panel versions:
+- **IMPACT341**: Earlier version, 341 genes
+- **IMPACT410**: 410 genes
+- **IMPACT468**: 468 genes  
+- **IMPACT505**: Latest version, 505 genes
 
-## Available Clinical Attributes
-- TMB_NONSYNONYMOUS (25040 samples)
-- PATHOLOGICAL_GROUP (25040 samples)
-- CANCER_TYPE (25040 samples)
-- CANCER_TYPE_DETAILED (25040 samples)
-- SAMPLE_TYPE (25040 samples)
-- CLINICAL_GROUP (25040 samples)
-- ONCOTREE_CODE (25040 samples)
-- CLINICAL_SUMMARY (25040 samples)
-- GLEASON_SAMPLE_LEVEL (25040 samples)
-- MSI_COMMENT (25040 samples)
-- MSI_TYPE (25040 samples)
-- METASTATIC_SITE (25040 samples)
-- SAMPLE_CLASS (25040 samples)
-- MUTATION_COUNT (25040 samples)
-- PDL1_POSITIVE (25040 samples)
+**Important:** Different samples may have different gene coverage. Always use gene-specific denominators when calculating mutation frequencies.
 
-## Top Mutated Genes
-- TP53: 13124 samples
-- KRAS: 7128 samples
-- APC: 4777 samples
-- PIK3CA: 3708 samples
-- EGFR: 2159 samples
-- ARID1A: 1843 samples
-- SMAD4: 1796 samples
-- KMT2D: 1783 samples
-- KMT2C: 1629 samples
-- ATM: 1388 samples
+## Clinical Attributes - Semantic Guide
 
-## Sample Types
-- Primary: 15928 samples
-- Metastasis: 8878 samples
-- Unknown: 136 samples
-- Local Recurrence: 98 samples
+### Cancer Classification
+| Attribute | Description | Values |
+|-----------|-------------|--------|
+| `CANCER_TYPE` | Broad cancer category | e.g., "Non-Small Cell Lung Cancer", "Breast Cancer" |
+| `CANCER_TYPE_DETAILED` | Specific subtype | e.g., "Lung Adenocarcinoma", "Invasive Ductal Carcinoma" |
+| `ONCOTREE_CODE` | OncoTree classification code | Standardized cancer type codes |
 
-## Query Examples
+### Sample Information
+| Attribute | Description | Values |
+|-----------|-------------|--------|
+| `SAMPLE_TYPE` | Sample origin | Primary, Metastasis, Local Recurrence, Unknown |
+| `SAMPLE_CLASS` | Sample classification | Tumor, Normal |
+| `PRIMARY_SITE` | Anatomical primary site | e.g., Lung, Breast, Colon |
+| `METASTATIC_SITE` | Site of metastasis (if applicable) | e.g., Liver, Bone, Brain |
+
+### Genomic Features
+| Attribute | Description | Notes |
+|-----------|-------------|-------|
+| `TMB_NONSYNONYMOUS` | Tumor mutational burden | Nonsynonymous mutations per Mb |
+| `MUTATION_COUNT` | Total mutation count | Raw count of mutations in sample |
+| `MSI_SCORE` | Microsatellite instability score | Numeric score |
+| `MSI_TYPE` | MSI classification | Stable, Instable, Indeterminate |
+
+### Clinical Groupings
+| Attribute | Description | Notes |
+|-----------|-------------|-------|
+| `CLINICAL_GROUP` | Clinical grouping | Study-specific grouping |
+| `PATHOLOGICAL_GROUP` | Pathological grouping | Study-specific grouping |
+| `CLINICAL_SUMMARY` | NLP-derived clinical summary | May contain extracted clinical info |
+
+### Prostate-Specific
+| Attribute | Description |
+|-----------|-------------|
+| `GLEASON_SAMPLE_LEVEL` | Gleason score at sample level |
+| `GLEASON_FIRST_REPORTED` | First reported Gleason score |
+| `GLEASON_HIGHEST_REPORTED` | Highest reported Gleason score |
+
+### Biomarkers
+| Attribute | Description |
+|-----------|-------------|
+| `PDL1_POSITIVE` | PD-L1 expression status |
+| `HISTORY_OF_PDL1` | History of PD-L1 testing |
+| `HER2` | HER2 status (breast cancer) |
+| `HR` | Hormone receptor status |
+
+## Treatment Data
+Treatment information is stored in **clinical_event** tables, not clinical attributes.
 
 ```sql
--- Get all samples
-SELECT DISTINCT sample_unique_id, patient_unique_id
-FROM clinical_data_derived
-WHERE cancer_study_identifier = 'msk_chord_2024';
-
--- Get mutations for a gene
-SELECT sample_unique_id, hugo_gene_symbol, mutation_variant, mutation_type
-FROM genomic_event_derived
-WHERE cancer_study_identifier = 'msk_chord_2024'
-  AND hugo_gene_symbol = 'TP53'
-  AND variant_type = 'mutation';
+-- Get treatment agents for this study
+SELECT ced.value as agent, COUNT(DISTINCT ce.patient_id) as patients
+FROM clinical_event ce
+JOIN clinical_event_data ced ON ce.clinical_event_id = ced.clinical_event_id
+JOIN patient p ON ce.patient_id = p.internal_id
+JOIN cancer_study cs ON p.cancer_study_id = cs.cancer_study_id
+WHERE cs.cancer_study_identifier = 'msk_chord_2024'
+  AND ce.event_type IN ('Treatment', 'TREATMENT')
+  AND ced.key = 'AGENT'
+GROUP BY ced.value
+ORDER BY patients DESC;
 ```
 
-## Notes
-<!-- Add study-specific notes, caveats, or tips here -->
+## Notes & Caveats
+- Some clinical annotations are NLP-derived and may have extraction errors
+- Multiple IMPACT panel versions mean gene coverage varies by sample
+- Data is under CC BY-NC-ND 4.0 license; contact datarequests@mskcc.org for commercial use

@@ -1,63 +1,45 @@
 # Colorectal Adenocarcinoma (TCGA, PanCancer Atlas)
 
 **Study ID:** `coadread_tcga_pan_can_atlas_2018`
-**Cancer Type:** coadread
-**Patients:** 596
-**Samples:** 595
 
-## Description
-Colorectal Adenocarcinoma TCGA PanCancer data. The original data is <a href="https://gdc.cancer.gov/about-data/publications/pancanatlas">here</a>. The publications are <a href="https://www.cell.com/pb-assets/consortium/pancanceratlas/pancani3/index.html">here</a>.
+See `_tcga_pancan_template.md` for common TCGA clinical attributes.
 
-## Gene Panels
-- **WES**: 594 samples
+## Study-Specific Attributes
 
-## Available Clinical Attributes
-- MUTATION_COUNT (594 samples)
-- TBL_SCORE (594 samples)
-- CANCER_TYPE (594 samples)
-- SOMATIC_STATUS (594 samples)
-- MSI_SENSOR_SCORE (594 samples)
-- TISSUE_SOURCE_SITE (594 samples)
-- TISSUE_SOURCE_SITE_CODE (594 samples)
-- SAMPLE_TYPE (594 samples)
-- TMB_NONSYNONYMOUS (594 samples)
-- ONCOTREE_CODE (594 samples)
-- TISSUE_PROSPECTIVE_COLLECTION_INDICATOR (594 samples)
-- MSI_SCORE_MANTIS (594 samples)
-- TISSUE_RETROSPECTIVE_COLLECTION_INDICATOR (594 samples)
-- TUMOR_TISSUE_SITE (594 samples)
-- TUMOR_TYPE (594 samples)
+### Microsatellite Status
+| Attribute | Description | Values |
+|-----------|-------------|--------|
+| `MSI_STATUS` | Microsatellite instability | MSI-H (high), MSI-L (low), MSS (stable) |
 
-## Top Mutated Genes
-- APC: 387 samples
-- TP53: 314 samples
-- TTN: 257 samples
-- KRAS: 218 samples
-- PIK3CA: 147 samples
-- MUC16: 146 samples
-- SYNE1: 144 samples
-- FAT4: 124 samples
-- RYR2: 105 samples
-- OBSCN: 99 samples
+### Molecular Classification
+| Attribute | Description | Values |
+|-----------|-------------|--------|
+| `HYPERMUTATED` | Hypermutation status | Yes, No |
+| `CMS_SUBTYPE` | Consensus Molecular Subtype | CMS1, CMS2, CMS3, CMS4 |
 
-## Sample Types
-- Primary: 594 samples
+### Anatomic Location
+| Attribute | Description |
+|-----------|-------------|
+| `TUMOR_LOCATION` | Colon vs rectum, right vs left |
 
-## Query Examples
+## Key Genes
+| Gene | Frequency | Clinical Relevance |
+|------|-----------|-------------------|
+| APC | ~80% | Initiating event in most CRC |
+| TP53 | ~55% | Progression marker |
+| KRAS | ~40% | Predicts anti-EGFR resistance |
+| PIK3CA | ~15% | May predict aspirin benefit |
+| BRAF | ~10% | V600E poor prognosis (MSS context) |
+| SMAD4 | ~10% | TGF-β pathway |
 
-```sql
--- Get all samples
-SELECT DISTINCT sample_unique_id, patient_unique_id
-FROM clinical_data_derived
-WHERE cancer_study_identifier = 'coadread_tcga_pan_can_atlas_2018';
-
--- Get mutations for a gene
-SELECT sample_unique_id, hugo_gene_symbol, mutation_variant, mutation_type
-FROM genomic_event_derived
-WHERE cancer_study_identifier = 'coadread_tcga_pan_can_atlas_2018'
-  AND hugo_gene_symbol = 'TP53'
-  AND variant_type = 'mutation';
-```
+## Molecular Subtypes (CMS)
+- **CMS1 (MSI-immune)**: MSI-H, hypermutated, strong immune infiltration
+- **CMS2 (Canonical)**: WNT/MYC activation, epithelial
+- **CMS3 (Metabolic)**: KRAS mutations, metabolic dysregulation
+- **CMS4 (Mesenchymal)**: Stromal infiltration, poor prognosis
 
 ## Notes
-<!-- Add study-specific notes, caveats, or tips here -->
+- MSI-H tumors respond well to immunotherapy
+- KRAS/NRAS mutations contraindicate anti-EGFR therapy
+- BRAF V600E has different prognosis in MSI-H vs MSS context
+- Left vs right-sided tumors have different biology and outcomes

@@ -1,62 +1,46 @@
-# Osteosarcoma (TARGET GDC, 2025)
+# Osteosarcoma (TARGET, 2018)
 
 **Study ID:** `os_target_gdc`
-**Cancer Type:** os
-**Patients:** 383
-**Samples:** 160
 
-## Description
-TARGET Osteosarcoma. Source data from <A HREF="https://gdc.cancer.gov">NCI GDC</A> and generated in Aug 2025 using <A HREF="https://cda.readthedocs.io/en/latest/">Cancer Data Aggregator</A>.
+## Overview
+Pediatric osteosarcoma study from the TARGET (Therapeutically Applicable Research to Generate Effective Treatments) initiative. Whole exome sequencing data.
 
-## Gene Panels
-- **WES**: 159 samples
+## Gene Panel
+- **WES** (Whole Exome Sequencing): All coding genes profiled
+- For mutation frequency calculations, you can use study-wide sample counts as the denominator (all genes equally covered)
 
-## Available Clinical Attributes
-- CANCER_TYPE_DETAILED (159 samples)
-- MUTATION_COUNT (159 samples)
-- DISEASE_TYPE (159 samples)
-- TMB_NONSYNONYMOUS (159 samples)
-- ONCOTREE_CODE (159 samples)
-- CANCER_TYPE (159 samples)
-- SPECIMEN_TYPE (159 samples)
-- OS_MONTHS (1 samples)
-- RACE (1 samples)
-- PROJECT_ID (1 samples)
-- DAYS_TO_DEATH (1 samples)
-- PRIMARY_SITE_PATIENT (1 samples)
-- ETHNICITY (1 samples)
-- AGE (1 samples)
-- DAYS_TO_BIRTH (1 samples)
+## Clinical Attributes - Semantic Guide
 
-## Top Mutated Genes
-- TP53: 32 samples
-- MUC16: 16 samples
-- TTN: 16 samples
-- ATRX: 11 samples
-- DNAH9: 10 samples
-- RB1: 8 samples
-- MUC4: 7 samples
-- PCLO: 7 samples
-- DMD: 7 samples
-- CNTNAP5: 7 samples
+### Patient Demographics
+| Attribute | Description | Notes |
+|-----------|-------------|-------|
+| `AGE` | Age at diagnosis | In years; pediatric population |
+| `SEX` | Patient sex | Male, Female |
+| `RACE` | Patient race | Per NIH categories |
+| `ETHNICITY` | Patient ethnicity | Hispanic/Latino status |
 
-## Sample Types
+### Disease Characteristics
+| Attribute | Description | Notes |
+|-----------|-------------|-------|
+| `DISEASE` | Disease type | Should be "Osteosarcoma" |
+| `TUMOR_SITE` | Primary tumor location | e.g., Femur, Tibia |
+| `HISTOLOGY` | Histological subtype | Osteoblastic, Chondroblastic, etc. |
 
-## Query Examples
+### Clinical Outcomes
+| Attribute | Description | Notes |
+|-----------|-------------|-------|
+| `OS_MONTHS` | Overall survival in months | Time from diagnosis |
+| `OS_STATUS` | Overall survival status | 0:LIVING, 1:DECEASED |
+| `EFS_MONTHS` | Event-free survival in months | Time to first event |
+| `EFS_STATUS` | Event-free survival status | 0:No event, 1:Event |
 
-```sql
--- Get all samples
-SELECT DISTINCT sample_unique_id, patient_unique_id
-FROM clinical_data_derived
-WHERE cancer_study_identifier = 'os_target_gdc';
+### Treatment Response
+| Attribute | Description |
+|-----------|-------------|
+| `PERCENT_NECROSIS` | Tumor necrosis percentage post-chemotherapy |
+| `NECROSIS_GROUP` | Grouped necrosis response |
 
--- Get mutations for a gene
-SELECT sample_unique_id, hugo_gene_symbol, mutation_variant, mutation_type
-FROM genomic_event_derived
-WHERE cancer_study_identifier = 'os_target_gdc'
-  AND hugo_gene_symbol = 'TP53'
-  AND variant_type = 'mutation';
-```
-
-## Notes
-<!-- Add study-specific notes, caveats, or tips here -->
+## Notes & Caveats
+- This is a pediatric cancer cohort; age distribution is younger than adult studies
+- WES coverage means no gene panel filtering needed for frequency calculations
+- Part of TARGET consortium; integrated with other pediatric cancer data
