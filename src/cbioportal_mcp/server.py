@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 
 # Resource directory for markdown guides
 RESOURCES_DIR = Path(__file__).parent.parent.parent / "resources"
+STUDY_GUIDES_DIR = RESOURCES_DIR / "study-guides"
 
 def _load_resource(filename: str) -> str:
     """Load a resource guide from the resources directory."""
@@ -23,6 +24,19 @@ def _load_resource(filename: str) -> str:
         logger.error(f"Resource file not found: {resource_path}")
         return f"Error: Resource file not found: {filename}"
     return resource_path.read_text()
+
+def _load_study_guide(study_id: str) -> str | None:
+    """Load a study guide from the study-guides directory if it exists."""
+    study_path = STUDY_GUIDES_DIR / f"{study_id}.md"
+    if study_path.exists():
+        return study_path.read_text()
+    return None
+
+def _list_available_study_guides() -> list[str]:
+    """List all available pre-generated study guides."""
+    if not STUDY_GUIDES_DIR.exists():
+        return []
+    return [f.stem for f in STUDY_GUIDES_DIR.glob("*.md")]
 
 # Create FastMCP instance
 mcp = FastMCP(
@@ -309,14 +323,12 @@ def read_mcp_resource(uri: str) -> str:
 
 @mcp.tool()
 def get_study_guide(study_id: str) -> str:
-    """Get a dynamic guide for a specific cBioPortal study.
+    """Get a guide for a specific cBioPortal study.
     
-    Queries the database to generate study-specific information including:
-    - Basic study info (name, description, patient/sample counts)
-    - Available clinical attributes
-    - Available data types (mutations, CNA, expression, etc.)
-    - Gene panels used
-    - Top mutated genes
+    First checks for a pre-generated guide in resources/study-guides/{study_id}.md.
+    If not found, dynamically generates one by querying the database.
+    
+    Pre-generated guides may include curated notes and tips specific to each study.
     
     Args:
         study_id: The cancer study identifier (e.g., "msk_chord_2024", "brca_tcga_pan_can_atlas_2018")
@@ -324,6 +336,14 @@ def get_study_guide(study_id: str) -> str:
     Returns:
         A markdown-formatted guide specific to the requested study
     """
+    # First, check for a pre-generated guide file
+    static_guide = _load_study_guide(study_id)
+    if static_guide:
+        logger.info(f"Loaded static study guide for {study_id}")
+        return static_guide
+    
+    # Fall back to dynamic generation
+    logger.info(f"Generating dynamic study guide for {study_id}")
     try:
         guide_sections = []
         
@@ -488,13 +508,16 @@ WHERE cancer_study_identifier = '{study_id}'
 def list_studies(search: str = None, limit: int = 20) -> list[dict]:
     """List available cBioPortal studies.
     
+    Studies with pre-generated guides (in resources/study-guides/) will have has_guide=True.
+    
     Args:
         search: Optional search term to filter studies by name or identifier
         limit: Maximum number of studies to return (default 20)
     
     Returns:
-        List of studies with their identifiers, names, and sample counts
+        List of studies with their identifiers, names, sample counts, and guide availability
     """
+    available_guides = set(_list_available_study_guides())
     try:
         if search:
             query = f"""
@@ -526,11 +549,28 @@ def list_studies(search: str = None, limit: int = 20) -> list[dict]:
                 LIMIT {limit}
             """
         
-        return run_select_query(query)
+        results = run_select_query(query)
+        
+        # Add has_guide field
+        for study in results:
+            study_id = study.get('cancer_study_identifier', '')
+            study['has_guide'] = study_id in available_guides
+        
+        return results
         
     except Exception as e:
         logger.error(f"list_studies error: {e}")
         return [{"error": str(e)}]
+
+
+@mcp.tool()
+def list_study_guides() -> list[str]:
+    """List all studies that have pre-generated guides available.
+    
+    Returns:
+        List of study identifiers that have curated guides in resources/study-guides/
+    """
+    return _list_available_study_guides()
 
 
 if __name__ == "__main__":
