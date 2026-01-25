@@ -263,6 +263,71 @@ FROM genomic_event_derived
 GROUP BY hugo_gene_symbol;
 ```
 
+## CNA and Column Name Pitfalls
+
+### 11. 🚨 CNA VALUES ARE NUMERIC, NOT STRINGS
+
+#### ❌ Wrong: Using string values for CNA
+```sql
+-- INCORRECT - cna_alteration is numeric!
+SELECT * FROM genomic_event_derived
+WHERE cna_alteration = 'AMP';
+```
+
+#### ✅ Correct: Use numeric values
+```sql
+-- CORRECT - Use numeric codes
+SELECT * FROM genomic_event_derived
+WHERE cna_alteration = 2;   -- 2 = Amplification
+-- OR
+WHERE cna_alteration = -2;  -- -2 = Homozygous Deletion
+```
+
+### 12. 🚨 WRONG COLUMN NAMES
+
+#### ❌ Wrong: Using non-existent column names
+```sql
+-- INCORRECT - 'protein_change' doesn't exist
+SELECT protein_change FROM genomic_event_derived;
+```
+
+#### ✅ Correct: Use actual column names
+```sql
+-- CORRECT - Use 'mutation_variant' for protein changes
+SELECT mutation_variant FROM genomic_event_derived;
+```
+
+**Key column reference:**
+| Wrong | Correct |
+|-------|---------|
+| `protein_change` | `mutation_variant` |
+| `amino_acid_change` | `mutation_variant` |
+
+## ClickHouse-Specific Pitfalls
+
+### 13. 🚨 CTE COLUMN REFERENCE ISSUES
+
+ClickHouse has limitations with CTEs - you can't always reference CTE column aliases in outer expressions.
+
+#### ❌ Wrong: Referencing CTE aliases in calculations
+```sql
+-- MAY FAIL - CTE alias reference issues
+WITH stats AS (
+    SELECT patient_id, MAX(CASE WHEN gene='TP53' THEN 1 ELSE 0 END) as tp53
+    FROM mutations GROUP BY patient_id
+)
+SELECT SUM(tp53) FROM stats;  -- 'tp53' may not be recognized
+```
+
+#### ✅ Correct: Use subquery instead
+```sql
+-- CORRECT - Use subquery for complex aggregations
+SELECT SUM(tp53) FROM (
+    SELECT patient_id, MAX(CASE WHEN gene='TP53' THEN 1 ELSE 0 END) as tp53
+    FROM mutations GROUP BY patient_id
+);
+```
+
 ## Best Practices Summary
 
 1. **Always use gene-specific denominators** for mutation frequencies
@@ -275,6 +340,9 @@ GROUP BY hugo_gene_symbol;
 8. **Use proper join keys and conditions**
 9. **Avoid cartesian products**
 10. **Use derived tables when possible** for better performance
+11. **Use numeric values for CNA** (2=AMP, -2=HOMDEL)
+12. **Use correct column names** (`mutation_variant` not `protein_change`)
+13. **Use subqueries instead of CTEs** for complex aggregations in ClickHouse
 
 ## Validation Checklist
 
@@ -286,3 +354,5 @@ Before trusting your results, ask:
 - [ ] Did I handle NULL values appropriately?
 - [ ] Do my join conditions make biological sense?
 - [ ] Are my sample counts reasonable for the study?
+- [ ] Did I use numeric values for CNA alterations (not strings)?
+- [ ] Am I using the correct column names (mutation_variant, not protein_change)?

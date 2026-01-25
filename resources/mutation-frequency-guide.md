@@ -164,8 +164,36 @@ ORDER BY sample_frequency_percent DESC;
 - **Mutation status filtering**: Exclude `UNCALLED` mutations for accurate counts
 - **Study-specific analysis**: Always filter by specific cancer study for consistent results
 - **Memory efficiency**: Sample-level analysis is more memory-efficient than patient-level for large datasets
-- **Always use fully qualified table names**: Include database prefix in queries
 - **Be efficient**: Minimize database calls where possible
+
+## Copy Number Alteration (CNA) Queries
+
+CNA data uses **numeric values**, not strings:
+- `cna_alteration = 2` → Amplification (AMP)
+- `cna_alteration = -2` → Homozygous Deletion (HOMDEL)
+
+```sql
+-- Get amplified genes
+SELECT hugo_gene_symbol, COUNT(DISTINCT sample_unique_id) as amp_count
+FROM genomic_event_derived
+WHERE variant_type = 'cna'
+  AND cna_alteration = 2  -- AMP (not 'AMP')
+  AND cancer_study_identifier = 'your_study'
+GROUP BY hugo_gene_symbol
+ORDER BY amp_count DESC;
+```
+
+## Key Column Names in genomic_event_derived
+
+| Column | Description |
+|--------|-------------|
+| `hugo_gene_symbol` | Gene symbol (e.g., TP53, KRAS) |
+| `mutation_variant` | Protein change (e.g., R175H, G12D) - NOT `protein_change` |
+| `mutation_type` | Mutation type (Missense_Mutation, Nonsense_Mutation, etc.) |
+| `mutation_status` | SOMATIC, UNKNOWN, UNCALLED |
+| `variant_type` | mutation, cna, structural_variant |
+| `cna_alteration` | 2 (AMP) or -2 (HOMDEL) |
+| `off_panel` | 0 (on-panel) or 1 (off-panel) |
 
 ## Common Mistakes to Avoid
 

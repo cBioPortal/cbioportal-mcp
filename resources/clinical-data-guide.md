@@ -75,8 +75,41 @@ ORDER BY patient_attribute, attr_id;
 - `CANCER_TYPE_DETAILED`: Specific cancer subtype
 - `SEX`: Patient gender
 - `AGE`: Age at diagnosis
-- `OVERALL_SURVIVAL_MONTHS`: Overall survival time
-- `OVERALL_SURVIVAL_STATUS`: Alive/Deceased status
+- `OS_MONTHS`: Overall survival time in months
+- `OS_STATUS`: Overall survival status (0:LIVING, 1:DECEASED or similar)
+
+## Survival Analysis Queries
+
+Survival data is stored as clinical attributes. Common patterns:
+
+```sql
+-- Get survival data for a study
+SELECT 
+    patient_unique_id,
+    MAX(CASE WHEN attribute_name = 'OS_MONTHS' THEN toFloat64OrNull(attribute_value) END) as os_months,
+    MAX(CASE WHEN attribute_name = 'OS_STATUS' THEN attribute_value END) as os_status
+FROM clinical_data_derived
+WHERE cancer_study_identifier = 'your_study'
+GROUP BY patient_unique_id;
+```
+
+```sql
+-- Compare survival between groups (e.g., mutated vs wild-type)
+WITH patient_mutation AS (
+    SELECT DISTINCT patient_unique_id, 1 as is_mutated
+    FROM genomic_event_derived
+    WHERE hugo_gene_symbol = 'TP53' AND variant_type = 'mutation'
+        AND cancer_study_identifier = 'your_study'
+)
+SELECT 
+    CASE WHEN m.is_mutated = 1 THEN 'Mutated' ELSE 'Wild-type' END as group_name,
+    median(toFloat64OrNull(c.attribute_value)) as median_os_months
+FROM clinical_data_derived c
+LEFT JOIN patient_mutation m ON c.patient_unique_id = m.patient_unique_id
+WHERE c.cancer_study_identifier = 'your_study'
+    AND c.attribute_name = 'OS_MONTHS'
+GROUP BY group_name;
+```
 
 ### Cancer Type Selection Guidance:
 **CANCER_TYPE vs CANCER_TYPE_DETAILED**: Choose based on question specificity
