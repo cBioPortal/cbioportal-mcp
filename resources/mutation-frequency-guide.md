@@ -14,7 +14,7 @@ For accurate gene mutation frequency calculations, you must use gene-specific pr
 **genomic_event_derived**: Pre-joined mutation + sample + gene data
 - Contains: sample_unique_id, hugo_gene_symbol, mutation_type, mutation_status, variant_type
 - Filter: `variant_type = 'mutation'` for mutations
-- Filter by study: `cancer_study_identifier = 'msk_chord_2024'`
+- Filter by study: `cancer_study_identifier = 'your_study_id'`
 
 **sample_to_gene_panel_derived**: Gene-specific profiling coverage data
 - Use for calculating gene-specific profiled sample denominators
@@ -124,7 +124,7 @@ WITH mutation_counts AS (
     WHERE
         variant_type = 'mutation'
         AND mutation_status != 'UNCALLED'
-        AND cancer_study_identifier = 'msk_chord_2024'
+        AND cancer_study_identifier = 'your_study_id'
     GROUP BY entrez_gene_id, hugo_gene_symbol
 ),
 -- Gene-specific profiled samples
@@ -138,7 +138,7 @@ profiled_counts AS (
     JOIN gene g ON gpl.gene_id = g.entrez_gene_id
     WHERE
         stgp.alteration_type = 'MUTATION_EXTENDED'
-        AND stgp.cancer_study_identifier = 'msk_chord_2024'
+        AND stgp.cancer_study_identifier = 'your_study_id'
     GROUP BY g.hugo_gene_symbol
 )
 -- Calculate frequencies with proper denominators

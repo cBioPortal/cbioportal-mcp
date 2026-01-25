@@ -13,7 +13,7 @@ Every query should specify a study to ensure consistent results:
 SELECT *
 FROM your_table
 WHERE
-    cancer_study_identifier = 'msk_chord_2024'
+    cancer_study_identifier = 'your_study_id'
     -- Additional filters...
 ```
 
@@ -44,7 +44,7 @@ FROM cancer_study cs
 LEFT JOIN patient p ON cs.cancer_study_id = p.cancer_study_id
 LEFT JOIN sample s ON p.internal_id = s.patient_id
 WHERE
-    cs.cancer_study_identifier = 'msk_chord_2024'
+    cs.cancer_study_identifier = 'your_study_id'
 GROUP BY cs.cancer_study_identifier, cs.name, cs.description;
 ```
 
@@ -66,7 +66,7 @@ SELECT DISTINCT
     patient_unique_id
 FROM clinical_data_derived
 WHERE
-    cancer_study_identifier = 'msk_chord_2024'
+    cancer_study_identifier = 'your_study_id'
     AND attribute_name = 'SAMPLE_TYPE'
     AND attribute_value = 'Primary';
 ```
@@ -81,7 +81,7 @@ SELECT
     COUNT(DISTINCT patient_unique_id) as patient_count
 FROM clinical_data_derived
 WHERE
-    cancer_study_identifier = 'msk_chord_2024'
+    cancer_study_identifier = 'your_study_id'
     AND attribute_name = 'SAMPLE_TYPE'
 GROUP BY attribute_value
 ORDER BY sample_count DESC;
@@ -102,7 +102,7 @@ SELECT DISTINCT
     patient_unique_id
 FROM clinical_data_derived
 WHERE
-    cancer_study_identifier = 'msk_chord_2024'
+    cancer_study_identifier = 'your_study_id'
     AND attribute_name = 'CANCER_TYPE'
     AND attribute_value = 'Breast Cancer';
 ```
@@ -119,7 +119,7 @@ FROM clinical_data_derived broad
 JOIN clinical_data_derived detailed
     ON broad.sample_unique_id = detailed.sample_unique_id
 WHERE
-    broad.cancer_study_identifier = 'msk_chord_2024'
+    broad.cancer_study_identifier = 'your_study_id'
     AND broad.attribute_name = 'CANCER_TYPE'
     AND detailed.attribute_name = 'CANCER_TYPE_DETAILED'
 GROUP BY broad.attribute_value, detailed.attribute_value
@@ -136,7 +136,7 @@ WITH filtered_samples AS (
     SELECT DISTINCT sample_unique_id, patient_unique_id
     FROM clinical_data_derived
     WHERE
-        cancer_study_identifier = 'msk_chord_2024'
+        cancer_study_identifier = 'your_study_id'
         AND (
             (attribute_name = 'SAMPLE_TYPE' AND attribute_value = 'Primary')
             OR (attribute_name = 'CANCER_TYPE' AND attribute_value = 'Breast Cancer')
@@ -159,7 +159,7 @@ WITH patient_filters AS (
         MAX(CASE WHEN attribute_name = 'AGE' THEN CAST(attribute_value AS Float64) END) as age
     FROM clinical_data_derived
     WHERE
-        cancer_study_identifier = 'msk_chord_2024'
+        cancer_study_identifier = 'your_study_id'
         AND attribute_name IN ('SEX', 'AGE')
     GROUP BY patient_unique_id
 )
@@ -183,7 +183,7 @@ SELECT DISTINCT
     sample_unique_id
 FROM clinical_data_derived
 WHERE
-    cancer_study_identifier = 'msk_chord_2024'
+    cancer_study_identifier = 'your_study_id'
     AND attribute_name = 'PLATFORM'
     AND attribute_value LIKE '%Illumina%';
 ```
@@ -197,7 +197,7 @@ SELECT DISTINCT
     CAST(attribute_value AS Float64) as tumor_purity
 FROM clinical_data_derived
 WHERE
-    cancer_study_identifier = 'msk_chord_2024'
+    cancer_study_identifier = 'your_study_id'
     AND attribute_name = 'TUMOR_PURITY'
     AND CAST(attribute_value AS Float64) >= 0.3;  -- >= 30% purity
 ```
@@ -211,12 +211,12 @@ WHERE
 SELECT DISTINCT sample_unique_id
 FROM clinical_data_derived
 WHERE
-    cancer_study_identifier = 'msk_chord_2024'
+    cancer_study_identifier = 'your_study_id'
     AND sample_unique_id NOT IN (
         SELECT sample_unique_id
         FROM clinical_data_derived
         WHERE
-            cancer_study_identifier = 'msk_chord_2024'
+            cancer_study_identifier = 'your_study_id'
             AND attribute_name = 'SAMPLE_TYPE'
             AND attribute_value IN ('Normal', 'Blood')
     );
@@ -231,7 +231,7 @@ SELECT DISTINCT
     cd.patient_unique_id
 FROM clinical_data_derived cd
 WHERE
-    cd.cancer_study_identifier = 'msk_chord_2024'
+    cd.cancer_study_identifier = 'your_study_id'
     AND EXISTS (
         SELECT 1
         FROM genomic_event_derived ged

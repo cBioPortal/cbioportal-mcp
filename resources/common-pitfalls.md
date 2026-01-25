@@ -15,9 +15,9 @@ SELECT
     COUNT(DISTINCT sample_unique_id) as altered_samples,
     (SELECT COUNT(DISTINCT sample_unique_id)
      FROM genomic_event_derived
-     WHERE cancer_study_identifier = 'msk_chord_2024') as total_samples
+     WHERE cancer_study_identifier = 'your_study_id') as total_samples
 FROM genomic_event_derived
-WHERE variant_type = 'mutation' AND cancer_study_identifier = 'msk_chord_2024'
+WHERE variant_type = 'mutation' AND cancer_study_identifier = 'your_study_id'
 GROUP BY hugo_gene_symbol;
 ```
 **Problem**: Different genes have different profiling coverage - you can't use study-wide totals!
@@ -59,7 +59,7 @@ JOIN gene_panel_list gpl ON gp.internal_id = gpl.internal_id
 JOIN gene g ON gpl.gene_id = g.entrez_gene_id
 WHERE stgp.alteration_type = 'MUTATION_EXTENDED'
   AND g.hugo_gene_symbol = 'TP53'  -- Replace with each gene from Step 1
-  AND stgp.cancer_study_identifier = 'msk_chord_2024';
+  AND stgp.cancer_study_identifier = 'your_study_id';
 
 -- STEP 3: Calculate frequency = numberOfAlteredSamplesOnPanel / numberOfProfiledSamples * 100
 ```
@@ -128,7 +128,7 @@ GROUP BY hugo_gene_symbol;
 -- CORRECT - Study-specific analysis
 SELECT hugo_gene_symbol, COUNT(*) as mutations
 FROM genomic_event_derived
-WHERE variant_type = 'mutation' AND cancer_study_identifier = 'msk_chord_2024'
+WHERE variant_type = 'mutation' AND cancer_study_identifier = 'your_study_id'
 GROUP BY hugo_gene_symbol;
 ```
 
@@ -152,13 +152,13 @@ SELECT
     'Patient Level' as analysis_level,
     COUNT(DISTINCT patient_unique_id) as count
 FROM clinical_data_derived
-WHERE cancer_study_identifier = 'msk_chord_2024'
+WHERE cancer_study_identifier = 'your_study_id'
 UNION ALL
 SELECT
     'Sample Level' as analysis_level,
     COUNT(DISTINCT sample_unique_id) as count
 FROM clinical_data_derived
-WHERE cancer_study_identifier = 'msk_chord_2024';
+WHERE cancer_study_identifier = 'your_study_id';
 ```
 
 ## Data Type Pitfalls
@@ -227,8 +227,8 @@ JOIN sample s ON p.internal_id = s.patient_id;
 -- INCORRECT - Creates cartesian product
 SELECT *
 FROM genomic_event_derived g, clinical_data_derived c
-WHERE g.cancer_study_identifier = 'msk_chord_2024'
-  AND c.cancer_study_identifier = 'msk_chord_2024';
+WHERE g.cancer_study_identifier = 'your_study_id'
+  AND c.cancer_study_identifier = 'your_study_id';
 ```
 
 #### ✅ Correct: Proper join condition
@@ -237,7 +237,7 @@ WHERE g.cancer_study_identifier = 'msk_chord_2024'
 SELECT *
 FROM genomic_event_derived g
 JOIN clinical_data_derived c ON g.sample_unique_id = c.sample_unique_id
-WHERE g.cancer_study_identifier = 'msk_chord_2024';
+WHERE g.cancer_study_identifier = 'your_study_id';
 ```
 
 ## Performance Pitfalls
