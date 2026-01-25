@@ -255,6 +255,9 @@ def list_mcp_resources() -> list[dict]:
     """List all available MCP resources with their URIs and descriptions.
 
     Call this tool first to see what resource guides are available before answering complex queries.
+    
+    Note: For study-specific guides, use the `get_study_guide(study_id)` tool instead.
+    Use `list_studies(search)` to find available studies.
     """
     return [
         {
@@ -272,6 +275,10 @@ def list_mcp_resources() -> list[dict]:
         {
             "uri": "cbioportal://common-pitfalls",
             "description": "Guide to avoid common mistakes when querying cBioPortal data"
+        },
+        {
+            "uri": "cbioportal://study-guide/{study_id}",
+            "description": "Dynamic study-specific guide - use get_study_guide(study_id) tool to generate"
         }
     ]
 
@@ -298,6 +305,232 @@ def read_mcp_resource(uri: str) -> str:
         return f"Resource not found: {uri}. Available resources: {available}"
 
     return resources[uri]
+
+
+@mcp.tool()
+def get_study_guide(study_id: str) -> str:
+    """Get a dynamic guide for a specific cBioPortal study.
+    
+    Queries the database to generate study-specific information including:
+    - Basic study info (name, description, patient/sample counts)
+    - Available clinical attributes
+    - Available data types (mutations, CNA, expression, etc.)
+    - Gene panels used
+    - Top mutated genes
+    
+    Args:
+        study_id: The cancer study identifier (e.g., "msk_chord_2024", "brca_tcga_pan_can_atlas_2018")
+    
+    Returns:
+        A markdown-formatted guide specific to the requested study
+    """
+    try:
+        guide_sections = []
+        
+        # 1. Basic study info
+        study_info = run_select_query(f"""
+            SELECT 
+                cancer_study_identifier,
+                name,
+                description,
+                type_of_cancer_id
+            FROM cancer_study 
+            WHERE cancer_study_identifier = '{study_id}'
+        """)
+        
+        if not study_info:
+            return f"Study '{study_id}' not found. Use clickhouse_list_tables or query cancer_study table to find valid study identifiers."
+        
+        info = study_info[0]
+        guide_sections.append(f"""# Study Guide: {info.get('name', study_id)}
+
+**Study ID:** `{study_id}`
+**Cancer Type:** {info.get('type_of_cancer_id', 'N/A')}
+**Description:** {info.get('description', 'N/A')}
+""")
+        
+        # 2. Patient and sample counts
+        counts = run_select_query(f"""
+            SELECT 
+                COUNT(DISTINCT patient_unique_id) as patient_count,
+                COUNT(DISTINCT sample_unique_id) as sample_count
+            FROM clinical_data_derived 
+            WHERE cancer_study_identifier = '{study_id}'
+        """)
+        if counts:
+            c = counts[0]
+            guide_sections.append(f"""## Cohort Statistics
+- **Patients:** {c.get('patient_count', 'N/A'):,}
+- **Samples:** {c.get('sample_count', 'N/A'):,}
+""")
+        
+        # 3. Available data types
+        profiles = run_select_query(f"""
+            SELECT DISTINCT 
+                gp.genetic_alteration_type,
+                gp.datatype,
+                gp.name
+            FROM genetic_profile gp
+            JOIN cancer_study cs ON gp.cancer_study_id = cs.cancer_study_id
+            WHERE cs.cancer_study_identifier = '{study_id}'
+        """)
+        if profiles:
+            guide_sections.append("## Available Data Types\n")
+            for p in profiles:
+                guide_sections.append(f"- **{p.get('genetic_alteration_type', 'Unknown')}**: {p.get('name', 'N/A')}")
+            guide_sections.append("")
+        
+        # 4. Gene panels used
+        panels = run_select_query(f"""
+            SELECT DISTINCT gene_panel_id, COUNT(DISTINCT sample_unique_id) as sample_count
+            FROM sample_to_gene_panel_derived
+            WHERE cancer_study_identifier = '{study_id}'
+            GROUP BY gene_panel_id
+            ORDER BY sample_count DESC
+            LIMIT 10
+        """)
+        if panels:
+            guide_sections.append("## Gene Panels\n")
+            for p in panels:
+                panel_id = p.get('gene_panel_id', 'Unknown')
+                count = p.get('sample_count', 0)
+                if panel_id == 'WES':
+                    guide_sections.append(f"- **{panel_id}** (Whole Exome): {count:,} samples — all genes profiled")
+                else:
+                    guide_sections.append(f"- **{panel_id}**: {count:,} samples")
+            guide_sections.append("")
+        
+        # 5. Clinical attributes available
+        attrs = run_select_query(f"""
+            SELECT DISTINCT attribute_name, COUNT(DISTINCT sample_unique_id) as coverage
+            FROM clinical_data_derived
+            WHERE cancer_study_identifier = '{study_id}'
+            GROUP BY attribute_name
+            ORDER BY coverage DESC
+            LIMIT 20
+        """)
+        if attrs:
+            guide_sections.append("## Available Clinical Attributes\n")
+            guide_sections.append("| Attribute | Samples with Data |")
+            guide_sections.append("|-----------|------------------|")
+            for a in attrs:
+                guide_sections.append(f"| {a.get('attribute_name', 'Unknown')} | {a.get('coverage', 0):,} |")
+            guide_sections.append("")
+        
+        # 6. Top mutated genes (if mutation data exists)
+        top_genes = run_select_query(f"""
+            SELECT 
+                hugo_gene_symbol,
+                COUNT(DISTINCT sample_unique_id) as altered_samples
+            FROM genomic_event_derived
+            WHERE cancer_study_identifier = '{study_id}'
+                AND variant_type = 'mutation'
+                AND mutation_status != 'UNCALLED'
+            GROUP BY hugo_gene_symbol
+            ORDER BY altered_samples DESC
+            LIMIT 10
+        """)
+        if top_genes:
+            guide_sections.append("## Top Mutated Genes\n")
+            guide_sections.append("| Gene | Altered Samples |")
+            guide_sections.append("|------|----------------|")
+            for g in top_genes:
+                guide_sections.append(f"| {g.get('hugo_gene_symbol', 'Unknown')} | {g.get('altered_samples', 0):,} |")
+            guide_sections.append("")
+        
+        # 7. Sample type distribution
+        sample_types = run_select_query(f"""
+            SELECT attribute_value as sample_type, COUNT(DISTINCT sample_unique_id) as count
+            FROM clinical_data_derived
+            WHERE cancer_study_identifier = '{study_id}'
+                AND attribute_name = 'SAMPLE_TYPE'
+            GROUP BY attribute_value
+            ORDER BY count DESC
+        """)
+        if sample_types:
+            guide_sections.append("## Sample Types\n")
+            for st in sample_types:
+                guide_sections.append(f"- **{st.get('sample_type', 'Unknown')}**: {st.get('count', 0):,} samples")
+            guide_sections.append("")
+        
+        # 8. Query tips for this study
+        guide_sections.append(f"""## Query Tips for {study_id}
+
+```sql
+-- Get all samples in this study
+SELECT DISTINCT sample_unique_id, patient_unique_id
+FROM clinical_data_derived
+WHERE cancer_study_identifier = '{study_id}';
+
+-- Get mutations for a specific gene
+SELECT sample_unique_id, hugo_gene_symbol, mutation_variant, mutation_type
+FROM genomic_event_derived
+WHERE cancer_study_identifier = '{study_id}'
+    AND hugo_gene_symbol = 'TP53'
+    AND variant_type = 'mutation';
+
+-- Get clinical data for specific attributes
+SELECT sample_unique_id, attribute_name, attribute_value
+FROM clinical_data_derived
+WHERE cancer_study_identifier = '{study_id}'
+    AND attribute_name IN ('CANCER_TYPE', 'SAMPLE_TYPE', 'OS_MONTHS');
+```
+""")
+        
+        return "\n".join(guide_sections)
+        
+    except Exception as e:
+        logger.error(f"get_study_guide error: {e}")
+        return f"Error generating study guide for '{study_id}': {str(e)}"
+
+
+@mcp.tool()
+def list_studies(search: str = None, limit: int = 20) -> list[dict]:
+    """List available cBioPortal studies.
+    
+    Args:
+        search: Optional search term to filter studies by name or identifier
+        limit: Maximum number of studies to return (default 20)
+    
+    Returns:
+        List of studies with their identifiers, names, and sample counts
+    """
+    try:
+        if search:
+            query = f"""
+                SELECT 
+                    cs.cancer_study_identifier,
+                    cs.name,
+                    cs.type_of_cancer_id,
+                    COUNT(DISTINCT cd.sample_unique_id) as sample_count
+                FROM cancer_study cs
+                LEFT JOIN clinical_data_derived cd ON cs.cancer_study_identifier = cd.cancer_study_identifier
+                WHERE cs.cancer_study_identifier LIKE '%{search}%' 
+                    OR cs.name LIKE '%{search}%'
+                    OR cs.type_of_cancer_id LIKE '%{search}%'
+                GROUP BY cs.cancer_study_identifier, cs.name, cs.type_of_cancer_id
+                ORDER BY sample_count DESC
+                LIMIT {limit}
+            """
+        else:
+            query = f"""
+                SELECT 
+                    cs.cancer_study_identifier,
+                    cs.name,
+                    cs.type_of_cancer_id,
+                    COUNT(DISTINCT cd.sample_unique_id) as sample_count
+                FROM cancer_study cs
+                LEFT JOIN clinical_data_derived cd ON cs.cancer_study_identifier = cd.cancer_study_identifier
+                GROUP BY cs.cancer_study_identifier, cs.name, cs.type_of_cancer_id
+                ORDER BY sample_count DESC
+                LIMIT {limit}
+            """
+        
+        return run_select_query(query)
+        
+    except Exception as e:
+        logger.error(f"list_studies error: {e}")
+        return [{"error": str(e)}]
 
 
 if __name__ == "__main__":
