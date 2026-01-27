@@ -284,14 +284,17 @@ def clickhouse_list_table_columns(table: str) -> dict[str, list[dict] | str]:
 def run_select_query(query: str) -> list[dict]:
     """
     Execute arbitrary ClickHouse SQL SELECT query.
+    
+    Note: CTEs (WITH ... AS) are supported. Query validation is handled at the
+    database level via read-only user permissions (see authentication/permissions.py).
 
     Returns:
         list: A list of rows, where each row is a dictionary with column names as keys and corresponding values.
     """
     from mcp_clickhouse.mcp_server import run_select_query
 
-    if not query.strip().upper().startswith("SELECT"):
-        raise ValueError(f"Non select queries are forbidden: '{query}'. Skipping the query.")
+    # DB-level read-only permissions (enforced on startup) prevent non-SELECT queries,
+    # so we don't need application-level query filtering. This allows CTEs (WITH ... AS).
     logger.debug("run_select_query: delegate the query to run_select_query tool of ClickHouse MCP")
     ch_query_result = run_select_query(query)
     result = zip_select_query_result(ch_query_result)
