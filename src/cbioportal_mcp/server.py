@@ -80,7 +80,8 @@ def _list_available_study_guides() -> list[str]:
     """List all available pre-generated study guides."""
     if not STUDY_GUIDES_DIR.exists():
         return []
-    return [f.stem for f in STUDY_GUIDES_DIR.glob("*.md")]
+    # Exclude template/hidden files (e.g., names starting with "_")
+    return [f.stem for f in STUDY_GUIDES_DIR.glob("*.md") if not f.stem.startswith("_")]
 
 # Create FastMCP instance
 mcp = FastMCP(
