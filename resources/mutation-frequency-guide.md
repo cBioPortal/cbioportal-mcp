@@ -105,7 +105,7 @@ WHERE alteration_type = 'MUTATION_EXTENDED'
 6. **Replace gene symbols**: Replace 'TP53' in profiling queries with actual gene symbol for each gene
 
 ### Expected Results Format:
-- **Example for MSK-CHORD TP53**: expect ~25,040 profiled samples, giving 13,105/25,040 = 52.4%
+- **Example for MSK-CHORD TP53 (illustrative only)**: sample % = (# Samples / Profiled Samples) × 100. For example, if a gene has 13,105 altered samples out of 25,040 profiled, the sample frequency is (13,105 / 25,040) × 100 ≈ 52.4%. Actual counts will depend on the specific dataset version and filters used.
 - **Each gene varies**: TP53, MUC16, TTN, etc. will have different profiling coverage
 
 ## Complete Analysis Example
