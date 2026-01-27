@@ -229,6 +229,10 @@ def sample_filtering_guide() -> str:
 def common_pitfalls_guide() -> str:
     return _common_pitfalls_guide_text()
 
+@mcp.resource("cbioportal://treatment-guide")
+def treatment_guide() -> str:
+    return _treatment_guide_text()
+
 
 @mcp.tool(
     description="""
@@ -596,6 +600,9 @@ WHERE cancer_study_identifier = '{study_id}'
         return f"Error generating study guide for '{study_id}': {str(e)}"
 
 
+# Maximum allowed limit for list queries to prevent expensive unbounded queries
+MAX_LIST_LIMIT = 100
+
 @mcp.tool()
 def list_studies(search: str = None, limit: int = 20) -> list[dict]:
     """List available cBioPortal studies.
@@ -604,12 +611,16 @@ def list_studies(search: str = None, limit: int = 20) -> list[dict]:
     
     Args:
         search: Optional search term to filter studies by name or identifier
-        limit: Maximum number of studies to return (default 20)
+        limit: Maximum number of studies to return (default 20, max 100)
     
     Returns:
         List of studies with their identifiers, names, sample counts, and guide availability
     """
     available_guides = set(_list_available_study_guides())
+    
+    # Clamp limit to safe bounds
+    safe_limit = max(1, min(int(limit), MAX_LIST_LIMIT))
+    
     try:
         if search:
             # Sanitize search term to prevent SQL injection
@@ -627,7 +638,7 @@ def list_studies(search: str = None, limit: int = 20) -> list[dict]:
                     OR cs.type_of_cancer_id LIKE '%{safe_search}%'
                 GROUP BY cs.cancer_study_identifier, cs.name, cs.type_of_cancer_id
                 ORDER BY sample_count DESC
-                LIMIT {limit}
+                LIMIT {safe_limit}
             """
         else:
             query = f"""
@@ -640,7 +651,7 @@ def list_studies(search: str = None, limit: int = 20) -> list[dict]:
                 LEFT JOIN clinical_data_derived cd ON cs.cancer_study_identifier = cd.cancer_study_identifier
                 GROUP BY cs.cancer_study_identifier, cs.name, cs.type_of_cancer_id
                 ORDER BY sample_count DESC
-                LIMIT {limit}
+                LIMIT {safe_limit}
             """
         
         results = run_select_query(query)
