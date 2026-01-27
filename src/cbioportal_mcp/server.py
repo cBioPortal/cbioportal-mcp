@@ -67,13 +67,13 @@ def _load_resource(filename: str) -> str:
     if not resource_path.exists():
         logger.error(f"Resource file not found: {resource_path}")
         return f"Error: Resource file not found: {filename}"
-    return resource_path.read_text()
+    return resource_path.read_text(encoding="utf-8")
 
 def _load_study_guide(study_id: str) -> str | None:
     """Load a study guide from the study-guides directory if it exists."""
     study_path = STUDY_GUIDES_DIR / f"{study_id}.md"
     if study_path.exists():
-        return study_path.read_text()
+        return study_path.read_text(encoding="utf-8")
     return None
 
 def _list_available_study_guides() -> list[str]:
