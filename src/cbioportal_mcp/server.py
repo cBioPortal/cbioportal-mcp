@@ -4,6 +4,7 @@
 import logging
 import re
 import sys
+from importlib import resources as importlib_resources
 from pathlib import Path
 from typing import Optional
 from fastmcp import FastMCP
@@ -57,31 +58,60 @@ def _sanitize_search_term(search: str) -> str:
     sanitized = sanitized.replace("_", "\\_")
     return sanitized
 
-# Resource directory for markdown guides
-RESOURCES_DIR = Path(__file__).parent.parent.parent / "resources"
-STUDY_GUIDES_DIR = RESOURCES_DIR / "study-guides"
+# Resource loading using importlib.resources for proper package support
+def _get_resources_path() -> Path:
+    """Get the resources directory path, supporting both installed packages and dev mode."""
+    try:
+        # Python 3.9+ approach using importlib.resources.files
+        return importlib_resources.files("cbioportal_mcp") / "resources"
+    except (TypeError, AttributeError):
+        # Fallback for older Python or if package isn't installed
+        return Path(__file__).parent / "resources"
 
 def _load_resource(filename: str) -> str:
     """Load a resource guide from the resources directory."""
-    resource_path = RESOURCES_DIR / filename
-    if not resource_path.exists():
-        logger.error(f"Resource file not found: {resource_path}")
+    try:
+        resources_path = _get_resources_path()
+        resource_file = resources_path / filename
+        # Use read_text() which works for both Traversable and Path
+        return resource_file.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        logger.error(f"Resource file not found: {filename}")
         return f"Error: Resource file not found: {filename}"
-    return resource_path.read_text(encoding="utf-8")
+    except Exception as e:
+        logger.error(f"Error loading resource {filename}: {e}")
+        return f"Error: Could not load resource: {filename}"
 
 def _load_study_guide(study_id: str) -> str | None:
     """Load a study guide from the study-guides directory if it exists."""
-    study_path = STUDY_GUIDES_DIR / f"{study_id}.md"
-    if study_path.exists():
-        return study_path.read_text(encoding="utf-8")
-    return None
+    try:
+        resources_path = _get_resources_path()
+        study_file = resources_path / "study-guides" / f"{study_id}.md"
+        return study_file.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except Exception as e:
+        logger.error(f"Error loading study guide for {study_id}: {e}")
+        return None
 
 def _list_available_study_guides() -> list[str]:
     """List all available pre-generated study guides."""
-    if not STUDY_GUIDES_DIR.exists():
+    try:
+        resources_path = _get_resources_path()
+        study_guides_path = resources_path / "study-guides"
+        # For Traversable (importlib.resources), iterate contents
+        # For Path, use glob
+        if hasattr(study_guides_path, 'iterdir'):
+            # It's a Path-like object
+            return [f.stem for f in study_guides_path.iterdir() 
+                    if f.name.endswith('.md') and not f.name.startswith('_')]
+        else:
+            # It's a Traversable from importlib.resources
+            return [f.name.removesuffix('.md') for f in study_guides_path.iterdir() 
+                    if f.name.endswith('.md') and not f.name.startswith('_')]
+    except Exception as e:
+        logger.error(f"Error listing study guides: {e}")
         return []
-    # Exclude template/hidden files (e.g., names starting with "_")
-    return [f.stem for f in STUDY_GUIDES_DIR.glob("*.md") if not f.stem.startswith("_")]
 
 # Create FastMCP instance
 mcp = FastMCP(

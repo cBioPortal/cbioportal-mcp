@@ -39,6 +39,10 @@ include = [
     "/pyproject.toml",
 ]
 
+# Include resource files in the package
+[tool.hatch.build.targets.wheel.force-include]
+"src/cbioportal_mcp/resources" = "cbioportal_mcp/resources"
+
 [tool.black]
 line-length = 100
 target-version = ["py310"]
