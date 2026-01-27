@@ -2,6 +2,7 @@
 """cBioPortal MCP Server - FastMCP implementation."""
 
 import logging
+import re
 import sys
 from pathlib import Path
 from typing import Optional
@@ -12,6 +13,49 @@ from cbioportal_mcp.env import get_mcp_config, TransportType
 from cbioportal_mcp.authentication.permissions import ensure_db_permissions
 
 logger = logging.getLogger(__name__)
+
+# Regex pattern for valid cBioPortal study identifiers
+# Allows alphanumeric characters, underscores, and hyphens
+VALID_STUDY_ID_PATTERN = re.compile(r'^[a-zA-Z0-9_-]+$')
+
+def _validate_study_id(study_id: str) -> str:
+    """Validate and sanitize a study ID to prevent SQL injection.
+    
+    Args:
+        study_id: The study identifier to validate
+        
+    Returns:
+        The validated study_id if valid
+        
+    Raises:
+        ValueError: If study_id contains invalid characters
+    """
+    if not study_id:
+        raise ValueError("study_id cannot be empty")
+    if not VALID_STUDY_ID_PATTERN.match(study_id):
+        raise ValueError(
+            f"Invalid study_id '{study_id}'. "
+            "Study IDs may only contain alphanumeric characters, underscores, and hyphens."
+        )
+    return study_id
+
+def _sanitize_search_term(search: str) -> str:
+    """Sanitize a search term by escaping SQL special characters.
+    
+    Args:
+        search: The search term to sanitize
+        
+    Returns:
+        The sanitized search term safe for use in LIKE clauses
+    """
+    if not search:
+        return ""
+    # Escape single quotes by doubling them (SQL standard)
+    # Also escape % and _ which are LIKE wildcards
+    sanitized = search.replace("'", "''")
+    sanitized = sanitized.replace("%", "\\%")
+    sanitized = sanitized.replace("_", "\\_")
+    return sanitized
 
 # Resource directory for markdown guides
 RESOURCES_DIR = Path(__file__).parent.parent.parent / "resources"
@@ -344,6 +388,12 @@ def get_study_guide(study_id: str) -> str:
     Returns:
         A markdown-formatted guide specific to the requested study
     """
+    # Validate study_id to prevent SQL injection
+    try:
+        study_id = _validate_study_id(study_id)
+    except ValueError as e:
+        return f"Error: {str(e)}"
+    
     # First, check for a pre-generated guide file
     static_guide = _load_study_guide(study_id)
     if static_guide:
@@ -528,6 +578,8 @@ def list_studies(search: str = None, limit: int = 20) -> list[dict]:
     available_guides = set(_list_available_study_guides())
     try:
         if search:
+            # Sanitize search term to prevent SQL injection
+            safe_search = _sanitize_search_term(search)
             query = f"""
                 SELECT 
                     cs.cancer_study_identifier,
@@ -536,9 +588,9 @@ def list_studies(search: str = None, limit: int = 20) -> list[dict]:
                     COUNT(DISTINCT cd.sample_unique_id) as sample_count
                 FROM cancer_study cs
                 LEFT JOIN clinical_data_derived cd ON cs.cancer_study_identifier = cd.cancer_study_identifier
-                WHERE cs.cancer_study_identifier LIKE '%{search}%' 
-                    OR cs.name LIKE '%{search}%'
-                    OR cs.type_of_cancer_id LIKE '%{search}%'
+                WHERE cs.cancer_study_identifier LIKE '%{safe_search}%' 
+                    OR cs.name LIKE '%{safe_search}%'
+                    OR cs.type_of_cancer_id LIKE '%{safe_search}%'
                 GROUP BY cs.cancer_study_identifier, cs.name, cs.type_of_cancer_id
                 ORDER BY sample_count DESC
                 LIMIT {limit}
