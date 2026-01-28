@@ -161,6 +161,70 @@ FROM clinical_data_derived
 WHERE cancer_study_identifier = 'your_study_id';
 ```
 
+### 5b. 🚨 SAMPLE TYPE FILTERING ERRORS
+
+#### ❌ WRONG: Using `sample.sample_type` column instead of clinical attribute
+```sql
+-- INCORRECT - sample.sample_type is NOT the primary/metastatic distinction!
+SELECT COUNT(*) as primary_samples
+FROM sample s
+JOIN patient p ON s.patient_id = p.internal_id
+WHERE p.cancer_study_id = 791
+  AND s.sample_type = 'Primary';  -- WRONG COLUMN!
+-- Returns 0 because sample_type contains "Primary Solid Tumor" for ALL samples
+```
+**Problem**: The `sample.sample_type` column contains general classifications like "Primary Solid Tumor" (for all tumor samples). It does NOT distinguish between primary vs metastatic samples!
+
+#### ❌ WRONG: Assuming all samples are "Primary"
+```sql
+-- INCORRECT - This counts ALL samples, not just primary samples!
+SELECT COUNT(DISTINCT sample_unique_id) as primary_samples
+FROM clinical_data_derived
+WHERE cancer_study_identifier = 'msk_chord_2024';
+-- Returns 25,040 (total samples), not 15,928 (primary samples)
+```
+**Problem**: Studies often have multiple sample types (Primary, Metastasis, Recurrence, etc.). Never assume all samples are primary!
+
+#### ✅ CORRECT: Use clinical_data_derived with SAMPLE_TYPE attribute
+```sql
+-- CORRECT - Filter using SAMPLE_TYPE attribute in clinical_data_derived
+SELECT COUNT(DISTINCT sample_unique_id) as primary_samples
+FROM clinical_data_derived
+WHERE cancer_study_identifier = 'msk_chord_2024'
+  AND attribute_name = 'SAMPLE_TYPE'
+  AND attribute_value = 'Primary';
+-- Returns 15,928 (actual primary samples)
+```
+
+#### ✅ CORRECT: First check sample type distribution
+```sql
+-- ALWAYS check what sample types exist in a study first
+SELECT
+    attribute_value as sample_type,
+    COUNT(DISTINCT sample_unique_id) as sample_count
+FROM clinical_data_derived
+WHERE cancer_study_identifier = 'your_study_id'
+  AND attribute_name = 'SAMPLE_TYPE'
+GROUP BY attribute_value
+ORDER BY sample_count DESC;
+```
+
+**Critical Distinction:**
+| Column/Attribute | Location | Contains | Use For |
+|------------------|----------|----------|---------|
+| `sample.sample_type` | sample table | General class (e.g., "Primary Solid Tumor") | NOT for primary/metastatic queries |
+| `SAMPLE_TYPE` attribute | clinical_data_derived | Specific type (Primary, Metastasis, etc.) | Primary vs metastatic filtering |
+
+**Common SAMPLE_TYPE Values (clinical_data_derived):**
+| Sample Type | Description |
+|-------------|-------------|
+| `Primary` | Primary tumor samples |
+| `Metastasis` | Metastatic tumor samples |
+| `Local Recurrence` | Locally recurrent tumors |
+| `Unknown` | Sample type not specified |
+
+**Key Rule**: When asked about "primary samples", "metastatic samples", etc., ALWAYS use `clinical_data_derived` with `attribute_name = 'SAMPLE_TYPE'`. NEVER use the `sample.sample_type` column!
+
 ## Data Type Pitfalls
 
 ### 6. 🚨 STRING VS NUMERIC COMPARISONS
@@ -335,14 +399,15 @@ SELECT SUM(tp53) FROM (
 3. **Exclude uncalled mutations** with `mutation_status != 'UNCALLED'`
 4. **Always specify study identifier** for consistent results
 5. **Keep patient vs sample aggregation separate**
-6. **Cast clinical values to appropriate data types**
-7. **Handle NULL values explicitly**
-8. **Use proper join keys and conditions**
-9. **Avoid cartesian products**
-10. **Use derived tables when possible** for better performance
-11. **Use numeric values for CNA** (2=AMP, -2=HOMDEL)
-12. **Use correct column names** (`mutation_variant` not `protein_change`)
-13. **Use subqueries instead of CTEs** for complex aggregations in ClickHouse
+6. **Filter by SAMPLE_TYPE** when asked about specific sample types (primary, metastatic, etc.)
+7. **Cast clinical values to appropriate data types**
+8. **Handle NULL values explicitly**
+9. **Use proper join keys and conditions**
+10. **Avoid cartesian products**
+11. **Use derived tables when possible** for better performance
+12. **Use numeric values for CNA** (2=AMP, -2=HOMDEL)
+13. **Use correct column names** (`mutation_variant` not `protein_change`)
+14. **Use subqueries instead of CTEs** for complex aggregations in ClickHouse
 
 ## Validation Checklist
 
@@ -356,3 +421,4 @@ Before trusting your results, ask:
 - [ ] Are my sample counts reasonable for the study?
 - [ ] Did I use numeric values for CNA alterations (not strings)?
 - [ ] Am I using the correct column names (mutation_variant, not protein_change)?
+- [ ] When asked about specific sample types (primary, metastatic, etc.), did I filter by SAMPLE_TYPE?

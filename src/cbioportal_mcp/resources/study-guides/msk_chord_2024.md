@@ -31,6 +31,28 @@ This study uses multiple MSK-IMPACT panel versions:
 | `PRIMARY_SITE` | Anatomical primary site | e.g., Lung, Breast, Colon |
 | `METASTATIC_SITE` | Site of metastasis (if applicable) | e.g., Liver, Bone, Brain |
 
+#### Sample Type Distribution (as of 2024)
+| Sample Type | Count | Notes |
+|-------------|-------|-------|
+| **Primary** | 15,928 | Primary tumor samples |
+| **Metastasis** | 8,878 | Metastatic tumor samples |
+| **Unknown** | 136 | Sample type not specified |
+| **Local Recurrence** | 98 | Locally recurrent tumors |
+| **Total** | **25,040** | All samples in study |
+
+**🚨 CRITICAL:** To query primary/metastatic samples, use `clinical_data_derived` with `attribute_name = 'SAMPLE_TYPE'`:
+```sql
+-- CORRECT way to count primary samples
+SELECT COUNT(DISTINCT sample_unique_id) as primary_samples
+FROM clinical_data_derived
+WHERE cancer_study_identifier = 'msk_chord_2024'
+  AND attribute_name = 'SAMPLE_TYPE'
+  AND attribute_value = 'Primary';
+-- Returns: 15,928
+
+-- DO NOT use sample.sample_type column - it contains "Primary Solid Tumor" for ALL samples!
+```
+
 ### Genomic Features
 | Attribute | Description | Notes |
 |-----------|-------------|-------|
