@@ -136,6 +136,21 @@ ORDER BY treatment_type, patients DESC;
 - Some treatment data is NLP-extracted (`INFERRED_TX_PROB` indicates confidence)
 - `PRIOR_MED_TO_MSK` captures pre-MSK treatments separately
 - Treatment timing (start_date, stop_date) is in days from diagnosis
+- **Cannot calculate percentages**: We can't distinguish "not collected" from "not received"
+
+### Treatment Query Patterns for MSK-CHORD
+
+**For broad questions** ("What treatments did patients receive?"):
+1. First summarize by SUBTYPE (Chemo, Immuno, Targeted, etc.)
+2. Then list top agents within each category
+
+**For specific questions** ("Most common treatment?"):
+- Query by AGENT key
+- Report patient count, NOT percentage
+- Expected answer: Fluorouracil (~6,319 patients)
+
+**For treatment type questions** ("Most common chemotherapy?"):
+- Filter by `SUBTYPE = 'Chemo'` and report by AGENT
 
 ## Notes & Caveats
 - Some clinical annotations are NLP-derived and may have extraction errors

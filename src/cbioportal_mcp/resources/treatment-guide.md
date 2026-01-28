@@ -181,7 +181,62 @@ Example: MSK-CHORD has detailed treatment data including:
 
 Most TCGA studies have limited or no treatment data.
 
-## Notes & Caveats
+## Important Caveats
+
+### Missing Treatment Data Limitation
+
+Treatment data in cBioPortal has a critical limitation:
+- **We cannot distinguish** between "treatment was never collected" vs "patient did not receive treatment"
+- This means **percentages are unreliable** and should NOT be calculated
+- **Always report raw counts**: "6,319 patients received Fluorouracil" NOT "25% of patients received Fluorouracil"
+- Do NOT calculate percentages of total patients for treatment data
+
+### Query Pattern Guidelines
+
+**For broad questions** like "What treatments did patients receive?":
+1. First summarize by **treatment category (SUBTYPE)**: Chemo, Immuno, Targeted, etc.
+2. Then list **top agents within each category**
+
+```sql
+-- Step 1: Summarize by category
+SELECT
+    subtype.value as treatment_category,
+    COUNT(DISTINCT ce.patient_id) as patient_count
+FROM clinical_event ce
+JOIN clinical_event_data subtype ON ce.clinical_event_id = subtype.clinical_event_id
+JOIN patient p ON ce.patient_id = p.internal_id
+JOIN cancer_study cs ON p.cancer_study_id = cs.cancer_study_id
+WHERE cs.cancer_study_identifier = 'your_study_id'
+  AND ce.event_type IN ('Treatment', 'TREATMENT')
+  AND subtype.key = 'SUBTYPE'
+GROUP BY subtype.value
+ORDER BY patient_count DESC;
+
+-- Step 2: Top agents per category
+SELECT
+    subtype.value as category,
+    agent.value as agent,
+    COUNT(DISTINCT ce.patient_id) as patients
+FROM clinical_event ce
+JOIN clinical_event_data agent ON ce.clinical_event_id = agent.clinical_event_id AND agent.key = 'AGENT'
+JOIN clinical_event_data subtype ON ce.clinical_event_id = subtype.clinical_event_id AND subtype.key = 'SUBTYPE'
+JOIN patient p ON ce.patient_id = p.internal_id
+JOIN cancer_study cs ON p.cancer_study_id = cs.cancer_study_id
+WHERE cs.cancer_study_identifier = 'your_study_id'
+  AND ce.event_type IN ('Treatment', 'TREATMENT')
+GROUP BY subtype.value, agent.value
+ORDER BY category, patients DESC;
+```
+
+**For specific questions** like "Most common treatment?":
+- Query by AGENT key directly
+- Report patient count, NOT percentage
+
+**For treatment type questions** like "Most common chemotherapy?":
+- Filter by `SUBTYPE = 'Chemo'`
+- Then report by AGENT
+
+## Other Notes
 
 1. **Event type casing**: Some studies use `Treatment`, others use `TREATMENT` — query for both
 2. **Date interpretation**: start_date/stop_date are typically days from diagnosis
