@@ -1,5 +1,49 @@
 # AGENTS.md - cBioPortal MCP Development Guide
 
+## Fix Hierarchy
+
+When an LLM agent produces incorrect results, fix the issue at the **root cause level**. The hierarchy is:
+
+### 1. Fix in the Data (Highest Priority)
+If the database schema itself causes confusion, modify the schema:
+- **Remove confusing columns** that agents misuse
+- **Add column comments** to clarify semantics
+- **Rename ambiguous columns** if possible
+
+SQL scripts in `sql/` directory:
+- `cleanup-for-llm.sql` - Removes confusing columns/tables
+- `add-column-comments.sql` - Adds helpful column comments
+
+**Example**: The `sample.sample_type` column contained "Primary Solid Tumor" for ALL samples, causing agents to report wrong counts for "primary samples". Solution: Remove the column entirely.
+
+### 2. Fix in the System Prompt (Medium Priority)
+If data can't be changed, add explicit guidance to the agent's system prompt:
+- Add warnings about specific columns to avoid
+- Include example queries for common patterns
+- Reference exact expected values
+
+**Example**: Added explicit warning to prompts.py about not using `sample.sample_type` and showing correct query using `clinical_data_derived`.
+
+### 3. Fix in MCP Resources/Guides (Lower Priority)
+Add documentation in study guides and pitfall guides:
+- Update `common-pitfalls.md` with new error patterns
+- Update study guides with study-specific caveats
+- Add example queries that demonstrate correct approach
+
+**Example**: Added pitfall 5b to `common-pitfalls.md` documenting the sample type filtering error.
+
+### Why This Order?
+
+| Level | Pros | Cons |
+|-------|------|------|
+| Data | Eliminates error source entirely | Requires DB access, affects all users |
+| Prompt | Always available to agent | Uses context tokens, must be maintained |
+| Guide | Detailed documentation | Agent must read it, may be ignored |
+
+**Rule**: If you can prevent an error by removing the confusing element, that's better than documenting how to avoid it.
+
+---
+
 ## Context Efficiency
 
 MCP interactions should minimize token usage. Every tool call and resource read consumes context.
@@ -77,11 +121,16 @@ Use MSI status to predict immunotherapy response.
 ## File Structure
 
 ```
+sql/
+├── cleanup-for-llm.sql            # Remove confusing columns/tables
+└── add-column-comments.sql        # Add helpful column comments
+
 resources/
 ├── mutation-frequency-guide.md    # How to calculate frequencies
 ├── clinical-data-guide.md         # How to query clinical data
 ├── sample-filtering-guide.md      # How to filter samples
 ├── common-pitfalls.md             # Common mistakes
+├── treatment-guide.md             # How to query treatment data
 └── study-guides/
     ├── _tcga_pancan_template.md   # Shared TCGA semantics
     ├── msk_chord_2024.md          # MSK-CHORD specifics
