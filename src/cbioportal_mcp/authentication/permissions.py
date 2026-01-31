@@ -139,6 +139,22 @@ def ensure_db_permissions(config: McpConfig) -> None:
             f"  REVOKE {', '.join(sorted(bad_privs))} ON *.* FROM {user};"
         )
 
+    # Check system table access (required for schema discovery tools)
+    missing_system = []
+    if not _check_grant("SELECT", "system.tables"):
+        missing_system.append("system.tables")
+    if not _check_grant("SELECT", "system.columns"):
+        missing_system.append("system.columns")
+
+    if missing_system:
+        raise PermissionError(
+            "Permission check failed: the MCP ClickHouse user lacks required system table access.\n"
+            "The application requires access to system schema tables to discover table structure.\n"
+            f"- Missing SELECT on: {', '.join(missing_system)}\n"
+            "Grant these permissions, e.g.:\n"
+            f"  GRANT SELECT ON system.tables, system.columns TO {user};"
+        )
+
     logger.info(
         "✅ ClickHouse permission checks passed for user '%s' on DB '%s'.",
         user,
