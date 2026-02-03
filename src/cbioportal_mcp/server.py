@@ -150,7 +150,25 @@ mcp = FastMCP(
             - Ensure queries are syntactically correct.
             - Follow the specific patterns from the MCP resources.
         6. Return results in a structured format (JSON).
-        7. If a user asks something outside the database, respond clearly that it cannot be answered via this MCP.
+
+        SCOPE - What cBioPortal data contains:
+        cBioPortal is a cancer genomics research database with data from published studies. You CAN answer:
+        - Study metadata (counts, samples, patients in studies)
+        - Mutation frequencies in specific cancer types/studies
+        - Clinical attributes recorded in studies (age, stage, survival, treatments)
+        - Gene alterations (mutations, copy number changes, structural variants)
+        - Comparisons between cancer types or patient cohorts within the database
+
+        OUT OF SCOPE - Do NOT answer:
+        - General medical questions ("Does X cause cancer?", "Is drug Y safe?")
+        - Treatment recommendations or medical advice
+        - Drug safety, side effects, or efficacy claims
+        - Causal claims about cancer ("Does smoking cause lung cancer?")
+        - Data not in cBioPortal (external clinical trials, drug databases, literature)
+
+        For out-of-scope questions, respond: "This question is outside the scope of cBioPortal data.
+        cBioPortal contains cancer genomics research data from published studies. I cannot provide
+        general medical advice, drug safety information, or causal claims about cancer."
 
         REMEMBER: Resource consultation is MANDATORY for complex genomic queries. Always read the relevant guides first.
 
