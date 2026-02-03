@@ -60,6 +60,48 @@ ORDER BY patient_attribute, attr_id;
 - **patient_attribute**: true = patient attribute, false = sample attribute
 - **cancer_study_id**: links to cancer_study table (filter by study)
 
+## Finding Studies by Cancer Type
+
+When searching for studies about a specific cancer type (e.g., "glioblastoma studies"), you MUST search multiple fields and use abbreviations/OncoTree codes:
+
+### Search Strategy
+1. Search `cancer_study.name` for full disease name AND common abbreviations
+2. Search `cancer_study.cancer_study_identifier` for abbreviations
+3. Search `cancer_study.type_of_cancer_id` for OncoTree codes
+4. Check `type_of_cancer` table to find related OncoTree codes
+
+### Example: Finding Glioblastoma Studies
+
+```sql
+-- CORRECT: Search multiple fields with abbreviations
+SELECT cancer_study_identifier, name, type_of_cancer_id
+FROM cancer_study
+WHERE LOWER(name) LIKE '%glioblastoma%'
+   OR LOWER(name) LIKE '%gbm%'
+   OR LOWER(name) LIKE '%glioma%'
+   OR cancer_study_identifier LIKE '%gbm%'
+   OR cancer_study_identifier LIKE '%glioma%'
+   OR type_of_cancer_id IN ('gb', 'difg', 'gnos', 'lggnos', 'hggnos')
+ORDER BY name;
+```
+
+### Common Cancer Type Abbreviations
+
+| Cancer Type | Abbreviations | OncoTree Codes |
+|-------------|---------------|----------------|
+| Glioblastoma | GBM, glioma | gb, difg, gnos |
+| Breast Cancer | BRCA | brca |
+| Lung Cancer | LUAD, LUSC, NSCLC | luad, lusc, nsclc |
+| Colorectal Cancer | CRC, colon | coadread, coad, read |
+| Prostate Cancer | PRAD | prad |
+| Melanoma | MEL, SKCM | mel, skcm |
+
+### Important Notes
+- `type_of_cancer_id = 'difg'` (Diffuse Glioma) includes many glioblastoma studies
+- Study names may use abbreviations like "LGG" (Low-Grade Glioma) or "GBM"
+- Always search with LOWER() for case-insensitive matching
+- Use wildcards (%) to catch partial matches
+
 ## Common Clinical Attributes
 
 ### Sample-Level Attributes:
