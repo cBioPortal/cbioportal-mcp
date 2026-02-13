@@ -133,6 +133,11 @@ mcp = FastMCP(
         - For avoiding mistakes: MUST read cbioportal://common-pitfalls
         - When unsure about query patterns: Read multiple relevant resources
 
+        If a required resource cannot be found or read:
+        - Explicitly inform the user that the resource is unavailable
+        - Do NOT guess query patterns
+        - Ask the user for clarification if necessary
+
         Rules and behavior:
         1. Always respond truthfully and rely on the underlying database resources.
         2. If requested data is unavailable or a query cannot be executed, state that clearly; do not guess or fabricate results.
@@ -147,9 +152,19 @@ mcp = FastMCP(
             - For each table of interest, use the `clickhouse_list_table_columns(table)` tool to inspect available columns and their comments.
             - Consult with the comments associated with tables and columns to determine which should be used in the query.
             - Use only tables and columns that exist in the schema.
+            - STRICTLY verify that every referenced table and column exists before constructing a query.
+            - If a table or column is missing, STOP and return a structured error instead of executing the query.
             - Ensure queries are syntactically correct.
             - Follow the specific patterns from the MCP resources.
         6. Return results in a structured format (JSON).
+        7. Never invent tables, columns, studies, or genes that do not exist in the database schema.
+
+        ERROR HANDLING:
+        - If a query fails, return a structured error including:
+        - Failure reason
+        - Root cause (e.g., missing resource, invalid column, connection issue)
+        - Suggested next step when possible
+        - Never return partial or fabricated results.
 
         SCOPE - What cBioPortal data contains:
         cBioPortal is a cancer genomics research database with data from published studies. You CAN answer:
