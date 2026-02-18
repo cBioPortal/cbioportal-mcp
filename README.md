@@ -128,6 +128,39 @@ docker run -i -p 8000:8000 \
 | `MCP_AUTH_JWT_SECRET` | Symmetric key for HMAC-based JWT validation | - |
 | `MCP_AUTH_JWT_ALGORITHM` | JWT signing algorithm | `RS256` (JWKS) / `HS256` (symmetric) |
 
+### Upgrading from Unauthenticated to Authenticated
+
+Existing deployments run without authentication and are **not affected** by this change. Authentication is disabled by default (`MCP_AUTH_MODE=none`). No configuration changes are required to maintain current behavior.
+
+When you are ready to enable authentication, follow these steps:
+
+1. **Choose an auth mode.** Static tokens are the simplest starting point. JWT with JWKS is recommended for production.
+
+2. **Set the required environment variables** on your server (or in your Docker/docker-compose configuration). For example, to start with static tokens:
+   ```bash
+   export MCP_AUTH_MODE=static
+   export MCP_AUTH_TOKENS='{"my-token": {"client_id": "app1", "scopes": ["read"]}}'
+   ```
+
+3. **Switch to an HTTP-based transport** if you haven't already. Authentication only applies to `http` and `sse` transports. The `stdio` transport inherits security from the local process and does not use MCP-level auth.
+   ```bash
+   export CLICKHOUSE_MCP_SERVER_TRANSPORT=http
+   ```
+
+4. **Update your MCP clients** to include the `Authorization: Bearer <token>` header in requests.
+
+5. **Restart the server.** You should see `Authentication enabled (mode: static)` in the startup logs. Requests without a valid token will be rejected.
+
+6. **When ready for production**, migrate from static tokens to JWT:
+   ```bash
+   export MCP_AUTH_MODE=jwt
+   export MCP_AUTH_JWKS_URI=https://your-idp.example.com/.well-known/jwks.json
+   export MCP_AUTH_JWT_ISSUER=https://your-idp.example.com/
+   export MCP_AUTH_JWT_AUDIENCE=cbioportal-mcp
+   ```
+
+If anything goes wrong, set `MCP_AUTH_MODE=none` (or unset it entirely) to immediately disable authentication and restore the previous behavior.
+
 ### Security Best Practices
 
 - **Do not commit secrets.** Never store tokens, JWT secrets, or passwords in version control. Use environment variables or a secrets manager.
