@@ -43,6 +43,98 @@ export CLICKHOUSE_SECURE=true  # or false for insecure connections
 export CLICKHOUSE_MCP_SERVER_TRANSPORT=stdio # or http or sse
 ```
 
+## Authentication
+
+Authentication is optional and only applies to HTTP and SSE transports. It is disabled by default. The stdio transport does not require authentication since it communicates over local standard input/output.
+
+Three authentication modes are available:
+
+| Mode | Use Case |
+|------|----------|
+| `none` | Default. No authentication required. |
+| `static` | Simple token-based auth for development or internal use. |
+| `jwt` | JSON Web Token validation for production deployments. |
+
+### Quick Start with Static Tokens
+
+Set the following environment variables to enable static token authentication:
+
+```bash
+export MCP_AUTH_MODE=static
+export MCP_AUTH_TOKENS='{"token-abc123": "user1", "token-def456": "user2"}'
+```
+
+Clients include the token in the `Authorization` header:
+
+```
+Authorization: Bearer token-abc123
+```
+
+### JWT Authentication
+
+#### JWKS Method (Recommended for Production)
+
+Use a JWKS (JSON Web Key Set) endpoint to validate tokens signed with asymmetric keys (e.g., RS256). This is the recommended approach for production deployments because keys can be rotated without restarting the server.
+
+```bash
+export MCP_AUTH_MODE=jwt
+export MCP_AUTH_JWKS_URI=https://your-idp.example.com/.well-known/jwks.json
+export MCP_AUTH_JWT_ISSUER=https://your-idp.example.com/
+export MCP_AUTH_JWT_AUDIENCE=cbioportal-mcp
+export MCP_AUTH_JWT_ALGORITHM=RS256
+```
+
+#### Symmetric Key Method (HMAC)
+
+Use a shared secret to validate tokens signed with HMAC (e.g., HS256). Suitable for simpler setups where a JWKS endpoint is not available.
+
+```bash
+export MCP_AUTH_MODE=jwt
+export MCP_AUTH_JWT_SECRET=your-shared-secret-key
+export MCP_AUTH_JWT_ISSUER=https://your-idp.example.com/
+export MCP_AUTH_JWT_AUDIENCE=cbioportal-mcp
+export MCP_AUTH_JWT_ALGORITHM=HS256
+```
+
+### Docker Deployment with Authentication
+
+```bash
+docker build -t cbioportal-mcp -f docker/Dockerfile .
+
+docker run -i -p 8000:8000 \
+  -e CLICKHOUSE_HOST=your-clickhouse-host \
+  -e CLICKHOUSE_PORT=9000 \
+  -e CLICKHOUSE_USER=your-username \
+  -e CLICKHOUSE_PASSWORD=your-password \
+  -e CLICKHOUSE_DATABASE=your-cbioportal-database \
+  -e CLICKHOUSE_SECURE=true \
+  -e CLICKHOUSE_MCP_SERVER_TRANSPORT=http \
+  -e MCP_AUTH_MODE=jwt \
+  -e MCP_AUTH_JWKS_URI=https://your-idp.example.com/.well-known/jwks.json \
+  -e MCP_AUTH_JWT_ISSUER=https://your-idp.example.com/ \
+  -e MCP_AUTH_JWT_AUDIENCE=cbioportal-mcp \
+  cbioportal-mcp
+```
+
+### Environment Variables Reference
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `MCP_AUTH_MODE` | Auth mode: `none`, `static`, `jwt` | `none` |
+| `MCP_AUTH_TOKENS` | JSON map of static tokens to user identifiers | - |
+| `MCP_AUTH_JWKS_URI` | JWKS endpoint URL for asymmetric key validation | - |
+| `MCP_AUTH_JWT_ISSUER` | Expected JWT issuer (`iss` claim) | - |
+| `MCP_AUTH_JWT_AUDIENCE` | Expected JWT audience (`aud` claim) | - |
+| `MCP_AUTH_JWT_SECRET` | Symmetric key for HMAC-based JWT validation | - |
+| `MCP_AUTH_JWT_ALGORITHM` | JWT signing algorithm | `RS256` (JWKS) / `HS256` (symmetric) |
+
+### Security Best Practices
+
+- **Do not commit secrets.** Never store tokens, JWT secrets, or passwords in version control. Use environment variables or a secrets manager.
+- **Prefer JWT with JWKS for production.** Asymmetric key validation via a JWKS endpoint allows key rotation without restarting the server.
+- **Use an HTTPS reverse proxy.** The MCP server itself does not terminate TLS. Place it behind a reverse proxy (e.g., nginx, Caddy) that handles HTTPS in production.
+- **Rotate tokens regularly.** If using static tokens, rotate them periodically. With JWKS, rely on your identity provider's key rotation policy.
+
 ## Development
 
 ### Inspecting the Server with MCP Inspector

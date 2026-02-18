@@ -191,7 +191,26 @@ def main():
         logger.critical("❌ ClickHouse permission check failed: %s", e)
         sys.exit(2)
 
+    # Set up authentication
+    from cbioportal_mcp.authentication.auth_provider import create_auth_provider
+
+    config.validate_auth_config()
+    auth_provider = create_auth_provider(config)
+    if auth_provider is not None:
+        mcp.auth = auth_provider
+
+    if auth_provider:
+        logger.info("Authentication enabled (mode: %s)", config.mcp_auth_mode)
+    else:
+        logger.info("Authentication disabled - server is open")
+
     transport = config.mcp_server_transport
+
+    if auth_provider and transport == TransportType.STDIO.value:
+        logger.warning(
+            "Authentication is configured but transport is 'stdio'. "
+            "Auth is only enforced for HTTP/SSE transports."
+        )
 
     try:
         # For HTTP and SSE transports, we need to specify host and port

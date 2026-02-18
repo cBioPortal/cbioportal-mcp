@@ -13,7 +13,7 @@ authors = [
     { name = "cBioPortal MCP Contributors" }
 ]
 dependencies = [
-    "fastmcp",
+    "fastmcp>=2.13.1",
     "mcp-clickhouse",
     "clickhouse-driver>=0.2.0",
 ]

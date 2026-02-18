@@ -1,6 +1,7 @@
 """Environment configuration for cBioPortal MCP server."""
 
 from dataclasses import dataclass
+import json
 import os
 from typing import Optional
 from enum import Enum
@@ -17,6 +18,19 @@ class TransportType(str, Enum):
     def values(cls) -> list[str]:
         """Get all valid transport values."""
         return [transport.value for transport in cls]
+
+
+class AuthMode(str, Enum):
+    """Supported authentication modes."""
+
+    NONE = "none"
+    STATIC = "static"
+    JWT = "jwt"
+
+    @classmethod
+    def values(cls) -> list[str]:
+        """Get all valid auth mode values."""
+        return [mode.value for mode in cls]
 
 
 @dataclass
@@ -76,6 +90,100 @@ class McpConfig:
         """
 
         return str(os.getenv("CLICKHOUSE_DATABASE", "cgds_public_2025_06_24"))
+
+    @property
+    def mcp_auth_mode(self) -> str:
+        """Get the authentication mode.
+
+        Valid options: "none", "static", "jwt"
+        - 'static': Uses static bearer tokens from MCP_AUTH_TOKENS env var
+        - 'jwt': Uses JWT verification via JWKS or symmetric key
+        - 'none': No authentication (default)
+        """
+        mode = os.getenv("MCP_AUTH_MODE", "none").lower()
+
+        # Validate auth mode
+        if mode not in AuthMode.values():
+            valid_options = ", ".join(f'"{m}"' for m in AuthMode.values())
+            raise ValueError(f"Invalid auth mode '{mode}'. Valid options: {valid_options}")
+        return mode
+
+    @property
+    def mcp_auth_tokens(self) -> dict[str, dict] | None:
+        """Get static tokens for 'static' auth mode.
+
+        Format: JSON string mapping token -> {client_id, scopes}
+        Env var: MCP_AUTH_TOKENS
+        """
+        raw = os.getenv("MCP_AUTH_TOKENS")
+        if not raw:
+            return None
+        return json.loads(raw)
+
+    @property
+    def mcp_auth_jwks_uri(self) -> str | None:
+        """Get the JWKS URI for JWT token verification.
+
+        Env var: MCP_AUTH_JWKS_URI
+        """
+        return os.getenv("MCP_AUTH_JWKS_URI")
+
+    @property
+    def mcp_auth_jwt_issuer(self) -> str | None:
+        """Get the expected JWT issuer claim.
+
+        Env var: MCP_AUTH_JWT_ISSUER
+        """
+        return os.getenv("MCP_AUTH_JWT_ISSUER")
+
+    @property
+    def mcp_auth_jwt_audience(self) -> str | None:
+        """Get the expected JWT audience claim.
+
+        Env var: MCP_AUTH_JWT_AUDIENCE
+        """
+        return os.getenv("MCP_AUTH_JWT_AUDIENCE")
+
+    @property
+    def mcp_auth_jwt_secret(self) -> str | None:
+        """Get the symmetric secret for HMAC JWT verification (alternative to JWKS).
+
+        Env var: MCP_AUTH_JWT_SECRET
+        """
+        return os.getenv("MCP_AUTH_JWT_SECRET")
+
+    @property
+    def mcp_auth_jwt_algorithm(self) -> str:
+        """Get the JWT signing algorithm.
+
+        Default: RS256 (for JWKS) or HS256 (for symmetric secret).
+        Env var: MCP_AUTH_JWT_ALGORITHM
+        """
+        default = "HS256" if self.mcp_auth_jwt_secret else "RS256"
+        return os.getenv("MCP_AUTH_JWT_ALGORITHM", default)
+
+    def validate_auth_config(self) -> None:
+        """Validate authentication configuration.
+
+        Raises:
+            ValueError: If auth mode is 'jwt' but neither JWKS URI nor JWT secret
+                is provided, or if auth mode is 'static' but no tokens are provided.
+        """
+        mode = self.mcp_auth_mode
+
+        if mode == AuthMode.STATIC.value:
+            if not self.mcp_auth_tokens:
+                raise ValueError(
+                    "Auth mode is 'static' but MCP_AUTH_TOKENS is not set. "
+                    "Provide a JSON mapping of token -> {client_id, scopes}."
+                )
+
+        if mode == AuthMode.JWT.value:
+            if not self.mcp_auth_jwks_uri and not self.mcp_auth_jwt_secret:
+                raise ValueError(
+                    "Auth mode is 'jwt' but neither MCP_AUTH_JWKS_URI nor "
+                    "MCP_AUTH_JWT_SECRET is set. Provide at least one."
+                )
 
 
 # Global instance placeholders for the singleton pattern
