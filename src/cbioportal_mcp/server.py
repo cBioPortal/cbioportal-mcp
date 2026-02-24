@@ -116,64 +116,7 @@ def _list_available_study_guides() -> list[str]:
 # Create FastMCP instance
 mcp = FastMCP(
     name="cBioPortal MCP Server",
-    instructions="""
-        You are the cBioPortal MCP Server, built on top of the MCP-ClickHouse project.
-        Your role is to provide structured, reliable access to cBioPortal cancer genomics data via the ClickHouse database.
-
-        CRITICAL: ALWAYS READ RELEVANT RESOURCES FIRST
-        Before answering any complex query, you MUST:
-        1. List available MCP resources
-        2. Read the relevant resource guide(s) for your query type
-        3. Follow the specific patterns and requirements from the resources
-
-        Resource Reading Requirements:
-        - For gene mutation frequencies: MUST read cbioportal://mutation-frequency-guide
-        - For clinical data queries: MUST read cbioportal://clinical-data-guide
-        - For sample filtering: MUST read cbioportal://sample-filtering-guide
-        - For avoiding mistakes: MUST read cbioportal://common-pitfalls
-        - When unsure about query patterns: Read multiple relevant resources
-
-        Rules and behavior:
-        1. Always respond truthfully and rely on the underlying database resources.
-        2. If requested data is unavailable or a query cannot be executed, state that clearly; do not guess or fabricate results.
-        3. You have tools to:
-            - Execute read-only SELECT queries against the ClickHouse database.
-            - Explore the database schema, including available tables and columns.
-            - Read MCP resources for detailed query guidance.
-        4. Only use the database tools when necessary; do not attempt to modify the database (INSERT, UPDATE, DELETE, any DDL SQL statements are forbidden).
-        5. When building queries for the user:
-            - FIRST: Read relevant MCP resources for query patterns
-            - Explore the database tables using the `clickhouse_list_tables` tool.
-            - For each table of interest, use the `clickhouse_list_table_columns(table)` tool to inspect available columns and their comments.
-            - Consult with the comments associated with tables and columns to determine which should be used in the query.
-            - Use only tables and columns that exist in the schema.
-            - Ensure queries are syntactically correct.
-            - Follow the specific patterns from the MCP resources.
-        6. Return results in a structured format (JSON).
-
-        SCOPE - What cBioPortal data contains:
-        cBioPortal is a cancer genomics research database with data from published studies. You CAN answer:
-        - Study metadata (counts, samples, patients in studies)
-        - Mutation frequencies in specific cancer types/studies
-        - Clinical attributes recorded in studies (age, stage, survival, treatments)
-        - Gene alterations (mutations, copy number changes, structural variants)
-        - Comparisons between cancer types or patient cohorts within the database
-
-        OUT OF SCOPE - Do NOT answer:
-        - General medical questions ("Does X cause cancer?", "Is drug Y safe?")
-        - Treatment recommendations or medical advice
-        - Drug safety, side effects, or efficacy claims
-        - Causal claims about cancer ("Does smoking cause lung cancer?")
-        - Data not in cBioPortal (external clinical trials, drug databases, literature)
-
-        For out-of-scope questions, respond: "This question is outside the scope of cBioPortal data.
-        cBioPortal contains cancer genomics research data from published studies. I cannot provide
-        general medical advice, drug safety information, or causal claims about cancer."
-
-        REMEMBER: Resource consultation is MANDATORY for complex genomic queries. Always read the relevant guides first.
-
-        Maintain a helpful, concise, and professional tone.
-    """,
+    instructions=_load_resource("system-prompt.md"),
 )
 
 
@@ -230,6 +173,9 @@ def _common_pitfalls_guide_text() -> str:
 def _treatment_guide_text() -> str:
     return _load_resource("treatment-guide.md")
 
+def _faq_guide_text() -> str:
+    return _load_resource("faq-guide.md")
+
 # --- MCP resources (decorator registers them) --------------------------------
 @mcp.resource("cbioportal://mutation-frequency-guide")
 def mutation_frequency_guide() -> str:
@@ -250,6 +196,10 @@ def common_pitfalls_guide() -> str:
 @mcp.resource("cbioportal://treatment-guide")
 def treatment_guide() -> str:
     return _treatment_guide_text()
+
+@mcp.resource("cbioportal://faq-guide")
+def faq_guide() -> str:
+    return _faq_guide_text()
 
 
 @mcp.tool(
@@ -398,6 +348,10 @@ def list_mcp_resources() -> list[dict]:
             "description": "Guide for querying treatment/clinical event data including drug agents, timelines, and linking to genomic data"
         },
         {
+            "uri": "cbioportal://faq-guide",
+            "description": "General cBioPortal FAQ: history, how to cite, data types, reference genome, abbreviations, GISTIC thresholds, API access"
+        },
+        {
             "uri": "cbioportal://study-guide/{study_id}",
             "description": "Dynamic study-specific guide - use get_study_guide(study_id) tool to generate"
         }
@@ -419,7 +373,8 @@ def read_mcp_resource(uri: str) -> str:
         "cbioportal://clinical-data-guide": _clinical_data_guide_text(),
         "cbioportal://sample-filtering-guide": _sample_filtering_guide_text(),
         "cbioportal://common-pitfalls": _common_pitfalls_guide_text(),
-        "cbioportal://treatment-guide": _treatment_guide_text()
+        "cbioportal://treatment-guide": _treatment_guide_text(),
+        "cbioportal://faq-guide": _faq_guide_text()
     }
 
     if uri not in resources:
@@ -651,9 +606,9 @@ def list_studies(search: str = None, limit: int = 20) -> list[dict]:
                     COUNT(DISTINCT cd.sample_unique_id) as sample_count
                 FROM cancer_study cs
                 LEFT JOIN clinical_data_derived cd ON cs.cancer_study_identifier = cd.cancer_study_identifier
-                WHERE cs.cancer_study_identifier LIKE '%{safe_search}%' 
-                    OR cs.name LIKE '%{safe_search}%'
-                    OR cs.type_of_cancer_id LIKE '%{safe_search}%'
+                WHERE cs.cancer_study_identifier ILIKE '%{safe_search}%'
+                    OR cs.name ILIKE '%{safe_search}%'
+                    OR cs.type_of_cancer_id ILIKE '%{safe_search}%'
                 GROUP BY cs.cancer_study_identifier, cs.name, cs.type_of_cancer_id
                 ORDER BY sample_count DESC
                 LIMIT {safe_limit}
