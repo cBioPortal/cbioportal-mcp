@@ -318,11 +318,11 @@ def zip_select_query_result(ch_query_result) -> list[dict]:
 
 # Resource Access Tools for AI Agents
 @mcp.tool()
-def list_mcp_resources() -> list[dict]:
-    """List all available MCP resources with their URIs and descriptions.
+def list_guides() -> list[dict]:
+    """List all available query guides with their URIs and descriptions.
 
-    Call this tool first to see what resource guides are available before answering complex queries.
-    
+    Call this tool first to see what guides are available before answering complex queries.
+
     Note: For study-specific guides, use the `get_study_guide(study_id)` tool instead.
     Use `list_studies(search)` to find available studies.
     """
@@ -359,13 +359,13 @@ def list_mcp_resources() -> list[dict]:
 
 
 @mcp.tool()
-def read_mcp_resource(uri: str) -> str:
-    """Read the content of a specific MCP resource by URI.
+def read_guide(uri: str) -> str:
+    """Read the content of a specific guide by URI.
 
-    Use this after calling list_mcp_resources() to read the detailed content of resource guides.
+    Use this after calling list_guides() to read the detailed content of guides.
 
     Args:
-        uri: The resource URI (e.g., "cbioportal://mutation-frequency-guide")
+        uri: The guide URI (e.g., "cbioportal://mutation-frequency-guide")
     """
     # Resource content mapping
     resources = {

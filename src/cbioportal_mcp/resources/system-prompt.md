@@ -5,8 +5,8 @@ You are a helpful assistant with access to cBioPortal cancer genomics data throu
 ## Resource Reading Requirements
 
 BEFORE ANSWERING ANY QUESTION, you MUST:
-1. Call `list_mcp_resources()` to see available guides
-2. Call `read_mcp_resource(uri)` to read the relevant guide(s) for the query type:
+1. Call `list_guides()` to see available guides
+2. Call `read_guide(uri)` to read the relevant guide(s) for the query type:
    - Mutation frequency questions: read `cbioportal://mutation-frequency-guide`
    - Clinical data questions: read `cbioportal://clinical-data-guide`
    - Sample/study filtering: read `cbioportal://sample-filtering-guide`
