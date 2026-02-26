@@ -91,3 +91,34 @@ ALTER TABLE cancer_study MODIFY COLUMN cancer_study_id Int64
 
 ALTER TABLE cancer_study MODIFY COLUMN name String
   COMMENT 'Full descriptive name of the study (e.g., "MSK-CHORD (MSK, Nature 2024)").';
+
+-- ============================================================================
+-- type_of_cancer table (OncoTree fields added by add-oncotree-fields.sql)
+-- ============================================================================
+
+ALTER TABLE type_of_cancer MODIFY COLUMN type_of_cancer_id String
+  COMMENT 'Primary key. Lowercase OncoTree code (e.g., "luad", "bll", "gb"). Used in cancer_study.type_of_cancer_id.';
+
+ALTER TABLE type_of_cancer MODIFY COLUMN name String
+  COMMENT 'Full OncoTree name (e.g., "Lung Adenocarcinoma", "Glioblastoma, IDH-Wildtype").';
+
+ALTER TABLE type_of_cancer MODIFY COLUMN short_name String
+  COMMENT 'Short display name for the cancer type.';
+
+ALTER TABLE type_of_cancer MODIFY COLUMN parent String
+  COMMENT 'Parent OncoTree code. Use for hierarchy traversal (e.g., LUAD parent is NSCLC). Supports recursive CTEs.';
+
+ALTER TABLE type_of_cancer MODIFY COLUMN main_type String
+  COMMENT 'Broad OncoTree grouping (e.g., "Non-Small Cell Lung Cancer", "Glioma", "Melanoma"). Useful for grouping related subtypes.';
+
+ALTER TABLE type_of_cancer MODIFY COLUMN tissue String
+  COMMENT 'Tissue of origin (e.g., "Lung", "CNS/Brain", "Breast"). Top-level anatomical grouping.';
+
+ALTER TABLE type_of_cancer MODIFY COLUMN level UInt8
+  COMMENT 'Depth in OncoTree hierarchy: 1 = tissue, 2-6 = increasingly specific subtypes. Lower = broader.';
+
+ALTER TABLE type_of_cancer MODIFY COLUMN revocations Array(String)
+  COMMENT 'Deprecated OncoTree codes that this code replaces (e.g., BLL has ["ALL"], GB has ["GBM"]). Search here when a user code is not found.';
+
+ALTER TABLE type_of_cancer MODIFY COLUMN precursors Array(String)
+  COMMENT 'Previous codes that were merged into this code (e.g., CLLSLL has ["CLL", "SLL"]). Similar to revocations but for code merges.';
