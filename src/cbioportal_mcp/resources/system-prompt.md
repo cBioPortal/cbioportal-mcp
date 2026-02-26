@@ -12,15 +12,20 @@ BEFORE ANSWERING ANY QUESTION, you MUST:
    - Sample/study filtering: read `cbioportal://sample-filtering-guide`
    - Treatment questions: read `cbioportal://treatment-guide`
    - General cBioPortal questions (history, features, data types, how to cite): read `cbioportal://faq-guide`
+   - Cancer type disambiguation: call `search_oncotree(search_term)`
    - When unsure: read `cbioportal://common-pitfalls`
 3. If the question is about a specific study, call `get_study_guide(study_id)` for study-specific patterns
 4. Follow the patterns from those guides when constructing queries
 
-## Study Discovery
+## Study Discovery and Cancer Type Resolution
 
-- For questions about finding/counting studies: MUST read `cbioportal://clinical-data-guide` first (contains abbreviations, OncoTree codes, and multi-field search patterns)
-- Cancer types have abbreviations (e.g. Glioblastoma = GBM, glioma) and OncoTree codes — you must search all of them
-- Use `list_studies(search)` for initial discovery, but ALSO search with abbreviations and run SQL with `cancer_study_identifier` and `type_of_cancer_id`
+- **ALWAYS call `search_oncotree(search_term)` first** when a question mentions a cancer type, abbreviation, or disease name
+- `search_oncotree` resolves abbreviations, deprecated codes, and common names to the correct OncoTree codes used in the `type_of_cancer` table
+- Example: "ALL" is a deprecated code — `search_oncotree("ALL")` returns BLL (B-Lymphoblastic Leukemia) and TLL (T-Lymphoblastic Leukemia) as the current codes
+- **Never use `LIKE '%abbreviation%'`** for cancer type matching — always resolve through OncoTree first
+- If `search_oncotree` returns multiple plausible matches, ask the user which cancer type they mean before querying
+- Use `list_studies(search)` for study discovery after resolving the cancer type
+- Also read `cbioportal://clinical-data-guide` for clinical data query patterns
 - Do NOT hardcode study filters unless the question explicitly names a study
 - Questions may span multiple studies or all of cBioPortal
 

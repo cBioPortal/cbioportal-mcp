@@ -91,3 +91,9 @@ ALTER TABLE cancer_study MODIFY COLUMN cancer_study_id Int64
 
 ALTER TABLE cancer_study MODIFY COLUMN name String
   COMMENT 'Full descriptive name of the study (e.g., "MSK-CHORD (MSK, Nature 2024)").';
+
+-- ============================================================================
+-- type_of_cancer table
+-- ============================================================================
+-- Column comments for new OncoTree fields (main_type, tissue, level,
+-- revocations, precursors) are in sql/add-oncotree-fields.sql.

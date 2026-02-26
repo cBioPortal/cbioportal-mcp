@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """cBioPortal MCP Server - FastMCP implementation."""
 
+import json
 import logging
 import re
 import sys
+from functools import lru_cache
 from importlib import resources as importlib_resources
 from pathlib import Path
 from typing import Optional
@@ -112,6 +114,35 @@ def _list_available_study_guides() -> list[str]:
     except Exception as e:
         logger.error(f"Error listing study guides: {e}")
         return []
+
+@lru_cache(maxsize=1)
+def _load_oncotree_data() -> list[dict]:
+    """Load and cache oncotree.json from resources."""
+    try:
+        resources_path = _get_resources_path()
+        oncotree_file = resources_path / "oncotree.json"
+        raw = oncotree_file.read_text(encoding="utf-8")
+        return json.loads(raw)
+    except Exception as e:
+        logger.error(f"Failed to load oncotree.json: {e}")
+        return []
+
+
+def _build_hierarchy_path(code: str, entries_by_code: dict[str, dict]) -> str:
+    """Walk parent chain to build a hierarchy path like 'TISSUE > PARENT > CODE'."""
+    parts = []
+    current = code
+    seen = set()
+    while current and current not in seen:
+        seen.add(current)
+        entry = entries_by_code.get(current)
+        if not entry:
+            break
+        parts.append(entry.get("code", current))
+        current = entry.get("parent")
+    parts.reverse()
+    return " > ".join(parts)
+
 
 # Create FastMCP instance
 mcp = FastMCP(
@@ -644,11 +675,104 @@ def list_studies(search: str = None, limit: int = 20) -> list[dict]:
 @mcp.tool()
 def list_study_guides() -> list[str]:
     """List all studies that have pre-generated guides available.
-    
+
     Returns:
         List of study identifiers that have curated guides in resources/study-guides/
     """
     return _list_available_study_guides()
+
+
+@mcp.tool()
+def search_oncotree(search_term: str) -> list[dict]:
+    """Search OncoTree cancer types by code, name, or tissue.
+
+    Use this BEFORE querying cancer type data to resolve abbreviations and
+    find the correct OncoTree codes used in the type_of_cancer table.
+
+    Handles deprecated codes (e.g. "ALL" → BLL + TLL via revocations).
+    Returns up to 25 results ranked by relevance.
+
+    Args:
+        search_term: Cancer type code, name, or abbreviation to search for
+    """
+    entries = _load_oncotree_data()
+    if not entries:
+        return [{"error": "OncoTree data not available"}]
+
+    term_lower = search_term.strip().lower()
+    if not term_lower:
+        return [{"error": "search_term cannot be empty"}]
+
+    entries_by_code = {e["code"]: e for e in entries if "code" in e}
+
+    scored: list[tuple[int, dict]] = []
+    for entry in entries:
+        code = entry.get("code", "")
+        code_lower = code.lower()
+        name = entry.get("name", "")
+        name_lower = name.lower()
+        main_type = entry.get("mainType", "")
+        main_type_lower = main_type.lower()
+        tissue = entry.get("tissue", "")
+        tissue_lower = tissue.lower()
+        revocations = [r.lower() for r in entry.get("revocations", [])]
+        precursors = [p.lower() for p in entry.get("precursors", [])]
+
+        score = 0
+
+        # Exact code match (highest priority)
+        if term_lower == code_lower:
+            score = 100
+        # Revoked/deprecated code match
+        elif term_lower in revocations or term_lower in precursors:
+            score = 90
+        # Exact name match
+        elif term_lower == name_lower:
+            score = 80
+        # Code starts with search term
+        elif code_lower.startswith(term_lower):
+            score = 70
+        # Exact mainType match
+        elif term_lower == main_type_lower:
+            score = 65
+        # Name starts with search term
+        elif name_lower.startswith(term_lower):
+            score = 60
+        # Partial name/mainType match
+        elif term_lower in name_lower:
+            score = 50
+        elif term_lower in main_type_lower:
+            score = 45
+        # Tissue match
+        elif term_lower in tissue_lower:
+            score = 40
+
+        if score > 0:
+            result = {
+                "code": code,
+                "name": name,
+                "score": score,
+            }
+            if main_type:
+                result["mainType"] = main_type
+            if tissue:
+                result["tissue"] = tissue
+
+            # Build hierarchy path
+            path = _build_hierarchy_path(code, entries_by_code)
+            if path:
+                result["hierarchy"] = path
+
+            # Show what deprecated codes this replaces
+            replaced = entry.get("revocations", []) + entry.get("precursors", [])
+            if replaced:
+                result["replacedCodes"] = replaced
+
+            scored.append((score, result))
+
+    # Sort by score desc, then by code for stability
+    scored.sort(key=lambda x: (-x[0], x[1]["code"]))
+    return [item for _, item in scored[:25]]
 
 
 if __name__ == "__main__":
