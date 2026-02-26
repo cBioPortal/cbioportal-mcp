@@ -101,15 +101,15 @@ def write_sql(entries: list[dict]) -> None:
         "",
         "-- Column comments",
         "ALTER TABLE type_of_cancer MODIFY COLUMN main_type String"
-        "  COMMENT 'Broad OncoTree grouping (e.g., \"Non-Small Cell Lung Cancer\", \"Glioma\"). Useful for grouping related subtypes.';",
+        "  COMMENT 'Broad OncoTree grouping (e.g. Non-Small Cell Lung Cancer, Glioma). Useful for grouping related subtypes.';",
         "ALTER TABLE type_of_cancer MODIFY COLUMN tissue String"
-        "  COMMENT 'Tissue of origin (e.g., \"Lung\", \"CNS/Brain\", \"Breast\"). Top-level anatomical grouping.';",
+        "  COMMENT 'Tissue of origin (e.g. Lung, CNS/Brain, Breast). Top-level anatomical grouping.';",
         "ALTER TABLE type_of_cancer MODIFY COLUMN level UInt8"
         "  COMMENT 'Depth in OncoTree hierarchy: 1 = tissue, 2-6 = increasingly specific subtypes. Lower = broader.';",
         "ALTER TABLE type_of_cancer MODIFY COLUMN revocations Array(String)"
-        "  COMMENT 'Deprecated OncoTree codes that this code replaces (e.g., BLL has [\"ALL\"], GB has [\"GBM\"]). Search here when a user code is not found.';",
+        "  COMMENT 'Deprecated OncoTree codes that this code replaces (e.g. BLL replaces ALL, GB replaces GBM). Search here when a user code is not found.';",
         "ALTER TABLE type_of_cancer MODIFY COLUMN precursors Array(String)"
-        "  COMMENT 'Previous codes that were merged into this code (e.g., CLLSLL has [\"CLL\", \"SLL\"]). Similar to revocations but for code merges.';",
+        "  COMMENT 'Previous codes merged into this code (e.g. CLLSLL merges CLL and SLL). Similar to revocations but for code merges.';",
         "",
         "-- Populate from OncoTree data",
     ]
