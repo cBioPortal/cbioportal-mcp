@@ -630,9 +630,10 @@ def list_studies(search: str = None, limit: int = 20) -> list[dict]:
             # Sanitize search term to prevent SQL injection
             safe_search = _sanitize_search_term(search)
             query = f"""
-                SELECT 
+                SELECT
                     cs.cancer_study_identifier,
                     cs.name,
+                    cs.description,
                     cs.type_of_cancer_id,
                     COUNT(DISTINCT cd.sample_unique_id) as sample_count
                 FROM cancer_study cs
@@ -640,7 +641,8 @@ def list_studies(search: str = None, limit: int = 20) -> list[dict]:
                 WHERE cs.cancer_study_identifier ILIKE '%{safe_search}%'
                     OR cs.name ILIKE '%{safe_search}%'
                     OR cs.type_of_cancer_id ILIKE '%{safe_search}%'
-                GROUP BY cs.cancer_study_identifier, cs.name, cs.type_of_cancer_id
+                    OR cs.description ILIKE '%{safe_search}%'
+                GROUP BY cs.cancer_study_identifier, cs.name, cs.description, cs.type_of_cancer_id
                 ORDER BY sample_count DESC
                 LIMIT {safe_limit}
             """
