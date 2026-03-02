@@ -58,7 +58,7 @@ The public cBioPortal largely uses **hg19/GRCh37**. However, some studies use **
 
 ## Study Naming Conventions
 
-Study identifiers follow the pattern `{disease}_{institution}_{year}` (e.g., `brca_tcga_pan_can_atlas_2018`). Common abbreviations in study identifiers:
+Study identifiers typically combine disease, institution, and year, but the order varies. Common patterns include `{disease}_{institution}_{year}` (e.g., `brca_tcga_pan_can_atlas_2018`) and `{institution}_{disease}_{year}` (e.g., `msk_ch_2020`). Common abbreviations in study identifiers:
 
 | Pattern | Meaning | Example studies |
 |---|---|---|
