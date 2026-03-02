@@ -610,15 +610,15 @@ MAX_LIST_LIMIT = 100
 @mcp.tool()
 def list_studies(search: str = None, limit: int = 20) -> list[dict]:
     """List available cBioPortal studies.
-    
+
     Studies with pre-generated guides (in resources/study-guides/) will have has_guide=True.
-    
+
     Args:
-        search: Optional search term to filter studies by name or identifier
+        search: Optional search term to filter studies by name, identifier, cancer type, or description
         limit: Maximum number of studies to return (default 20, max 100)
-    
+
     Returns:
-        List of studies with their identifiers, names, sample counts, and guide availability
+        List of studies with their identifiers, names, descriptions, sample counts, and guide availability
     """
     available_guides = set(_list_available_study_guides())
     
@@ -648,14 +648,15 @@ def list_studies(search: str = None, limit: int = 20) -> list[dict]:
             """
         else:
             query = f"""
-                SELECT 
+                SELECT
                     cs.cancer_study_identifier,
                     cs.name,
+                    cs.description,
                     cs.type_of_cancer_id,
                     COUNT(DISTINCT cd.sample_unique_id) as sample_count
                 FROM cancer_study cs
                 LEFT JOIN clinical_data_derived cd ON cs.cancer_study_identifier = cd.cancer_study_identifier
-                GROUP BY cs.cancer_study_identifier, cs.name, cs.type_of_cancer_id
+                GROUP BY cs.cancer_study_identifier, cs.name, cs.description, cs.type_of_cancer_id
                 ORDER BY sample_count DESC
                 LIMIT {safe_limit}
             """
