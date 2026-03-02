@@ -54,6 +54,22 @@ The public cBioPortal largely uses **hg19/GRCh37**. However, some studies use **
 | OQL | Onco Query Language |
 | SV | Structural Variant |
 | RPPA | Reverse Phase Protein Array |
+| CH | Clonal Hematopoiesis |
+
+## Study Naming Conventions
+
+Study identifiers follow the pattern `{disease}_{institution}_{year}` (e.g., `brca_tcga_pan_can_atlas_2018`). Common abbreviations in study identifiers:
+
+| Pattern | Meaning | Example studies |
+|---|---|---|
+| `_tcga_` | The Cancer Genome Atlas | `luad_tcga_pan_can_atlas_2018` |
+| `_msk_` or `msk_` | Memorial Sloan Kettering | `msk_chord_2024` |
+| `_ch_` | Clonal Hematopoiesis | `msk_ch_2020`, `msk_ch_2023`, `msk_ch_ped_2021` |
+| `_target_` | Therapeutically Applicable Research to Generate Effective Treatments | `nbl_target_2018_pub` |
+| `_genie_` | AACR Project GENIE | `genie_public` |
+| `_pan_can_` | Pan-Cancer Atlas | `brca_tcga_pan_can_atlas_2018` |
+
+When searching for studies on a specific topic, use `list_studies(search=...)` with the disease name or abbreviation. For example, `list_studies(search="clonal hematopoiesis")` finds CH studies.
 
 ## Copy Number (GISTIC) Thresholds
 
