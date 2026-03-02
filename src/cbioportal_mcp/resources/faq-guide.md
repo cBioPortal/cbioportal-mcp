@@ -71,6 +71,11 @@ Study identifiers follow the pattern `{disease}_{institution}_{year}` (e.g., `br
 
 When searching for studies on a specific topic, use `list_studies(search=...)` with the disease name or abbreviation. For example, `list_studies(search="clonal hematopoiesis")` finds CH studies.
 
+### Study Links
+
+- **View a study:** `https://www.cbioportal.org/study?id={study_id}` (e.g., `https://www.cbioportal.org/study?id=msk_ch_2020`)
+- **Download study data:** `https://datahub.assets.cbioportal.org/{study_id}.tar.gz`
+
 ## Copy Number (GISTIC) Thresholds
 
 | Value | Label | Meaning |
