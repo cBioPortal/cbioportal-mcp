@@ -35,6 +35,29 @@ Also cite the specific study publication(s) whose data you used.
 
 Note: Synonymous mutations are not included in cBioPortal.
 
+## Data Types NOT in cBioPortal
+
+cBioPortal does NOT contain the following data types. If a user asks about any of these, respond immediately that the data is not available — do NOT search the database.
+
+| Data Type | Notes |
+|---|---|
+| Polygenic risk scores (PRS) | Computed externally from GWAS summary statistics |
+| GWAS summary statistics | cBioPortal focuses on somatic variants, not population-level association data |
+| Germline variants | Somatic-focused; systematic germline data is not available |
+| Raw sequencing data (FASTQ, BAM, CRAM) | Only processed results are stored; raw files are available through GDC or dbGaP |
+| Single-cell RNA-seq (scRNA-seq) | Only bulk expression data is available |
+| Spatial transcriptomics | Not stored |
+| Imaging / radiology data (CT, MRI, pathology slides) | Genomics portal only; imaging data is not stored |
+| Drug sensitivity data (IC50, dose-response) | Not stored; see GDSC, CCLE, or DepMap |
+| Epigenomics beyond methylation (ATAC-seq, ChIP-seq, histone marks) | Only DNA methylation data is available |
+| Microbiome / metagenomics | Not stored |
+| Metabolomics | Not stored |
+| Full mass-spec proteomics | Limited to RPPA and targeted mass-spec |
+| Long-read sequencing (PacBio, Oxford Nanopore) | Not stored |
+| Circulating tumor DNA (ctDNA) levels | Some studies may note ctDNA detection as a clinical attribute, but systematic ctDNA assay data is not a standard data type |
+
+If the user asks about a data type not listed above AND not in the supported data types list, compare against the supported types and inform the user that cBioPortal likely does not contain it rather than searching exhaustively.
+
 ## Reference Genome
 
 The public cBioPortal largely uses **hg19/GRCh37**. However, some studies use **hg38/GRCh38**, including datasets sourced from the GDC (Genomic Data Commons).
