@@ -409,8 +409,12 @@ def read_guide(uri: str) -> str:
     }
 
     if uri not in resources:
-        available = list(resources.keys())
-        return f"Resource not found: {uri}. Available resources: {available}"
+        available_list = "\n".join(f"  - {r}" for r in resources.keys())
+        return (
+            f"Resource not found: {uri}.\n"
+            f"Available resources:\n{available_list}\n\n"
+            "Use list_guides() for descriptions, or get_study_guide(study_id) for study-specific guides."
+        )
 
     return resources[uri]
 

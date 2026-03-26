@@ -423,6 +423,32 @@ WHERE cs.cancer_study_identifier ILIKE '%htan%';
 
 **Key rule:** cBioPortal stores external resource links in `resource_sample`, `resource_patient`, `resource_study`, and `resource_definition` tables. Always check these before saying something is out of scope.
 
+### 15. 🚨 HALLUCINATED TABLES OR COLUMNS
+
+#### ❌ Wrong: Querying tables or columns that don't exist
+```sql
+-- INCORRECT - assumes an 'oncokb_annotations' table exists
+SELECT * FROM oncokb_annotations WHERE gene = 'BRAF';
+
+-- INCORRECT - assumes a 'tumor_grade' column exists
+SELECT tumor_grade FROM clinical_data_derived WHERE cancer_study_identifier = 'brca_tcga';
+```
+
+#### ✅ Correct: Always verify schema before querying
+```sql
+-- Step 1: Verify the table exists
+-- Use clickhouse_list_tables tool first
+
+-- Step 2: Verify columns exist
+-- Use clickhouse_list_table_columns(table) tool first
+
+-- Step 3: Only then build your query using confirmed tables and columns
+SELECT attribute_value FROM clinical_data_derived
+WHERE attribute_name = 'TUMOR_GRADE' AND cancer_study_identifier = 'brca_tcga';
+```
+
+**Key rule:** Never assume a table or column exists. Always check with `clickhouse_list_tables` and `clickhouse_list_table_columns` first.
+
 ## Best Practices Summary
 
 1. **Always use gene-specific denominators** for mutation frequencies
@@ -440,6 +466,7 @@ WHERE cs.cancer_study_identifier ILIKE '%htan%';
 13. **Use correct column names** (`mutation_variant` not `protein_change`)
 14. **Use subqueries instead of CTEs** for complex aggregations in ClickHouse
 15. **Check resource tables before saying "out of scope"** — `resource_sample`, `resource_patient`, `resource_study`, `resource_definition` may have external links
+16. **Always verify schema** — never assume tables or columns exist without checking first
 
 ## Validation Checklist
 
@@ -455,3 +482,4 @@ Before trusting your results, ask:
 - [ ] Am I using the correct column names (mutation_variant, not protein_change)?
 - [ ] When asked about specific sample types (primary, metastatic, etc.), did I filter by SAMPLE_TYPE?
 - [ ] Before saying "out of scope", did I check `resource_sample`, `resource_patient`, `resource_study`, and `resource_definition` for external links?
+- [ ] Did I verify all tables and columns exist before querying them?
