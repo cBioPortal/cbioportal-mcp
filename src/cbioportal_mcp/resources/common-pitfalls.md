@@ -225,6 +225,50 @@ ORDER BY sample_count DESC;
 
 **Key Rule**: When asked about "primary samples", "metastatic samples", etc., ALWAYS use `clinical_data_derived` with `attribute_name = 'SAMPLE_TYPE'`. NEVER use the `sample.sample_type` column!
 
+### 5c. 🚨 FABRICATING OncoKB / DRIVER MUTATION ANNOTATIONS
+
+#### ❌ Wrong: Claiming mutations are OncoKB-annotated drivers without querying driver data
+```sql
+-- INCORRECT - assuming all truncating mutations are "OncoKB drivers"
+SELECT hugo_gene_symbol, mutation_variant, mutation_type
+FROM genomic_event_derived
+WHERE cancer_study_identifier = 'coadread_mskcc_2017'
+    AND hugo_gene_symbol = 'BRAF'
+    AND variant_type = 'mutation'
+-- Then claiming: "These are all OncoKB-annotated driver mutations"
+```
+**Problem**: Not all mutations in a gene are drivers. OncoKB driver annotations are separate from mutation occurrence data. Truncating mutations, missense mutations, etc. are NOT automatically "drivers" — they must be specifically annotated by OncoKB.
+
+#### ✅ Correct: Check for driver annotation columns first
+```sql
+-- Step 1: Check if driver annotation columns exist
+-- Use clickhouse_list_table_columns('genomic_event_derived')
+-- and look for columns with "driver" in the name
+
+-- Step 2: If driver columns exist, use them to filter
+SELECT hugo_gene_symbol, mutation_variant, driver_filter
+FROM genomic_event_derived
+WHERE cancer_study_identifier = 'coadread_mskcc_2017'
+    AND hugo_gene_symbol = 'BRAF'
+    AND variant_type = 'mutation'
+    AND driver_filter IS NOT NULL;
+
+-- Step 3: If driver columns do NOT exist, inform the user:
+-- "Driver mutation annotations are not available in the current database.
+--  Use the cBioPortal web interface with OQL DRIVER syntax (e.g., BRAF: MUT_DRIVER)"
+```
+
+**OQL DRIVER syntax (for reference — used in cBioPortal web UI, not SQL):**
+- `BRAF: MUT_DRIVER` — OncoKB-annotated driver mutations in BRAF
+- `BRAF: AMP_DRIVER` — OncoKB-annotated driver amplifications
+- `BRAF: HOMDEL_DRIVER` — OncoKB-annotated driver deletions
+
+**Key rules:**
+1. NEVER claim a mutation is an "OncoKB driver" without confirming from driver annotation data
+2. Always check for driver columns before answering driver mutation questions
+3. If driver data is unavailable, say so and suggest the web UI with OQL DRIVER syntax
+4. "Frequently mutated" does NOT mean "oncogenic" or "driver"
+
 ## Data Type Pitfalls
 
 ### 6. 🚨 STRING VS NUMERIC COMPARISONS
@@ -408,6 +452,7 @@ SELECT SUM(tp53) FROM (
 12. **Use numeric values for CNA** (2=AMP, -2=HOMDEL)
 13. **Use correct column names** (`mutation_variant` not `protein_change`)
 14. **Use subqueries instead of CTEs** for complex aggregations in ClickHouse
+15. **Never fabricate OncoKB/driver annotations** — check for driver columns first
 
 ## Validation Checklist
 
@@ -422,3 +467,4 @@ Before trusting your results, ask:
 - [ ] Did I use numeric values for CNA alterations (not strings)?
 - [ ] Am I using the correct column names (mutation_variant, not protein_change)?
 - [ ] When asked about specific sample types (primary, metastatic, etc.), did I filter by SAMPLE_TYPE?
+- [ ] Did I avoid fabricating OncoKB/driver annotations without checking driver columns first?
