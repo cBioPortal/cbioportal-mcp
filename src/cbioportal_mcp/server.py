@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 # Regex pattern for valid cBioPortal study identifiers
 # Allows alphanumeric characters, underscores, and hyphens
 VALID_STUDY_ID_PATTERN = re.compile(r'^[a-zA-Z0-9_-]+$')
+VALID_TABLE_NAME_PATTERN = re.compile(r'^[a-zA-Z0-9_]+$')
 
 def _validate_study_id(study_id: str) -> str:
     """Validate and sanitize a study ID to prevent SQL injection.
@@ -41,6 +42,27 @@ def _validate_study_id(study_id: str) -> str:
             "Study IDs may only contain alphanumeric characters, underscores, and hyphens."
         )
     return study_id
+
+def _validate_table_name(table: str) -> str:
+    """Validate a table name to prevent SQL injection.
+
+    Args:
+        table: The table name to validate
+
+    Returns:
+        The validated table name if valid
+
+    Raises:
+        ValueError: If table name contains invalid characters
+    """
+    if not table:
+        raise ValueError("Table name cannot be empty")
+    if not VALID_TABLE_NAME_PATTERN.match(table):
+        raise ValueError(
+            f"Invalid table name '{table}'. "
+            "Table names may only contain alphanumeric characters and underscores."
+        )
+    return table
 
 def _sanitize_search_term(search: str) -> str:
     """Sanitize a search term by escaping SQL special characters.
@@ -266,9 +288,6 @@ def clickhouse_run_select_query(query: str) -> dict[str, list[dict] | str]:
     Returns:
         - On success: an object with a single field "tables" containing an array of objects with the following fields:
             - name: Table name.
-            - primary_key: Name of the table primary key column(s), if defined.
-            - total_rows: Number of rows in the table.
-            - comment: Table description, if available.
         - On failure: an object with a single field "error_message" containing a string describing the error.
 """
 )
@@ -276,8 +295,10 @@ def clickhouse_list_tables() -> dict[str, list[dict] | str]:
     logger.info(f"clickhouse_list_tables: called")
 
     try:
-        query = "SELECT name, primary_key, total_rows, comment FROM system.tables WHERE database = currentDatabase()"
-        result = run_select_query(query)
+        from mcp_clickhouse.mcp_server import execute_query
+        raw = execute_query("SHOW TABLES")
+        rows = raw.get("rows", [])
+        result = [{"name": row[0]} for row in rows if row]
         logger.debug(f"clickhouse_list_tables result: {result}")
         return {"tables": result}
     except Exception as e:
@@ -302,11 +323,25 @@ def clickhouse_list_table_columns(table: str) -> dict[str, list[dict] | str]:
     logger.info(f"clickhouse_list_table_columns: called")
 
     try:
-        if any(char in table for char in ['"', "'", " "]):
-            raise ValueError(f"Invalid table name: {table}")
-        # FIXME be aware of sql injections! sanitize the table better
-        query = f"SELECT name, type, comment FROM system.columns WHERE table='{table}' and database = currentDatabase()"
-        result = run_select_query(query)
+        table = _validate_table_name(table)
+        from mcp_clickhouse.mcp_server import execute_query
+        raw = execute_query(f"DESCRIBE TABLE {table}")
+        columns_list = raw.get("columns", [])
+        rows = raw.get("rows", [])
+        # DESCRIBE TABLE returns: name, type, default_type, default_expression, comment, ...
+        col_idx = {name: i for i, name in enumerate(columns_list)}
+        name_idx = col_idx.get("name", 0)
+        type_idx = col_idx.get("type", 1)
+        comment_idx = col_idx.get("comment", 4)
+        result = []
+        for row in rows:
+            entry = {
+                "name": row[name_idx] if len(row) > name_idx else "",
+                "type": row[type_idx] if len(row) > type_idx else "",
+            }
+            if len(row) > comment_idx and row[comment_idx]:
+                entry["comment"] = row[comment_idx]
+            result.append(entry)
         logger.debug(f"clickhouse_list_table_columns result: {result}")
         return {"columns": result}
     except Exception as e:
