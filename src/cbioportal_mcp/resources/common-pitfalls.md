@@ -406,17 +406,22 @@ Bot: "This is outside the scope of cBioPortal data. Please visit the HTAN Data P
 SELECT cancer_study_identifier, name FROM cancer_study
 WHERE name ILIKE '%HTAN%' OR cancer_study_identifier ILIKE '%htan%';
 
--- Step 2: Check resource tables for external links
-SELECT * FROM resource_definition
-WHERE resource_type ILIKE '%MINERVA%' OR name ILIKE '%Minerva%';
+-- Step 2: Check resource definitions for relevant resources
+SELECT resource_id, display_name, description, resource_type
+FROM resource_definition
+WHERE display_name ILIKE '%Minerva%' OR description ILIKE '%Minerva%';
 
--- Step 3: Check sample-level resource links
-SELECT rs.*, rd.name as resource_name FROM resource_sample rs
+-- Step 3: Check sample-level resource links for matching studies
+SELECT rs.url, rd.display_name as resource_name, s.stable_id as sample_id
+FROM resource_sample rs
 JOIN resource_definition rd ON rs.resource_id = rd.resource_id
-WHERE rs.sample_unique_id ILIKE '%OHSU%';
+JOIN sample s ON rs.internal_id = s.internal_id
+JOIN patient p ON s.patient_id = p.internal_id
+JOIN cancer_study cs ON p.cancer_study_id = cs.cancer_study_id
+WHERE cs.cancer_study_identifier ILIKE '%htan%';
 ```
 
-**Key rule:** cBioPortal stores external resource links in `resource_sample`, `resource_patient`, and `resource_definition` tables. Always check these before saying something is out of scope.
+**Key rule:** cBioPortal stores external resource links in `resource_sample`, `resource_patient`, `resource_study`, and `resource_definition` tables. Always check these before saying something is out of scope.
 
 ## Best Practices Summary
 
@@ -434,7 +439,7 @@ WHERE rs.sample_unique_id ILIKE '%OHSU%';
 12. **Use numeric values for CNA** (2=AMP, -2=HOMDEL)
 13. **Use correct column names** (`mutation_variant` not `protein_change`)
 14. **Use subqueries instead of CTEs** for complex aggregations in ClickHouse
-15. **Check resource tables before saying "out of scope"** — `resource_sample`, `resource_patient`, `resource_definition` may have external links
+15. **Check resource tables before saying "out of scope"** — `resource_sample`, `resource_patient`, `resource_study`, `resource_definition` may have external links
 
 ## Validation Checklist
 
@@ -449,4 +454,4 @@ Before trusting your results, ask:
 - [ ] Did I use numeric values for CNA alterations (not strings)?
 - [ ] Am I using the correct column names (mutation_variant, not protein_change)?
 - [ ] When asked about specific sample types (primary, metastatic, etc.), did I filter by SAMPLE_TYPE?
-- [ ] Before saying "out of scope", did I check `resource_sample`, `resource_patient`, and `resource_definition` for external links?
+- [ ] Before saying "out of scope", did I check `resource_sample`, `resource_patient`, `resource_study`, and `resource_definition` for external links?
