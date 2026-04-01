@@ -43,6 +43,26 @@ export CLICKHOUSE_SECURE=true  # or false for insecure connections
 export CLICKHOUSE_MCP_SERVER_TRANSPORT=stdio # or http or sse
 ```
 
+### Database Permissions
+
+The ClickHouse user configured for the MCP server must have:
+1.  `SELECT` privilege on the target database (e.g., `cgds_public_2025_06_24`).
+2.  `SELECT` privilege on `system.tables` and `system.columns` (for schema discovery).
+
+It must **NOT** have:
+-   `INSERT`, `UPDATE`, `DELETE`, `ALTER`, `DROP`, `TRUNCATE`, `OPTIMIZE` or other administrative privileges.
+
+Example SQL to set up a user:
+```sql
+-- Create user
+CREATE USER mcp_user IDENTIFIED BY 'password';
+
+-- Grant required permissions
+GRANT SELECT ON cgds_public_2025_06_24.* TO mcp_user;
+GRANT SELECT ON system.tables TO mcp_user;
+GRANT SELECT ON system.columns TO mcp_user;
+```
+
 ## Development
 
 ### Inspecting the Server with MCP Inspector
