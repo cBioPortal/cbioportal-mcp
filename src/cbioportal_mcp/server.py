@@ -17,45 +17,58 @@ from cbioportal_mcp.authentication.permissions import ensure_db_permissions
 
 logger = logging.getLogger(__name__)
 
-# Regex pattern for valid cBioPortal study identifiers
+# Regex pattern for valid cBioPortal identifiers (study IDs, table names, etc.)
 # Allows alphanumeric characters, underscores, and hyphens
-VALID_STUDY_ID_PATTERN = re.compile(r'^[a-zA-Z0-9_-]+$')
+VALID_IDENTIFIER_PATTERN = re.compile(r'^[a-zA-Z0-9_-]+$')
+
+def _validate_identifier(value: str, label: str = "identifier") -> str:
+    """Validate an identifier (study ID, table name, etc.) to prevent SQL injection.
+
+    Only allows alphanumeric characters, underscores, and hyphens.
+
+    Args:
+        value: The identifier to validate
+        label: Human-readable label for error messages (e.g. "study_id", "table name")
+
+    Returns:
+        The validated identifier if valid
+
+    Raises:
+        ValueError: If the identifier is empty or contains invalid characters
+    """
+    if not value:
+        raise ValueError(f"{label} cannot be empty")
+    if not VALID_IDENTIFIER_PATTERN.match(value):
+        raise ValueError(
+            f"Invalid {label} '{value}'. "
+            f"{label} may only contain alphanumeric characters, underscores, and hyphens."
+        )
+    return value
 
 def _validate_study_id(study_id: str) -> str:
-    """Validate and sanitize a study ID to prevent SQL injection.
-    
-    Args:
-        study_id: The study identifier to validate
-        
-    Returns:
-        The validated study_id if valid
-        
-    Raises:
-        ValueError: If study_id contains invalid characters
-    """
-    if not study_id:
-        raise ValueError("study_id cannot be empty")
-    if not VALID_STUDY_ID_PATTERN.match(study_id):
-        raise ValueError(
-            f"Invalid study_id '{study_id}'. "
-            "Study IDs may only contain alphanumeric characters, underscores, and hyphens."
-        )
-    return study_id
+    """Validate and sanitize a study ID to prevent SQL injection."""
+    return _validate_identifier(study_id, label="study_id")
+
+def _validate_table_name(table: str) -> str:
+    """Validate and sanitize a table name to prevent SQL injection."""
+    return _validate_identifier(table, label="table name")
 
 def _sanitize_search_term(search: str) -> str:
     """Sanitize a search term by escaping SQL special characters.
-    
+
     Args:
         search: The search term to sanitize
-        
+
     Returns:
         The sanitized search term safe for use in LIKE clauses
     """
     if not search:
         return ""
+    # Escape backslashes FIRST (before they're introduced by later replacements)
+    sanitized = search.replace("\\", "\\\\")
     # Escape single quotes by doubling them (SQL standard)
-    # Also escape % and _ which are LIKE wildcards
-    sanitized = search.replace("'", "''")
+    sanitized = sanitized.replace("'", "''")
+    # Escape % and _ which are LIKE wildcards
     sanitized = sanitized.replace("%", "\\%")
     sanitized = sanitized.replace("_", "\\_")
     return sanitized
@@ -302,9 +315,7 @@ def clickhouse_list_table_columns(table: str) -> dict[str, list[dict] | str]:
     logger.info(f"clickhouse_list_table_columns: called")
 
     try:
-        if any(char in table for char in ['"', "'", " "]):
-            raise ValueError(f"Invalid table name: {table}")
-        # FIXME be aware of sql injections! sanitize the table better
+        table = _validate_table_name(table)
         query = f"SELECT name, type, comment FROM system.columns WHERE table='{table}' and database = currentDatabase()"
         result = run_select_query(query)
         logger.debug(f"clickhouse_list_table_columns result: {result}")
