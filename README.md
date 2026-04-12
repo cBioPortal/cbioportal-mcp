@@ -50,7 +50,7 @@ export CLICKHOUSE_MCP_SERVER_TRANSPORT=stdio # or http or sse
 To connect to the MCP server and see requests and replies, use MCP Inspector.
 You can run it with:
 ```bash
-fastmcp dev src/cbioportal_mcp/server.py
+fastmcp dev inspector src/cbioportal_mcp/server.py
 ```
 
 ### Running the Server
