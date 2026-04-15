@@ -259,6 +259,7 @@ WHERE cancer_study_identifier = 'coadread_mskcc_2017'
 ```
 
 **OQL DRIVER syntax (for reference — used in cBioPortal web UI, not SQL):**
+- `TP53: DRIVER` — all OncoKB-annotated driver alterations (mutations, fusions, CNAs)
 - `BRAF: MUT_DRIVER` — OncoKB-annotated driver mutations in BRAF
 - `BRAF: AMP_DRIVER` — OncoKB-annotated driver amplifications
 - `BRAF: HOMDEL_DRIVER` — OncoKB-annotated driver deletions
