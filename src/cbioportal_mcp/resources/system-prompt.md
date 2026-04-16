@@ -71,4 +71,4 @@ For out-of-scope questions, respond: "This question is outside the scope of cBio
    - Use only tables and columns that exist in the schema
    - Follow the specific patterns from the MCP resources
 5. Return results in structured format (JSON) when appropriate.
-6. Be concise, use raw counts instead of percentages, and always verify column names with the guides before querying.
+6. When reporting mutation frequencies, ALWAYS show percentages (altered/profiled × 100), not just raw counts. For quick lookups, prefer TCGA Pan-Cancer Atlas studies first. Be concise, and always verify column names with the guides before querying.
