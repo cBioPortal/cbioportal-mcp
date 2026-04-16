@@ -6,10 +6,8 @@ On startup we verify that the configured ClickHouse user:
 
 1. Has the minimal required privileges to do its job:
    - SELECT on the application database (config.mcp_database.*)
-   - Depending on schema discovery mode:
-     * mode "system": must be able to SELECT from system tables
-       (because code queries system.tables/system.columns).
-     * mode "show": must be able to run SHOW TABLES FROM <db>.
+   - Schema discovery uses SHOW TABLES and DESCRIBE TABLE, which
+     only require SELECT on the target database (no system.* access needed).
 
 2. Does NOT have excessive privileges:
    - No INSERT / UPDATE / DELETE / DDL / admin privileges on *.*.
@@ -48,7 +46,6 @@ def _check_grant(priv: str, scope: str) -> bool:
 
     Valid scopes include:
       - "<db>.*"
-      - "system.*"
       - "*.*"
       - "<db>.table[*]" (not used here, but legal)
 
@@ -104,8 +101,8 @@ def ensure_db_permissions(config: McpConfig) -> None:
 
     - Minimal:
         * SELECT ON <config.mcp_database>.* must be granted.
-        * In mode 'system': SELECT ON system.* must be granted.
-        * In mode 'show'  : SHOW TABLES FROM <config.mcp_database> must succeed.
+        * Schema discovery (SHOW TABLES, DESCRIBE TABLE) is implicitly
+          allowed when SELECT is granted on the database.
 
     - Maximal:
         * No FORBIDDEN_PRIVS may be granted on *.*.
