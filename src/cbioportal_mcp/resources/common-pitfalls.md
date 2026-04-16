@@ -437,6 +437,37 @@ SELECT SUM(tp53) FROM (
 );
 ```
 
+### 14. 🚨 PREMATURELY DECLARING SOMETHING OUT OF SCOPE
+
+#### ❌ Wrong: Immediately saying something is out of scope without checking
+```
+User: "Can you show me the Minerva viewer for the OHSU HTAN sample?"
+Bot: "This is outside the scope of cBioPortal data. Please visit the HTAN Data Portal."
+```
+
+#### ✅ Correct: Search for relevant data before declaring out of scope
+```sql
+-- Step 1: Search for relevant studies
+SELECT cancer_study_identifier, name FROM cancer_study
+WHERE name ILIKE '%HTAN%' OR cancer_study_identifier ILIKE '%htan%';
+
+-- Step 2: Check resource definitions for relevant resources
+SELECT resource_id, display_name, description, resource_type
+FROM resource_definition
+WHERE display_name ILIKE '%Minerva%' OR description ILIKE '%Minerva%';
+
+-- Step 3: Check sample-level resource links for matching studies
+SELECT rs.url, rd.display_name as resource_name, s.stable_id as sample_id
+FROM resource_sample rs
+JOIN resource_definition rd ON rs.resource_id = rd.resource_id
+JOIN sample s ON rs.internal_id = s.internal_id
+JOIN patient p ON s.patient_id = p.internal_id
+JOIN cancer_study cs ON p.cancer_study_id = cs.cancer_study_id
+WHERE cs.cancer_study_identifier ILIKE '%htan%';
+```
+
+**Key rule:** cBioPortal stores external resource links in `resource_sample`, `resource_patient`, `resource_study`, and `resource_definition` tables. Always check these before saying something is out of scope.
+
 ## Best Practices Summary
 
 1. **Always use gene-specific denominators** for mutation frequencies
@@ -454,6 +485,7 @@ SELECT SUM(tp53) FROM (
 13. **Use correct column names** (`mutation_variant` not `protein_change`)
 14. **Use subqueries instead of CTEs** for complex aggregations in ClickHouse
 15. **Never fabricate OncoKB/driver annotations** — check for driver columns first
+16. **Check resource tables before saying "out of scope"** — `resource_sample`, `resource_patient`, `resource_study`, `resource_definition` may have external links
 
 ## Validation Checklist
 
@@ -469,3 +501,4 @@ Before trusting your results, ask:
 - [ ] Am I using the correct column names (mutation_variant, not protein_change)?
 - [ ] When asked about specific sample types (primary, metastatic, etc.), did I filter by SAMPLE_TYPE?
 - [ ] Did I avoid fabricating OncoKB/driver annotations without checking driver columns first?
+- [ ] Before saying "out of scope", did I check `resource_sample`, `resource_patient`, `resource_study`, and `resource_definition` for external links?
