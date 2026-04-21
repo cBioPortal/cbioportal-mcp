@@ -125,6 +125,11 @@ sql/
 ├── cleanup-for-llm.sql            # Remove confusing columns/tables
 └── add-column-comments.sql        # Add helpful column comments
 
+authentication/
+├── __init__.py               # Package exports
+├── permissions.py            # ClickHouse DB permission checks
+└── auth_provider.py          # Auth provider factory (JWT/static/none)
+
 resources/
 ├── mutation-frequency-guide.md    # How to calculate frequencies
 ├── clinical-data-guide.md         # How to query clinical data

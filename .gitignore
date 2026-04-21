@@ -71,3 +71,6 @@ clickhouse-data/
 
 # Local configuration
 .env.local
+
+# Auth tokens/secrets
+.env.auth

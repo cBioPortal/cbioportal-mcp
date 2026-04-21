@@ -26,7 +26,10 @@ ENV CLICKHOUSE_HOST=localhost \
     CLICKHOUSE_VERIFY=true \
     CLICKHOUSE_MCP_SERVER_TRANSPORT=stdio \
     CLICKHOUSE_MCP_BIND_HOST=127.0.0.1 \
-    CLICKHOUSE_MCP_BIND_PORT=8000
+    CLICKHOUSE_MCP_BIND_PORT=8000 \
+    MCP_AUTH_MODE=none
+# Auth secrets (MCP_AUTH_TOKENS, MCP_AUTH_JWT_SECRET, etc.) should be
+# injected at runtime via docker run -e or docker-compose, not set here.
 
 # Expose port (optional — based on what the MCP server binds to; change if needed)
 EXPOSE 8000
