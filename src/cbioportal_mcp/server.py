@@ -207,6 +207,9 @@ def _treatment_guide_text() -> str:
 def _faq_guide_text() -> str:
     return _load_resource("faq-guide.md")
 
+def _statistical_tests_guide_text() -> str:
+    return _load_resource("statistical-tests-guide.md")
+
 # --- MCP resources (decorator registers them) --------------------------------
 @mcp.resource("cbioportal://mutation-frequency-guide")
 def mutation_frequency_guide() -> str:
@@ -231,6 +234,10 @@ def treatment_guide() -> str:
 @mcp.resource("cbioportal://faq-guide")
 def faq_guide() -> str:
     return _faq_guide_text()
+
+@mcp.resource("cbioportal://statistical-tests-guide")
+def statistical_tests_guide() -> str:
+    return _statistical_tests_guide_text()
 
 
 @mcp.tool(
@@ -383,6 +390,10 @@ def list_guides() -> list[dict]:
             "description": "General cBioPortal FAQ: history, how to cite, data types, reference genome, abbreviations, GISTIC thresholds, API access"
         },
         {
+            "uri": "cbioportal://statistical-tests-guide",
+            "description": "Statistical test selection guide — decision matrix for choosing Fisher's exact, Wilcoxon, chi-squared, t-test, ANOVA, etc. based on data type and group count"
+        },
+        {
             "uri": "cbioportal://study-guide/{study_id}",
             "description": "Dynamic study-specific guide - use get_study_guide(study_id) tool to generate"
         }
@@ -405,7 +416,8 @@ def read_guide(uri: str) -> str:
         "cbioportal://sample-filtering-guide": _sample_filtering_guide_text(),
         "cbioportal://common-pitfalls": _common_pitfalls_guide_text(),
         "cbioportal://treatment-guide": _treatment_guide_text(),
-        "cbioportal://faq-guide": _faq_guide_text()
+        "cbioportal://faq-guide": _faq_guide_text(),
+        "cbioportal://statistical-tests-guide": _statistical_tests_guide_text()
     }
 
     if uri not in resources:
