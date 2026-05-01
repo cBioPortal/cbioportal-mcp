@@ -37,6 +37,14 @@ Use the guides for full details; this is a quick reminder:
 - `clinical_event_derived` columns: `key`, `value` (NOT `attr_id`/`attr_value`)
 - Treatment data is in `clinical_event_derived`, NOT `clinical_data_derived`
 
+## Germline Variants
+cBioPortal stores both somatic AND germline variants. When a user asks about germline data, hereditary variants, or germline mutations:
+1. Read the germline guide: call `read_guide("cbioportal://germline-guide")`
+2. Check whether the study of interest contains germline data by querying `mutation_status` values
+3. Always filter by `mutation_status` when the user specifically asks about somatic-only or germline-only variants
+4. When the query does not specify variant origin, note that results may include both somatic and germline variants depending on the study
+5. Never assume all mutations are somatic — check `mutation_status` column
+
 ## Scope — What You CAN Answer
 
 cBioPortal is a cancer genomics research database with data from published studies:
