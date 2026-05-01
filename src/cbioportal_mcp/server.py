@@ -229,6 +229,9 @@ def _treatment_guide_text() -> str:
 def _faq_guide_text() -> str:
     return _load_resource("faq-guide.md")
 
+def _germline_guide_text() -> str:
+    return _load_resource("germline-guide.md")
+
 # --- MCP resources (decorator registers them) --------------------------------
 @mcp.resource("cbioportal://mutation-frequency-guide")
 def mutation_frequency_guide() -> str:
@@ -253,6 +256,10 @@ def treatment_guide() -> str:
 @mcp.resource("cbioportal://faq-guide")
 def faq_guide() -> str:
     return _faq_guide_text()
+
+@mcp.resource("cbioportal://germline-guide")
+def germline_guide() -> str:
+    return _germline_guide_text()
 
 
 @mcp.tool(
@@ -418,6 +425,10 @@ def list_guides() -> list[dict]:
             "description": "General cBioPortal FAQ: history, how to cite, data types, reference genome, abbreviations, GISTIC thresholds, API access"
         },
         {
+            "uri": "cbioportal://germline-guide",
+            "description": "Guide for querying germline variant data — storage columns, study discovery, query patterns, and somatic vs germline considerations"
+        },
+        {
             "uri": "cbioportal://study-guide/{study_id}",
             "description": "Dynamic study-specific guide - use get_study_guide(study_id) tool to generate"
         }
@@ -440,7 +451,8 @@ def read_guide(uri: str) -> str:
         "cbioportal://sample-filtering-guide": _sample_filtering_guide_text(),
         "cbioportal://common-pitfalls": _common_pitfalls_guide_text(),
         "cbioportal://treatment-guide": _treatment_guide_text(),
-        "cbioportal://faq-guide": _faq_guide_text()
+        "cbioportal://faq-guide": _faq_guide_text(),
+        "cbioportal://germline-guide": _germline_guide_text()
     }
 
     if uri not in resources:
