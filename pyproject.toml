@@ -14,11 +14,7 @@ authors = [
 ]
 dependencies = [
     "fastmcp",
-    # Pin mcp-clickhouse: 0.3.0 renamed the underlying tool from
-    # `run_select_query` to `run_query`, breaking our import at
-    # src/cbioportal_mcp/server.py. uv.lock already pins 0.1.11, but
-    # Dockerfile uses `pip install .` which ignores the lock and pulls
-    # PyPI latest. Pin explicitly here so fresh image builds match.
+    # 0.3.0 renamed run_select_query → run_query (breaking change)
     "mcp-clickhouse==0.1.11",
     "clickhouse-driver>=0.2.0",
 ]
