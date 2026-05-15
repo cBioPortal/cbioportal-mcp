@@ -13,83 +13,83 @@
 
 -- NOTE: If cleanup-for-llm.sql was run, sample_type column no longer exists.
 -- If you did NOT run cleanup, this comment warns agents about the column:
--- ALTER TABLE sample MODIFY COLUMN sample_type String
+-- ALTER TABLE sample MODIFY COLUMN sample_type
 --   COMMENT 'DEPRECATED: Contains generic values like "Primary Solid Tumor" for ALL tumor samples. DO NOT use for primary/metastatic filtering! Use clinical_data_derived with attribute_name="SAMPLE_TYPE" instead.';
 
-ALTER TABLE sample MODIFY COLUMN internal_id Int32
+ALTER TABLE sample MODIFY COLUMN internal_id
   COMMENT 'Primary key. Unique internal identifier for the sample.';
 
-ALTER TABLE sample MODIFY COLUMN stable_id String
+ALTER TABLE sample MODIFY COLUMN stable_id
   COMMENT 'Stable identifier for the sample within the study. Combined with cancer_study_identifier forms sample_unique_id.';
 
-ALTER TABLE sample MODIFY COLUMN patient_id Int32
+ALTER TABLE sample MODIFY COLUMN patient_id
   COMMENT 'Foreign key to patient.internal_id. Links sample to its patient.';
 
 -- ============================================================================
 -- patient table
 -- ============================================================================
 
-ALTER TABLE patient MODIFY COLUMN internal_id Int32
+ALTER TABLE patient MODIFY COLUMN internal_id
   COMMENT 'Primary key. Unique internal identifier for the patient.';
 
-ALTER TABLE patient MODIFY COLUMN stable_id String
+ALTER TABLE patient MODIFY COLUMN stable_id
   COMMENT 'Stable patient identifier within the study. Combined with cancer_study_identifier forms patient_unique_id.';
 
-ALTER TABLE patient MODIFY COLUMN cancer_study_id Int64
+ALTER TABLE patient MODIFY COLUMN cancer_study_id
   COMMENT 'Foreign key to cancer_study.cancer_study_id. Links patient to their study.';
 
 -- ============================================================================
 -- clinical_data_derived table (key table for clinical queries)
 -- ============================================================================
 
-ALTER TABLE clinical_data_derived MODIFY COLUMN sample_unique_id String
+ALTER TABLE clinical_data_derived MODIFY COLUMN sample_unique_id
   COMMENT 'Globally unique sample ID: cancer_study_identifier + "_" + sample.stable_id. Empty for patient-level attributes. Use this for sample filtering and joins.';
 
-ALTER TABLE clinical_data_derived MODIFY COLUMN patient_unique_id String
+ALTER TABLE clinical_data_derived MODIFY COLUMN patient_unique_id
   COMMENT 'Globally unique patient ID: cancer_study_identifier + "_" + patient.stable_id. Present for both sample and patient-level attributes.';
 
-ALTER TABLE clinical_data_derived MODIFY COLUMN attribute_name LowCardinality(String)
+ALTER TABLE clinical_data_derived MODIFY COLUMN attribute_name
   COMMENT 'Clinical attribute name (e.g., SAMPLE_TYPE, CANCER_TYPE, AGE, OS_MONTHS). Use with attribute_value for filtering.';
 
-ALTER TABLE clinical_data_derived MODIFY COLUMN attribute_value String
+ALTER TABLE clinical_data_derived MODIFY COLUMN attribute_value
   COMMENT 'Value of the clinical attribute. For SAMPLE_TYPE: Primary, Metastasis, Local Recurrence, Unknown. Cast to Float64 for numeric comparisons.';
 
-ALTER TABLE clinical_data_derived MODIFY COLUMN type LowCardinality(String)
+ALTER TABLE clinical_data_derived MODIFY COLUMN type
   COMMENT 'Data level: "sample" for sample-level attributes (e.g., SAMPLE_TYPE), "patient" for patient-level attributes (e.g., AGE, OS_MONTHS).';
 
 -- ============================================================================
 -- genomic_event_derived table (key table for mutation/CNA queries)
 -- ============================================================================
 
-ALTER TABLE genomic_event_derived MODIFY COLUMN variant_type String
+ALTER TABLE genomic_event_derived MODIFY COLUMN variant_type
   COMMENT 'Type of genomic event: "mutation" for SNVs/indels, "cna" for copy number alterations, "structural_variant" for SVs. Always filter by this.';
 
-ALTER TABLE genomic_event_derived MODIFY COLUMN hugo_gene_symbol String
+ALTER TABLE genomic_event_derived MODIFY COLUMN hugo_gene_symbol
   COMMENT 'HUGO gene symbol (e.g., TP53, KRAS, BRAF). Use for gene-specific queries.';
 
-ALTER TABLE genomic_event_derived MODIFY COLUMN mutation_status String
+ALTER TABLE genomic_event_derived MODIFY COLUMN mutation_status
   COMMENT 'For mutations: Somatic, Germline, UNKNOWN, or UNCALLED. Filter mutation_status != "UNCALLED" to exclude uncertain calls. Include all other statuses.';
 
-ALTER TABLE genomic_event_derived MODIFY COLUMN off_panel UInt8
+ALTER TABLE genomic_event_derived MODIFY COLUMN off_panel
   COMMENT 'Boolean: 1 = mutation outside gene panel coverage (off-panel), 0 = within panel (on-panel). Filter off_panel = 0 for reliable frequency calculations.';
 
-ALTER TABLE genomic_event_derived MODIFY COLUMN cna_alteration Int8
+ALTER TABLE genomic_event_derived MODIFY COLUMN cna_alteration
   COMMENT 'Copy number alteration: -2 = deep deletion (HOMDEL), -1 = shallow deletion, 0 = diploid, 1 = gain, 2 = amplification (AMP). NULL for non-CNA events.';
 
-ALTER TABLE genomic_event_derived MODIFY COLUMN mutation_variant String
+ALTER TABLE genomic_event_derived MODIFY COLUMN mutation_variant
   COMMENT 'Protein change notation (e.g., p.V600E, p.R175H). Use for specific variant queries. "NA" for non-mutation events.';
 
 -- ============================================================================
 -- cancer_study table
 -- ============================================================================
 
-ALTER TABLE cancer_study MODIFY COLUMN cancer_study_identifier String
+ALTER TABLE cancer_study MODIFY COLUMN cancer_study_identifier
   COMMENT 'Stable string identifier for the study (e.g., "msk_chord_2024", "brca_tcga"). Use this for filtering, not cancer_study_id.';
 
-ALTER TABLE cancer_study MODIFY COLUMN cancer_study_id Int64
+ALTER TABLE cancer_study MODIFY COLUMN cancer_study_id
   COMMENT 'Internal numeric ID. Prefer cancer_study_identifier for queries as it is more readable and stable.';
 
-ALTER TABLE cancer_study MODIFY COLUMN name String
+ALTER TABLE cancer_study MODIFY COLUMN name
   COMMENT 'Full descriptive name of the study (e.g., "MSK-CHORD (MSK, Nature 2024)").';
 
 -- ============================================================================
