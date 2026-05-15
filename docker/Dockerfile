@@ -11,8 +11,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* \
     && pip install --no-cache-dir uv
 
-COPY . /app
+# Deps-only layer — cache stays warm unless pyproject/uv.lock change.
+COPY pyproject.toml uv.lock README.md ./
+RUN uv sync --frozen --no-dev --no-install-project
 
+# Source layer — invalidates on any source/SQL change. The install below
+# is a fast project-only step now that deps are already in .venv.
+COPY . /app
 RUN uv sync --frozen --no-dev
 
 # Set environment variables expected at runtime (user should override as needed)
