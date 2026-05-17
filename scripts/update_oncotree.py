@@ -3,7 +3,7 @@
 
 Outputs:
   - src/cbioportal_mcp/resources/oncotree.json  (compact, ~120KB)
-  - sql/add-oncotree-fields.sql                 (ClickHouse migration)
+  - sql/2-add-oncotree-fields.sql               (ClickHouse migration)
 
 Usage:
   python scripts/update_oncotree.py
@@ -23,7 +23,7 @@ PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
 JSON_OUTPUT = os.path.join(
     PROJECT_ROOT, "src", "cbioportal_mcp", "resources", "oncotree.json"
 )
-SQL_OUTPUT = os.path.join(PROJECT_ROOT, "sql", "add-oncotree-fields.sql")
+SQL_OUTPUT = os.path.join(PROJECT_ROOT, "sql", "2-add-oncotree-fields.sql")
 
 KEEP_FIELDS = (
     "code",

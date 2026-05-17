@@ -15,6 +15,25 @@ MCP agent can reason about it.
 | 3 | `3-add-cancer-study-query-preferences.sql` | **Portable.** Creates `cancer_study_query_preferences` table + pattern-detected preferences (currently `pan_cancer_tcga`). Safe for any deployment. |
 | 4 | `4-public-portal-preferences.sql` | **Public-cBioPortal-specific.** Loads `all_studies_non_redundant`, `large_genomic_cohort`, `treatment_outcomes`. All INSERTs gated on `cancer_study` existence, so on other deployments this becomes a no-op rather than an error. |
 
+## Applying these files manually
+
+For a one-off apply outside the daily clone CronJob (e.g. you just edited
+`sql/4-*.sql` and want to test against a prepped database without re-cloning
+the data), use `scripts/apply_sql.sh`:
+
+```bash
+export CLICKHOUSE_HOST=...
+export CLICKHOUSE_DATABASE=cbioportal_public_librechat_blue   # your prepped DB
+export CLICKHOUSE_ADMIN_USER=librechat_admin                   # NOT the MCP SELECT-only user
+export CLICKHOUSE_ADMIN_PASSWORD=...
+./scripts/apply_sql.sh
+```
+
+Requires the `clickhouse-client` binary on `PATH`. The script uses dedicated
+`CLICKHOUSE_ADMIN_USER` / `CLICKHOUSE_ADMIN_PASSWORD` env vars instead of the
+MCP server's `CLICKHOUSE_USER` / `CLICKHOUSE_PASSWORD`, so the SELECT-only
+runtime user never sees DDL credentials.
+
 ## Deploying for a non-public portal
 
 Two options for adding your own preferences:

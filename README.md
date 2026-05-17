@@ -52,6 +52,16 @@ export CLICKHOUSE_MCP_SERVER_TRANSPORT=stdio # or http or sse
 
 The recommended pattern is a periodic clone job: copy your production cBioPortal database into a separate ClickHouse database, then apply the SQL files in [`sql/`](sql/) — these add column comments, drop misleading columns, denormalize OncoTree, and materialize the `cancer_study_query_preferences` table the agent uses for cohort lookups. Point the MCP at this cloned-and-prepped database. See [`sql/README.md`](sql/README.md) for the full schema-prep contract and how to add deployment-specific preferences.
 
+To apply the SQL files manually (e.g. for ad-hoc testing), use the helper script:
+
+```bash
+export CLICKHOUSE_HOST=... CLICKHOUSE_DATABASE=your-prepped-db
+export CLICKHOUSE_ADMIN_USER=...  CLICKHOUSE_ADMIN_PASSWORD=...
+./scripts/apply_sql.sh
+```
+
+Note the deliberately separate `CLICKHOUSE_ADMIN_*` env vars — admin credentials with DDL rights are kept out of the MCP server's runtime environment (which only ever needs `SELECT`).
+
 For an end-to-end reference deployment (Kubernetes CronJob that handles the clone + SQL apply + atomic pointer-flip), see the cBioPortal team's daily clone CronJob in [knowledgesystems-k8s-deployment](https://github.com/knowledgesystems/knowledgesystems-k8s-deployment).
 
 ## Development
