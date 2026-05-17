@@ -1,16 +1,23 @@
 -- ============================================================================
--- 4-public-portal-preferences.sql — preferences specific to cbioportal.org
+-- portal-specific/public-portal/0-preferences.sql
+-- Preferences specific to the public cbioportal.org deployment.
 -- ============================================================================
 -- These rows describe which studies to use for which kind of question on
--- the *public* cBioPortal deployment. Other deployments should either:
---   1. Delete this file from their image and add their own
---      5-mydeployment-preferences.sql, or
+-- the *public* cBioPortal deployment. Lives under sql/portal-specific/ so
+-- the boundary between "portable to any deployment" (sql/0-* through
+-- sql/4-*) and "tied to a specific portal" is a directory, not a number.
+--
+-- Other deployments should either:
+--   1. Add their own sql/portal-specific/<their-name>/*.sql files alongside
+--      this one — apply_sql.sh and the daily clone cron both iterate every
+--      subdirectory of sql/portal-specific/, so no config change is needed
+--      to pick up a new portal subdir.
 --   2. Leave this file in place — every INSERT below is gated on existence
---      in `cancer_study`, so studies your deployment doesn't have will produce
+--      in `cancer_study`, so studies your deployment doesn't have produce
 --      zero rows rather than phantom preferences.
 --
--- See 3-add-cancer-study-query-preferences.sql for the table schema and
--- the portable, pattern-detected preferences (pan_cancer_tcga).
+-- See sql/3-add-cancer-study-query-preferences.sql for the table schema
+-- and the portable, pattern-detected preferences (pan_cancer_tcga).
 --
 -- Preferences defined here (all defensively existence-checked):
 --   all_studies_non_redundant  — the 242-study curated set from cBioPortal's
