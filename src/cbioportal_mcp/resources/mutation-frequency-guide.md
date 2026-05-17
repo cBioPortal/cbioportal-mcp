@@ -24,14 +24,25 @@ When the user asks about a gene "across cancer types" or "in different cancers",
 
 ### Pick the preference that matches the question
 
-`cancer_study_query_preferences` (loaded by `sql/3-add-cancer-study-query-preferences.sql`) is a `(preference_name, cancer_study_identifier, notes)` lookup. A preference can resolve to many studies (a cohort) or a single study (a recommended cohort for a specific question type). Shipped preferences:
+`cancer_study_query_preferences` is a `(preference_name, cancer_study_identifier, notes)` lookup. A preference can resolve to many studies (a cohort) or a single study (a recommended cohort for a specific question type). The set of preferences depends on which SQL files this deployment loaded — discover what's available with:
 
-| `preference_name`       | Studies | When to use |
-|-------------------------|---------|-------------|
-| `all_studies_non_redundant`      | 242     | **Default for "across cancer types" questions.** cBioPortal's manually-curated non-redundant set — broadest coverage, mixes TCGA + non-TCGA, no overlapping samples. |
-| `pan_cancer_tcga`       | 32      | TCGA-only pan-cancer questions, or when a consistent single-source baseline is wanted. One sample per patient. |
-| `large_genomic_cohort`  | 1       | `msk_impact_50k_2026`. Genomic-pattern questions (mutation frequency, co-occurrence) at maximum statistical power. |
-| `treatment_outcomes`    | 1       | `msk_chord_2024`. Treatment / outcomes questions — pulls treatment context from `clinical_event_derived` (see `treatment-guide`). |
+```sql
+SELECT preference_name, COUNT(*) AS studies, any(notes) AS notes
+FROM cancer_study_query_preferences
+GROUP BY preference_name
+ORDER BY preference_name;
+```
+
+Preferences shipped with the cBioPortal-public deployment (others may differ):
+
+| `preference_name`           | Studies | When to use |
+|-----------------------------|---------|-------------|
+| `all_studies_non_redundant` | 242     | **Default for "across cancer types" questions.** cBioPortal's manually-curated non-redundant set — broadest coverage, mixes TCGA + non-TCGA, no overlapping samples. |
+| `pan_cancer_tcga`           | 32      | TCGA-only pan-cancer questions, or when a consistent single-source baseline is wanted. One sample per patient. Portable across deployments that load PanCanAtlas. |
+| `large_genomic_cohort`      | 1       | `msk_impact_50k_2026`. Genomic-pattern questions (mutation frequency, co-occurrence) at maximum statistical power. |
+| `treatment_outcomes`        | 1       | `msk_chord_2024`. Treatment / outcomes questions — pulls treatment context from `clinical_event_derived` (see `treatment-guide`). |
+
+If a preference is missing from this deployment, the discovery query above will tell you what's available — don't hand-pick study lists; ask the user which cohort they want.
 
 Do **not** combine MSK studies (`msk_impact_*`, `msk_chord_*`, `genie_public`) into one query — their `sample_unique_id`s differ but the underlying patients overlap, which inflates counts. Pick one preference.
 
