@@ -6,6 +6,97 @@
 - When reporting across multiple studies, show **ranges** (e.g., "TP53 is mutated in 30–60% of samples") rather than a single average
 - **NEVER** sum mutation events across studies to compute an aggregate frequency — this can exceed 100% due to double-counting
 - Warn users that samples may overlap across cohorts (e.g., MSK studies may share patients)
+- **For "across cancer types" questions**, jump to the [Cross-Cancer-Type Mutation Frequency](#cross-cancer-type-mutation-frequency) section below — there is one correct recipe and several common wrong ones.
+
+## STOP rule: a frequency above 100% means your query is wrong
+
+If your query returns a frequency over 100%, **do not try to debug or explain the data inconsistency to the user**. The cause is always one of these query bugs:
+
+- Summing mutation events instead of `COUNT(DISTINCT sample_unique_id)` for the numerator
+- Using a study-wide sample count as the denominator instead of the gene-specific profiled count
+- Cross-study aggregation where the same biological sample appears under multiple `sample_unique_id` values (e.g., MSK-IMPACT and MSK-CHORD share patients)
+
+Rewrite the query using one of the canonical patterns below (either single-study or the [Cross-Cancer-Type](#cross-cancer-type-mutation-frequency) recipe). Do **not** loop on diagnostic queries trying to attribute the >100% to "data inconsistencies" — there are none.
+
+## Cross-Cancer-Type Mutation Frequency
+
+When the user asks about a gene "across cancer types" or "in different cancers", **do not aggregate across studies** — instead use a single multi-cancer-type cohort and group by the per-sample `CANCER_TYPE` clinical attribute.
+
+### Recommended cohort: `msk_chord_2024`
+~25,000 samples spanning 11 major cancer types. Each sample carries `CANCER_TYPE` and `CANCER_TYPE_DETAILED` clinical attributes in `clinical_data_derived`. Gene panel coverage is consistent within the cohort, so the gene-specific denominator is meaningful.
+
+Alternative cohorts:
+- `msk_impact_2017` — ~10,000 samples, many cancer types (older snapshot)
+- `genie_public` (if loaded) — pan-cancer registry, more samples but multi-institutional variance
+
+### Canonical recipe
+
+```sql
+WITH sample_cancer_type AS (
+    SELECT sample_unique_id, attribute_value AS cancer_type
+    FROM clinical_data_derived
+    WHERE cancer_study_identifier = 'msk_chord_2024'
+      AND attribute_name = 'CANCER_TYPE'  -- or 'CANCER_TYPE_DETAILED' for finer granularity
+),
+altered AS (
+    SELECT sct.cancer_type,
+           COUNT(DISTINCT ged.sample_unique_id) AS altered_samples
+    FROM genomic_event_derived ged
+    JOIN sample_cancer_type sct USING (sample_unique_id)
+    WHERE ged.variant_type = 'mutation'
+      AND ged.mutation_status != 'UNCALLED'
+      AND ged.hugo_gene_symbol = 'TP53'  -- target gene
+      AND ged.off_panel = 0
+      AND ged.cancer_study_identifier = 'msk_chord_2024'
+    GROUP BY sct.cancer_type
+),
+profiled AS (
+    SELECT sct.cancer_type,
+           COUNT(DISTINCT stgp.sample_unique_id) AS profiled_samples
+    FROM sample_to_gene_panel_derived stgp
+    JOIN gene_panel gp ON stgp.gene_panel_id = gp.stable_id
+    JOIN gene_panel_list gpl USING (internal_id)
+    JOIN gene g ON gpl.gene_id = g.entrez_gene_id
+    JOIN sample_cancer_type sct USING (sample_unique_id)
+    WHERE stgp.alteration_type = 'MUTATION_EXTENDED'
+      AND g.hugo_gene_symbol = 'TP53'  -- same gene as above
+      AND stgp.cancer_study_identifier = 'msk_chord_2024'
+    GROUP BY sct.cancer_type
+)
+SELECT a.cancer_type,
+       a.altered_samples,
+       p.profiled_samples,
+       ROUND(a.altered_samples * 100.0 / NULLIF(p.profiled_samples, 0), 1) AS frequency_pct
+FROM altered a
+JOIN profiled p USING (cancer_type)
+WHERE p.profiled_samples >= 50  -- suppress tiny cancer types
+ORDER BY frequency_pct DESC;
+```
+
+Sample output (verified):
+
+| cancer_type                | altered | profiled | pct  |
+|----------------------------|---------|----------|------|
+| Colorectal Cancer          | 4,068   | 5,543    | 73.4 |
+| Pancreatic Cancer          | 2,076   | 3,109    | 66.8 |
+| Non-Small Cell Lung Cancer | 4,005   | 7,809    | 51.3 |
+| Breast Cancer              | 2,138   | 5,368    | 39.8 |
+| Prostate Cancer            | 837     | 3,211    | 26.1 |
+
+### Why this works
+- **One cohort = no cross-study sample double-counting.** `sample_unique_id` is study-prefixed, so the same biological sample appearing in two studies would be counted twice. Staying inside one study sidesteps this entirely.
+- **`CANCER_TYPE` from `clinical_data_derived`, not `type_of_cancer_id` from `cancer_study`.** Multi-cancer-type cohorts like MSK-CHORD have `cancer_study.type_of_cancer_id = 'mixed'`; the per-sample diagnosis lives in the clinical data, not the study record.
+- **Gene-specific profiled denominator per cancer type.** Different MSK-IMPACT gene panel versions cover slightly different gene sets — joining through `sample_to_gene_panel_derived` + `gene_panel_list` + `gene` filters to the samples where the gene was actually assayed.
+
+### When to vary
+- **Top-N most-mutated genes per cancer type**: extend the recipe by removing the `hugo_gene_symbol = '…'` filter and grouping by `(cancer_type, hugo_gene_symbol)`. Same `sample_cancer_type` CTE.
+- **Comparing two specific cancer types**: filter `sct.cancer_type IN ('Cancer A', 'Cancer B')` after `CANCER_TYPE` resolution via `search_oncotree`.
+- **TCGA-only audience**: use `pancan_pcawg_2020` or the relevant TCGA PanCanAtlas studies; the same recipe applies after substituting the `cancer_study_identifier`.
+
+### What NOT to do
+- **DO NOT** UNION mutation events from many separate studies (`luad_tcga`, `coadread_tcga`, …) and then group by `type_of_cancer_id` — the same biological sample can appear in pan-cancer + study-specific cohorts, and study-level frequencies don't compose into cohort-level frequencies without per-cancer-type profiling denominators.
+- **DO NOT** group by `cancer_study.type_of_cancer_id` for cohorts like MSK-CHORD, MSK-IMPACT, or GENIE — those have `type_of_cancer_id = 'mixed'` at the study level. Use the per-sample `clinical_data_derived.CANCER_TYPE` attribute instead.
+- **DO NOT** try to debug a >100% result query-by-query. See the STOP rule above.
 
 ## Overview
 For accurate gene mutation frequency calculations, you must use gene-specific profiling denominators, not study-wide sample counts.
