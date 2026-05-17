@@ -7,15 +7,17 @@
 -- instead of hardcoding study IDs.
 --
 -- THIS FILE owns the schema and only the truly portable, pattern-detected
--- preferences. Public-portal-specific preferences live in
--- 5-public-portal-preferences.sql. Other deployments should add their own
--- numbered file (e.g. 6-mydeployment-preferences.sql) — the daily clone
--- cron applies every *.sql in this directory in numeric order, so anything
--- you drop in will be picked up.
+-- preferences. Portal-specific preferences live in
+-- sql/portal-specific/<portal-name>/*.sql — for the cBioPortal public
+-- deployment that's sql/portal-specific/public-portal/0-preferences.sql.
+-- Other deployments add their own sql/portal-specific/<their-name>/*.sql;
+-- apply_sql.sh and the daily clone cron iterate every portal-specific
+-- subdirectory after the portable files.
 --
--- Defensive principle: every INSERT in this directory MUST gate on
--- existence in `cancer_study` so missing studies become no-ops rather than
--- phantom preference rows.
+-- Defensive principle: every INSERT into cancer_study_query_preferences,
+-- including those in portal-specific/, MUST gate on existence in
+-- `cancer_study` so missing studies become no-ops rather than phantom
+-- preference rows.
 -- ============================================================================
 
 DROP TABLE IF EXISTS cancer_study_query_preferences;

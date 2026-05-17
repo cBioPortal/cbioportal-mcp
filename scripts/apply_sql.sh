@@ -47,15 +47,20 @@ echo "Target: $CLICKHOUSE_ADMIN_USER@$CLICKHOUSE_HOST:$CLICKHOUSE_PORT/$CLICKHOU
 echo "SQL dir: $SQL_DIR"
 echo
 
-# Iterate numbered files in numeric order. Files without a leading digit are
-# treated as docs (e.g. README.md) and skipped.
+# Apply order:
+#   1. Portable files: SQL_DIR/*.sql in numeric order (0-, 1-, ...).
+#   2. Portal-specific files: SQL_DIR/portal-specific/<portal>/*.sql.
+#      Subdirectories iterate alphabetically, then numerically within each.
+#      Files without a leading digit are treated as docs (e.g. README.md).
 shopt -s nullglob
-# Bash globs are lexicographically sorted, which matches numeric order for
-# our 0-N prefix scheme.
-for f in "$SQL_DIR"/*.sql; do
+
+apply_one() {
+    local f="$1"
+    local rel="${f#${SQL_DIR}/}"
+    local base
     base=$(basename "$f")
-    [[ "$base" =~ ^[0-9]+- ]] || { echo "skip   $base (no numeric prefix)"; continue; }
-    echo "apply  $base"
+    [[ "$base" =~ ^[0-9]+- ]] || { echo "skip   $rel (no numeric prefix)"; return; }
+    echo "apply  $rel"
     clickhouse-client \
         --host "$CLICKHOUSE_HOST" \
         --port "$CLICKHOUSE_PORT" \
@@ -65,6 +70,23 @@ for f in "$SQL_DIR"/*.sql; do
         --database "$CLICKHOUSE_DATABASE" \
         --multiquery \
         --queries-file "$f"
+}
+
+# Phase 1: portable files at the top level.
+# Bash globs are lexicographically sorted, which matches numeric order for
+# our 0-N prefix scheme.
+for f in "$SQL_DIR"/*.sql; do
+    apply_one "$f"
+done
+
+# Phase 2: portal-specific files. Each subdir under portal-specific/ is one
+# deployment's set; iterate them all so a deployer image can include
+# multiple subdirs if needed.
+for d in "$SQL_DIR"/portal-specific/*/; do
+    [[ -d "$d" ]] || continue
+    for f in "$d"*.sql; do
+        apply_one "$f"
+    done
 done
 
 echo
