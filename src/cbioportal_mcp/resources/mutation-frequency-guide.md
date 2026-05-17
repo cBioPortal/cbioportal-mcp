@@ -47,15 +47,30 @@ If a preference is missing from this deployment, the discovery query above will 
 
 Do **not** combine MSK studies (`msk_impact_*`, `msk_chord_*`, `genie_public`) into one query — their `sample_unique_id`s differ but the underlying patients overlap, which inflates counts. Pick one preference.
 
-### Canonical recipe (uses `cancer_study_query_preferences`)
+### Canonical recipe — parameterized view
 
-Drop in a `preference_name` and a `hugo_gene_symbol`; the rest stays. The recipe works identically whether the preference resolves to 1 study or 242.
+The whole recipe is wrapped in a parameterized view. The agent's "canonical" query is one line:
+
+```sql
+SELECT *
+FROM gene_mutation_frequency_by_cancer_type(
+    preference = 'all_studies_non_redundant',  -- or 'pan_cancer_tcga', 'large_genomic_cohort', 'treatment_outcomes'
+    gene       = 'TP53'
+)
+ORDER BY frequency_pct DESC;
+```
+
+Returns `(cancer_type, altered_samples, profiled_samples, frequency_pct)` for every cancer type with ≥ 50 profiled samples for the gene in the cohort. The recipe works identically whether the preference resolves to 1 study or 242.
+
+The view is defined in `sql/5-mutation-coverage-views.sql` and handles the WES-vs-named-panel split internally (see "Why this works" below). The agent should prefer this view for any "gene X across cancer types in cohort Y" question instead of writing the JOIN chain by hand.
+
+For variations the view doesn't cover (top-N most-mutated genes per cancer type, comparing two specific cancer types, single-study queries that need extra filters), drop down to the expanded CTE form below and adapt — but start from this CTE form, not a from-scratch JOIN chain that risks missing the WES branch:
 
 ```sql
 WITH cohort AS (
     SELECT cancer_study_identifier
     FROM cancer_study_query_preferences
-    WHERE preference_name = 'all_studies_non_redundant'  -- or 'pan_cancer_tcga', 'large_genomic_cohort', 'treatment_outcomes'
+    WHERE preference_name = 'all_studies_non_redundant'
 ),
 sample_cancer_type AS (
     SELECT cd.sample_unique_id, cd.attribute_value AS cancer_type
@@ -76,13 +91,10 @@ altered AS (
     GROUP BY sct.cancer_type
 ),
 profiled_samples_for_gene AS (
-    -- Samples on a named panel that explicitly includes the target gene
     SELECT sample_unique_id, cancer_study_identifier
     FROM mutation_panel_gene_coverage
     WHERE hugo_gene_symbol = 'TP53'  -- same gene as above
     UNION ALL
-    -- WES samples profile every gene; always include them in the
-    -- denominator regardless of which gene we're asking about
     SELECT sample_unique_id, cancer_study_identifier
     FROM mutation_wes_coverage
 ),
