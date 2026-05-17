@@ -6,7 +6,7 @@
 --   1. Delete this file from their image and add their own
 --      5-mydeployment-preferences.sql, or
 --   2. Leave this file in place — every INSERT below is gated on existence
---      in `cancer_study`, so studies your deployment doesn't have produce
+--      in `cancer_study`, so studies your deployment doesn't have will produce
 --      zero rows rather than phantom preferences.
 --
 -- See 3-add-cancer-study-query-preferences.sql for the table schema and
