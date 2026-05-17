@@ -41,7 +41,7 @@ WHERE p.cancer_study_identifier IN (SELECT cancer_study_identifier FROM cancer_s
 -- studies with no overlapping samples (--skin.quick_select_buttons
 -- "Curated set of non-redundant studies"). Only inserts rows for studies
 -- present in this clone.
-INSERT INTO cancer_study_query_preferences
+INSERT INTO cancer_study_query_preferences (preference_name, cancer_study_identifier, notes)
 SELECT 'all_studies_non_redundant', cancer_study_identifier, 'cBioPortal curated non-redundant set'
 FROM cancer_study
 WHERE cancer_study_identifier IN (
