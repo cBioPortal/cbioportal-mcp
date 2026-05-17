@@ -62,7 +62,7 @@ ORDER BY frequency_pct DESC;
 
 Returns `(cancer_type, altered_samples, profiled_samples, frequency_pct)` for every cancer type with ≥ 50 profiled samples for the gene in the cohort. The recipe works identically whether the preference resolves to 1 study or 242.
 
-The view is defined in `sql/5-mutation-coverage-views.sql` and handles the WES-vs-named-panel split internally (see "Why this works" below). The agent should prefer this view for any "gene X across cancer types in cohort Y" question instead of writing the JOIN chain by hand.
+The view is defined in `sql/4-mutation-coverage-views.sql` and handles the WES-vs-named-panel split internally (see "Why this works" below). The agent should prefer this view for any "gene X across cancer types in cohort Y" question instead of writing the JOIN chain by hand.
 
 For variations the view doesn't cover (top-N most-mutated genes per cancer type, comparing two specific cancer types, single-study queries that need extra filters), drop down to the expanded CTE form below and adapt — but start from this CTE form, not a from-scratch JOIN chain that risks missing the WES branch:
 
@@ -119,7 +119,7 @@ ORDER BY frequency_pct DESC;
 ### Why this works
 - **`cancer_study_query_preferences` enforces a non-overlapping cohort.** Every shipped preference resolves to studies with no shared samples, so `COUNT(DISTINCT sample_unique_id)` doesn't double-count.
 - **`CANCER_TYPE` from `clinical_data_derived`, not `type_of_cancer_id` from `cancer_study`.** Multi-cancer-type studies (MSK-CHORD, MSK-IMPACT-50k, GENIE) carry `cancer_study.type_of_cancer_id = 'mixed'`; the per-sample diagnosis lives in the clinical data. Using the clinical attribute also works uniformly for single-cancer-type studies in the same cohort.
-- **WES-aware profiled denominator.** Samples on a named panel are profiled for the genes listed in `gene_panel_list`; WES samples are profiled for *every* gene. `WES` is not in the `gene_panel` table at all, so the older recipe that joined through `gene_panel` / `gene_panel_list` silently dropped WES rows — producing >100% frequencies wherever WES studies contributed altered samples but no profiled samples. The two views in `sql/5-mutation-coverage-views.sql` (`mutation_panel_gene_coverage` and `mutation_wes_coverage`) encapsulate this split so every gene-frequency query gets the WES branch for free via the `UNION ALL` above.
+- **WES-aware profiled denominator.** Samples on a named panel are profiled for the genes listed in `gene_panel_list`; WES samples are profiled for *every* gene. `WES` is not in the `gene_panel` table at all, so the older recipe that joined through `gene_panel` / `gene_panel_list` silently dropped WES rows — producing >100% frequencies wherever WES studies contributed altered samples but no profiled samples. The two views in `sql/4-mutation-coverage-views.sql` (`mutation_panel_gene_coverage` and `mutation_wes_coverage`) encapsulate this split so every gene-frequency query gets the WES branch for free via the `UNION ALL` above.
 
 ### When to vary
 - **Top-N most-mutated genes per cancer type**: drop the `hugo_gene_symbol = '…'` filter and group by `(cancer_type, hugo_gene_symbol)`. Same CTEs.

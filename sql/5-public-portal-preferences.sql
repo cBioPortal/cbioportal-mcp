@@ -1,10 +1,10 @@
 -- ============================================================================
--- 4-public-portal-preferences.sql — preferences specific to cbioportal.org
+-- 5-public-portal-preferences.sql — preferences specific to cbioportal.org
 -- ============================================================================
 -- These rows describe which studies to use for which kind of question on
 -- the *public* cBioPortal deployment. Other deployments should either:
 --   1. Delete this file from their image and add their own
---      5-mydeployment-preferences.sql, or
+--      6-mydeployment-preferences.sql, or
 --   2. Leave this file in place — every INSERT below is gated on existence
 --      in `cancer_study`, so studies your deployment doesn't have will produce
 --      zero rows rather than phantom preferences.

@@ -8,8 +8,8 @@
 --
 -- THIS FILE owns the schema and only the truly portable, pattern-detected
 -- preferences. Public-portal-specific preferences live in
--- 4-public-portal-preferences.sql. Other deployments should add their own
--- numbered file (e.g. 5-mydeployment-preferences.sql) — the daily clone
+-- 5-public-portal-preferences.sql. Other deployments should add their own
+-- numbered file (e.g. 6-mydeployment-preferences.sql) — the daily clone
 -- cron applies every *.sql in this directory in numeric order, so anything
 -- you drop in will be picked up.
 --

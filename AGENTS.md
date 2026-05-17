@@ -15,8 +15,8 @@ SQL scripts in `sql/` directory (numeric prefix = apply order; see `sql/README.m
 - `1-add-column-comments.sql` - Adds helpful column comments
 - `2-add-oncotree-fields.sql` - Denormalizes OncoTree onto `type_of_cancer`
 - `3-add-cancer-study-query-preferences.sql` - Creates the cohort-lookup table
-- `4-public-portal-preferences.sql` - Public-portal-specific cohort rows (gated, no-op elsewhere)
-- `5-mutation-coverage-views.sql` - WES-aware views for mutation-frequency denominators
+- `4-mutation-coverage-views.sql` - WES-aware views for mutation-frequency denominators + parameterized `gene_mutation_frequency_by_cancer_type(preference, gene)` recipe view
+- `5-public-portal-preferences.sql` - Public-portal-specific cohort rows (gated, no-op elsewhere)
 
 **Example**: The `sample.sample_type` column contained "Primary Solid Tumor" for ALL samples, causing agents to report wrong counts for "primary samples". Solution: Remove the column entirely.
 
@@ -131,8 +131,8 @@ sql/
 ├── 1-add-column-comments.sql                    # Add helpful column comments
 ├── 2-add-oncotree-fields.sql                    # Denormalize OncoTree onto type_of_cancer
 ├── 3-add-cancer-study-query-preferences.sql     # cancer_study_query_preferences table + portable preferences
-├── 4-public-portal-preferences.sql              # Public-portal-specific cohort rows (gated)
-└── 5-mutation-coverage-views.sql                # WES-aware views for mutation-frequency denominators
+├── 4-mutation-coverage-views.sql                # WES-aware views for mutation-frequency denominators
+└── 5-public-portal-preferences.sql              # Public-portal-specific cohort rows (gated)
 
 scripts/
 └── apply_sql.sh                                 # Apply all sql/*.sql in order against admin creds

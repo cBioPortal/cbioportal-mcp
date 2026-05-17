@@ -13,13 +13,15 @@ MCP agent can reason about it.
 | 1 | `1-add-column-comments.sql` | Attach human-readable `COMMENT`s so the agent can self-introspect column meaning. |
 | 2 | `2-add-oncotree-fields.sql` | Add OncoTree fields to `type_of_cancer` (auto-generated). |
 | 3 | `3-add-cancer-study-query-preferences.sql` | **Portable.** Creates `cancer_study_query_preferences` table + pattern-detected preferences (currently `pan_cancer_tcga`). Safe for any deployment. |
-| 4 | `4-public-portal-preferences.sql` | **Public-cBioPortal-specific.** Loads `all_studies_non_redundant`, `large_genomic_cohort`, `treatment_outcomes`. All INSERTs gated on `cancer_study` existence, so on other deployments this becomes a no-op rather than an error. |
-| 5 | `5-mutation-coverage-views.sql` | **Portable.** Creates `mutation_panel_gene_coverage` and `mutation_wes_coverage` views so gene-frequency queries can correctly include WES-sequenced samples in the profiled denominator (WES is not in the `gene_panel` table — the views encapsulate that special case). See `cbioportal://mutation-frequency-guide`. |
+| 4 | `4-mutation-coverage-views.sql` | **Portable.** Creates `mutation_panel_gene_coverage` + `mutation_wes_coverage` building-block views and the parameterized `gene_mutation_frequency_by_cancer_type(preference, gene)` recipe view. Handles the "WES is not in `gene_panel`" trap that produces >100% frequencies. See `cbioportal://mutation-frequency-guide`. |
+| 5 | `5-public-portal-preferences.sql` | **Public-cBioPortal-specific.** Loads `all_studies_non_redundant`, `large_genomic_cohort`, `treatment_outcomes` preferences. All INSERTs gated on `cancer_study` existence, so on other deployments this is a no-op rather than an error. |
+
+Files 0-4 are portable across deployments; file 5 is the only one tied to cBioPortal-public. Other deployers either leave file 5 in place (it becomes a no-op on databases without the public-portal studies) or replace it with their own equivalent — see "Deploying for a non-public portal" below.
 
 ## Applying these files manually
 
 For a one-off apply outside the daily clone CronJob (e.g. you just edited
-`sql/4-*.sql` and want to test against a prepped database without re-cloning
+`sql/5-*.sql` and want to test against a prepped database without re-cloning
 the data), use `scripts/apply_sql.sh`:
 
 ```bash
@@ -39,18 +41,18 @@ runtime user never sees DDL credentials.
 
 Two options for adding your own preferences:
 
-1. **Leave `4-public-portal-preferences.sql` in place** — its existence-checked
+1. **Leave `5-public-portal-preferences.sql` in place** — its existence-checked
    INSERTs are no-ops if you don't have the cBioPortal-public studies. Add
    your own preferences in a higher-numbered file, e.g.
-   `5-mydeployment-preferences.sql`. The cron will pick it up automatically.
+   `6-mydeployment-preferences.sql`. The cron will pick it up automatically.
 
-2. **Replace `4-public-portal-preferences.sql`** in your image / mount with
+2. **Replace `5-public-portal-preferences.sql`** in your image / mount with
    your own preferences file. Use the same defensive existence-checking
    pattern so a missing study doesn't write a phantom row.
 
 ## Conventions for new preference files
 
-- Numeric prefix so order is intrinsic. New files start at `5-` and up.
+- Numeric prefix so order is intrinsic. New files start at `6-` and up.
 - Every `INSERT INTO cancer_study_query_preferences` must gate on
   `WHERE cancer_study_identifier IN (SELECT cancer_study_identifier FROM cancer_study)`
   (or equivalent) so the file is harmless on databases that don't have your
