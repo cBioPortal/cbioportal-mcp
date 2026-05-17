@@ -63,15 +63,21 @@ WHERE alteration_type = 'MUTATION_EXTENDED'
 -- doesn't have to write (and can't get wrong) the JOIN chain.
 --
 -- Parameters:
---   preference  — a row in cancer_study_query_preferences.preference_name
---                 (e.g. 'all_studies_non_redundant', 'pan_cancer_tcga',
---                 'large_genomic_cohort', 'treatment_outcomes')
+--   preference  — a row in cancer_study_query_preferences.preference_name.
+--                 Default is 'pan_cancer_tcga' (32 TCGA PanCancer Atlas
+--                 studies, consistent labels, balanced sample sizes,
+--                 canonical published reference). Other shipped values:
+--                 'large_genomic_cohort' (msk_impact_50k_2026 — biggest
+--                 single MSK cohort), 'treatment_outcomes' (msk_chord_2024
+--                 — treatment-rich), and 'all_studies_non_redundant' (242
+--                 studies, use sparingly — see mutation-frequency-guide;
+--                 CANCER_TYPE labels are not normalized across studies).
 --   gene        — HUGO gene symbol (e.g. 'TP53', 'KRAS')
 --
 -- Usage:
 --   SELECT *
 --   FROM gene_mutation_frequency_by_cancer_type(
---       preference='all_studies_non_redundant',
+--       preference='pan_cancer_tcga',
 --       gene='TP53'
 --   )
 --   ORDER BY frequency_pct DESC;

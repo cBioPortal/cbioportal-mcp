@@ -38,10 +38,10 @@ Preferences shipped with the cBioPortal-public deployment (others may differ):
 
 | `preference_name`           | Studies | When to use |
 |-----------------------------|---------|-------------|
-| `all_studies_non_redundant` | 242     | **Default for "across cancer types" questions.** cBioPortal's manually-curated non-redundant set — broadest coverage, mixes TCGA + non-TCGA, no overlapping samples. |
-| `pan_cancer_tcga`           | 32      | TCGA-only pan-cancer questions, or when a consistent single-source baseline is wanted. One sample per patient. Portable across deployments that load PanCanAtlas. |
-| `large_genomic_cohort`      | 1       | `msk_impact_50k_2026`. Genomic-pattern questions (mutation frequency, co-occurrence) at maximum statistical power. |
+| `pan_cancer_tcga`           | 32      | **Default for "across cancer types" questions** — including ones phrased as "all cancer types." TCGA PanCancer Atlas uses one consistent `CANCER_TYPE` label per study with balanced sample sizes (hundreds per type), so each cancer type gets one bucket with a meaningful denominator. Canonical published reference dataset. |
+| `large_genomic_cohort`      | 1       | `msk_impact_50k_2026`. Genomic-pattern questions (mutation frequency, co-occurrence) where statistical power matters more than cross-deployment portability. |
 | `treatment_outcomes`        | 1       | `msk_chord_2024`. Treatment / outcomes questions — pulls treatment context from `clinical_event_derived` (see `treatment-guide`). |
+| `all_studies_non_redundant` | 242     | **Only when the user explicitly asks for broader-than-TCGA coverage or for non-TCGA studies specifically.** Big footgun: `CANCER_TYPE` strings are NOT normalized across studies, so the same disease appears under multiple labels (e.g. "Ovarian Cancer" / "Ovarian Carcinoma" / "Ovarian Epithelial Tumor"; "Lung Adenocarcinoma" from one small specialty study vs "Non-Small Cell Lung Cancer" from TCGA + GENIE). Denominators per row vary by orders of magnitude. Frequencies in small per-label buckets are not representative biology — they're artifacts of how that study chose to label its samples. Always warn the user when reporting from this cohort. |
 
 If a preference is missing from this deployment, the discovery query above will tell you what's available — don't hand-pick study lists; ask the user which cohort they want.
 
@@ -54,7 +54,7 @@ The whole recipe is wrapped in a parameterized view. The agent's "canonical" que
 ```sql
 SELECT *
 FROM gene_mutation_frequency_by_cancer_type(
-    preference = 'all_studies_non_redundant',  -- or 'pan_cancer_tcga', 'large_genomic_cohort', 'treatment_outcomes'
+    preference = 'pan_cancer_tcga',  -- default; see preference table above for when to switch
     gene       = 'TP53'
 )
 ORDER BY frequency_pct DESC;
@@ -70,7 +70,7 @@ For variations the view doesn't cover (top-N most-mutated genes per cancer type,
 WITH cohort AS (
     SELECT cancer_study_identifier
     FROM cancer_study_query_preferences
-    WHERE preference_name = 'all_studies_non_redundant'
+    WHERE preference_name = 'pan_cancer_tcga'
 ),
 sample_cancer_type AS (
     SELECT cd.sample_unique_id, cd.attribute_value AS cancer_type
