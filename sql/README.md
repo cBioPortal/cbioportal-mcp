@@ -14,6 +14,7 @@ MCP agent can reason about it.
 | 2 | `2-add-oncotree-fields.sql` | Add OncoTree fields to `type_of_cancer` (auto-generated). |
 | 3 | `3-add-cancer-study-query-preferences.sql` | **Portable.** Creates `cancer_study_query_preferences` table + pattern-detected preferences (currently `pan_cancer_tcga`). Safe for any deployment. |
 | 4 | `4-public-portal-preferences.sql` | **Public-cBioPortal-specific.** Loads `all_studies_non_redundant`, `large_genomic_cohort`, `treatment_outcomes`. All INSERTs gated on `cancer_study` existence, so on other deployments this becomes a no-op rather than an error. |
+| 5 | `5-mutation-coverage-views.sql` | **Portable.** Creates `mutation_panel_gene_coverage` and `mutation_wes_coverage` views so gene-frequency queries can correctly include WES-sequenced samples in the profiled denominator (WES is not in the `gene_panel` table — the views encapsulate that special case). See `cbioportal://mutation-frequency-guide`. |
 
 ## Applying these files manually
 

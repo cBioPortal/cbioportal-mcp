@@ -15,6 +15,7 @@ If your query returns a frequency over 100%, **do not try to debug or explain th
 - Summing mutation events instead of `COUNT(DISTINCT sample_unique_id)` for the numerator
 - Using a study-wide sample count as the denominator instead of the gene-specific profiled count
 - Cross-study aggregation where the same biological sample appears under multiple `sample_unique_id` values (e.g., MSK-IMPACT and MSK-CHORD share patients)
+- **Joining the profiled CTE through `gene_panel` / `gene_panel_list` without a WES branch.** `gene_panel_id = 'WES'` is *not* a row in `gene_panel`, so any inner JOIN through that table silently drops WES-sequenced samples from the denominator while the numerator (from `genomic_event_derived`) still counts their mutations. Always union with `mutation_wes_coverage` (or include WES samples some other way) — see the Cross-Cancer-Type recipe below.
 
 Rewrite the query using one of the canonical patterns below (either single-study or the [Cross-Cancer-Type](#cross-cancer-type-mutation-frequency) recipe). Do **not** loop on diagnostic queries trying to attribute the >100% to "data inconsistencies" — there are none.
 
@@ -74,17 +75,23 @@ altered AS (
       AND ged.off_panel = 0
     GROUP BY sct.cancer_type
 ),
+profiled_samples_for_gene AS (
+    -- Samples on a named panel that explicitly includes the target gene
+    SELECT sample_unique_id, cancer_study_identifier
+    FROM mutation_panel_gene_coverage
+    WHERE hugo_gene_symbol = 'TP53'  -- same gene as above
+    UNION ALL
+    -- WES samples profile every gene; always include them in the
+    -- denominator regardless of which gene we're asking about
+    SELECT sample_unique_id, cancer_study_identifier
+    FROM mutation_wes_coverage
+),
 profiled AS (
     SELECT sct.cancer_type,
-           COUNT(DISTINCT stgp.sample_unique_id) AS profiled_samples
-    FROM sample_to_gene_panel_derived stgp
+           COUNT(DISTINCT p.sample_unique_id) AS profiled_samples
+    FROM profiled_samples_for_gene p
     JOIN cohort c USING (cancer_study_identifier)
-    JOIN gene_panel gp ON stgp.gene_panel_id = gp.stable_id
-    JOIN gene_panel_list gpl ON gp.internal_id = gpl.internal_id
-    JOIN gene g ON gpl.gene_id = g.entrez_gene_id
     JOIN sample_cancer_type sct USING (sample_unique_id)
-    WHERE stgp.alteration_type = 'MUTATION_EXTENDED'
-      AND g.hugo_gene_symbol = 'TP53'  -- same gene as above
     GROUP BY sct.cancer_type
 )
 SELECT a.cancer_type,
@@ -100,7 +107,7 @@ ORDER BY frequency_pct DESC;
 ### Why this works
 - **`cancer_study_query_preferences` enforces a non-overlapping cohort.** Every shipped preference resolves to studies with no shared samples, so `COUNT(DISTINCT sample_unique_id)` doesn't double-count.
 - **`CANCER_TYPE` from `clinical_data_derived`, not `type_of_cancer_id` from `cancer_study`.** Multi-cancer-type studies (MSK-CHORD, MSK-IMPACT-50k, GENIE) carry `cancer_study.type_of_cancer_id = 'mixed'`; the per-sample diagnosis lives in the clinical data. Using the clinical attribute also works uniformly for single-cancer-type studies in the same cohort.
-- **Gene-specific profiled denominator per cancer type.** Different gene panels cover different gene sets — joining through `sample_to_gene_panel_derived` + `gene_panel_list` + `gene` filters to samples where the gene was actually assayed.
+- **WES-aware profiled denominator.** Samples on a named panel are profiled for the genes listed in `gene_panel_list`; WES samples are profiled for *every* gene. `WES` is not in the `gene_panel` table at all, so the older recipe that joined through `gene_panel` / `gene_panel_list` silently dropped WES rows — producing >100% frequencies wherever WES studies contributed altered samples but no profiled samples. The two views in `sql/5-mutation-coverage-views.sql` (`mutation_panel_gene_coverage` and `mutation_wes_coverage`) encapsulate this split so every gene-frequency query gets the WES branch for free via the `UNION ALL` above.
 
 ### When to vary
 - **Top-N most-mutated genes per cancer type**: drop the `hugo_gene_symbol = '…'` filter and group by `(cancer_type, hugo_gene_symbol)`. Same CTEs.
