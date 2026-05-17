@@ -38,10 +38,21 @@ export CLICKHOUSE_HOST=your-clickhouse-host
 export CLICKHOUSE_PORT=9000
 export CLICKHOUSE_USER=your-username
 export CLICKHOUSE_PASSWORD=your-password
-export CLICKHOUSE_DATABASE=your-cbioportal-database  # e.g., cgds_public_2025_06_24
+export CLICKHOUSE_DATABASE=your-cbioportal-database  # see "Preparing the database" below
 export CLICKHOUSE_SECURE=true  # or false for insecure connections
 export CLICKHOUSE_MCP_SERVER_TRANSPORT=stdio # or http or sse
 ```
+
+## Preparing the database
+
+**We strongly recommend pointing the MCP at a *separate* ClickHouse database, not your production cBioPortal database directly.** Two reasons:
+
+1. **LLM-friendly fixes are destructive.** The agent works much better against a schema that's been cleaned up (misleading columns dropped, column comments added, OncoTree fields denormalized, named cohorts materialized). Applying those changes to your production database would interfere with the cBioPortal application.
+2. **Isolation.** A separate database with a read-only user (`SELECT`-only) means agent traffic — including pathological queries — can't degrade production performance or accidentally expose data your portal users shouldn't see.
+
+The recommended pattern is a periodic clone job: copy your production cBioPortal database into a separate ClickHouse database, then apply the SQL files in [`sql/`](sql/) — these add column comments, drop misleading columns, denormalize OncoTree, and materialize the `cancer_study_query_preferences` table the agent uses for cohort lookups. Point the MCP at this cloned-and-prepped database. See [`sql/README.md`](sql/README.md) for the full schema-prep contract and how to add deployment-specific preferences.
+
+For an end-to-end reference deployment (Kubernetes CronJob that handles the clone + SQL apply + atomic pointer-flip), see the cBioPortal team's daily clone CronJob in [knowledgesystems-k8s-deployment](https://github.com/knowledgesystems/knowledgesystems-k8s-deployment).
 
 ## Development
 
