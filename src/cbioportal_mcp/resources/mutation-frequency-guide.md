@@ -6,6 +6,112 @@
 - When reporting across multiple studies, show **ranges** (e.g., "TP53 is mutated in 30–60% of samples") rather than a single average
 - **NEVER** sum mutation events across studies to compute an aggregate frequency — this can exceed 100% due to double-counting
 - Warn users that samples may overlap across cohorts (e.g., MSK studies may share patients)
+- **For "across cancer types" questions**, jump to the [Cross-Cancer-Type Mutation Frequency](#cross-cancer-type-mutation-frequency) section below — there is one correct recipe and several common wrong ones.
+
+## STOP rule: a frequency above 100% means your query is wrong
+
+If your query returns a frequency over 100%, **do not try to debug or explain the data inconsistency to the user**. The cause is always one of these query bugs:
+
+- Summing mutation events instead of `COUNT(DISTINCT sample_unique_id)` for the numerator
+- Using a study-wide sample count as the denominator instead of the gene-specific profiled count
+- Cross-study aggregation where the same biological sample appears under multiple `sample_unique_id` values (e.g., MSK-IMPACT and MSK-CHORD share patients)
+
+Rewrite the query using one of the canonical patterns below (either single-study or the [Cross-Cancer-Type](#cross-cancer-type-mutation-frequency) recipe). Do **not** loop on diagnostic queries trying to attribute the >100% to "data inconsistencies" — there are none.
+
+## Cross-Cancer-Type Mutation Frequency
+
+When the user asks about a gene "across cancer types" or "in different cancers", look up the right cohort in **`cancer_study_query_preferences`** and group by the per-sample `CANCER_TYPE` clinical attribute. Never hand-pick study lists yourself.
+
+### Pick the preference that matches the question
+
+`cancer_study_query_preferences` is a `(preference_name, cancer_study_identifier, notes)` lookup. A preference can resolve to many studies (a cohort) or a single study (a recommended cohort for a specific question type). The set of preferences depends on which SQL files this deployment loaded — discover what's available with:
+
+```sql
+SELECT preference_name, COUNT(*) AS studies, any(notes) AS notes
+FROM cancer_study_query_preferences
+GROUP BY preference_name
+ORDER BY preference_name;
+```
+
+Preferences shipped with the cBioPortal-public deployment (others may differ):
+
+| `preference_name`           | Studies | When to use |
+|-----------------------------|---------|-------------|
+| `all_studies_non_redundant` | 242     | **Default for "across cancer types" questions.** cBioPortal's manually-curated non-redundant set — broadest coverage, mixes TCGA + non-TCGA, no overlapping samples. |
+| `pan_cancer_tcga`           | 32      | TCGA-only pan-cancer questions, or when a consistent single-source baseline is wanted. One sample per patient. Portable across deployments that load PanCanAtlas. |
+| `large_genomic_cohort`      | 1       | `msk_impact_50k_2026`. Genomic-pattern questions (mutation frequency, co-occurrence) at maximum statistical power. |
+| `treatment_outcomes`        | 1       | `msk_chord_2024`. Treatment / outcomes questions — pulls treatment context from `clinical_event_derived` (see `treatment-guide`). |
+
+If a preference is missing from this deployment, the discovery query above will tell you what's available — don't hand-pick study lists; ask the user which cohort they want.
+
+Do **not** combine MSK studies (`msk_impact_*`, `msk_chord_*`, `genie_public`) into one query — their `sample_unique_id`s differ but the underlying patients overlap, which inflates counts. Pick one preference.
+
+### Canonical recipe (uses `cancer_study_query_preferences`)
+
+Drop in a `preference_name` and a `hugo_gene_symbol`; the rest stays. The recipe works identically whether the preference resolves to 1 study or 242.
+
+```sql
+WITH cohort AS (
+    SELECT cancer_study_identifier
+    FROM cancer_study_query_preferences
+    WHERE preference_name = 'all_studies_non_redundant'  -- or 'pan_cancer_tcga', 'large_genomic_cohort', 'treatment_outcomes'
+),
+sample_cancer_type AS (
+    SELECT cd.sample_unique_id, cd.attribute_value AS cancer_type
+    FROM clinical_data_derived cd
+    JOIN cohort c USING (cancer_study_identifier)
+    WHERE cd.attribute_name = 'CANCER_TYPE'  -- or 'CANCER_TYPE_DETAILED'
+),
+altered AS (
+    SELECT sct.cancer_type,
+           COUNT(DISTINCT ged.sample_unique_id) AS altered_samples
+    FROM genomic_event_derived ged
+    JOIN cohort c USING (cancer_study_identifier)
+    JOIN sample_cancer_type sct USING (sample_unique_id)
+    WHERE ged.variant_type = 'mutation'
+      AND ged.mutation_status != 'UNCALLED'
+      AND ged.hugo_gene_symbol = 'TP53'  -- target gene
+      AND ged.off_panel = 0
+    GROUP BY sct.cancer_type
+),
+profiled AS (
+    SELECT sct.cancer_type,
+           COUNT(DISTINCT stgp.sample_unique_id) AS profiled_samples
+    FROM sample_to_gene_panel_derived stgp
+    JOIN cohort c USING (cancer_study_identifier)
+    JOIN gene_panel gp ON stgp.gene_panel_id = gp.stable_id
+    JOIN gene_panel_list gpl ON gp.internal_id = gpl.internal_id
+    JOIN gene g ON gpl.gene_id = g.entrez_gene_id
+    JOIN sample_cancer_type sct USING (sample_unique_id)
+    WHERE stgp.alteration_type = 'MUTATION_EXTENDED'
+      AND g.hugo_gene_symbol = 'TP53'  -- same gene as above
+    GROUP BY sct.cancer_type
+)
+SELECT a.cancer_type,
+       a.altered_samples,
+       p.profiled_samples,
+       ROUND(a.altered_samples * 100.0 / NULLIF(p.profiled_samples, 0), 1) AS frequency_pct
+FROM altered a
+JOIN profiled p USING (cancer_type)
+WHERE p.profiled_samples >= 50  -- suppress tiny cancer types
+ORDER BY frequency_pct DESC;
+```
+
+### Why this works
+- **`cancer_study_query_preferences` enforces a non-overlapping cohort.** Every shipped preference resolves to studies with no shared samples, so `COUNT(DISTINCT sample_unique_id)` doesn't double-count.
+- **`CANCER_TYPE` from `clinical_data_derived`, not `type_of_cancer_id` from `cancer_study`.** Multi-cancer-type studies (MSK-CHORD, MSK-IMPACT-50k, GENIE) carry `cancer_study.type_of_cancer_id = 'mixed'`; the per-sample diagnosis lives in the clinical data. Using the clinical attribute also works uniformly for single-cancer-type studies in the same cohort.
+- **Gene-specific profiled denominator per cancer type.** Different gene panels cover different gene sets — joining through `sample_to_gene_panel_derived` + `gene_panel_list` + `gene` filters to samples where the gene was actually assayed.
+
+### When to vary
+- **Top-N most-mutated genes per cancer type**: drop the `hugo_gene_symbol = '…'` filter and group by `(cancer_type, hugo_gene_symbol)`. Same CTEs.
+- **Comparing two specific cancer types**: filter `sct.cancer_type IN ('Cancer A', 'Cancer B')` after resolving via `search_oncotree`.
+- **Treatment-related cross-cancer questions**: switch to `preference_name = 'treatment_outcomes'` and pull treatment context from `clinical_event_derived` (see `treatment-guide`).
+
+### What NOT to do
+- **DO NOT** hand-build a `cancer_study_identifier IN ('luad_tcga', 'coadread_tcga', ...)` list — look it up in `cancer_study_query_preferences` so the canonical cohort definition stays consistent across queries.
+- **DO NOT** UNION mutation events from many separate studies and then group by `type_of_cancer_id` — frequencies don't compose without per-cancer-type profiling denominators.
+- **DO NOT** group by `cancer_study.type_of_cancer_id` for `msk_chord_2024`, `msk_impact_50k_2026`, or GENIE — they're `type_of_cancer_id = 'mixed'`. Use `clinical_data_derived.CANCER_TYPE`.
+- **DO NOT** try to debug a >100% result query-by-query. See the STOP rule above.
 
 ## Overview
 For accurate gene mutation frequency calculations, you must use gene-specific profiling denominators, not study-wide sample counts.
