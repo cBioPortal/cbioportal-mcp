@@ -80,7 +80,7 @@ profiled AS (
     FROM sample_to_gene_panel_derived stgp
     JOIN cohort c USING (cancer_study_identifier)
     JOIN gene_panel gp ON stgp.gene_panel_id = gp.stable_id
-    JOIN gene_panel_list gpl USING (internal_id)
+    JOIN gene_panel_list gpl ON gp.internal_id = gpl.internal_id
     JOIN gene g ON gpl.gene_id = g.entrez_gene_id
     JOIN sample_cancer_type sct USING (sample_unique_id)
     WHERE stgp.alteration_type = 'MUTATION_EXTENDED'
