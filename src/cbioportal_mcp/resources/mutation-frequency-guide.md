@@ -28,7 +28,7 @@ When the user asks about a gene "across cancer types" or "in different cancers",
 
 | `preference_name`       | Studies | When to use |
 |-------------------------|---------|-------------|
-| `pan_cancer_broad`      | 242     | **Default for "across cancer types" questions.** cBioPortal's manually-curated non-redundant set — broadest coverage, mixes TCGA + non-TCGA, no overlapping samples. |
+| `all_studies_non_redundant`      | 242     | **Default for "across cancer types" questions.** cBioPortal's manually-curated non-redundant set — broadest coverage, mixes TCGA + non-TCGA, no overlapping samples. |
 | `pan_cancer_tcga`       | 32      | TCGA-only pan-cancer questions, or when a consistent single-source baseline is wanted. One sample per patient. |
 | `large_genomic_cohort`  | 1       | `msk_impact_50k_2026`. Genomic-pattern questions (mutation frequency, co-occurrence) at maximum statistical power. |
 | `treatment_outcomes`    | 1       | `msk_chord_2024`. Treatment / outcomes questions — pulls treatment context from `clinical_event_derived` (see `treatment-guide`). |
@@ -43,7 +43,7 @@ Drop in a `preference_name` and a `hugo_gene_symbol`; the rest stays. The recipe
 WITH cohort AS (
     SELECT cancer_study_identifier
     FROM cancer_study_query_preferences
-    WHERE preference_name = 'pan_cancer_broad'  -- or 'pan_cancer_tcga', 'large_genomic_cohort', 'treatment_outcomes'
+    WHERE preference_name = 'all_studies_non_redundant'  -- or 'pan_cancer_tcga', 'large_genomic_cohort', 'treatment_outcomes'
 ),
 sample_cancer_type AS (
     SELECT cd.sample_unique_id, cd.attribute_value AS cancer_type
