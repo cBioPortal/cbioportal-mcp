@@ -116,6 +116,49 @@ WHERE p.profiled_samples >= 50  -- suppress tiny cancer types
 ORDER BY frequency_pct DESC;
 ```
 
+### Variant: top-N most-mutated genes in a cohort (`top_mutated_genes_in_cohort`)
+
+When the user asks "what are the most-mutated genes in cohort X" instead of naming a specific gene, use this view. Mirrors cbioportal-backend's `StudyViewMapper.getMutatedGenes` with the same WES-aware per-gene denominator as the gene-frequency view.
+
+```sql
+SELECT *
+FROM top_mutated_genes_in_cohort(
+    preference = 'pan_cancer_tcga',
+    top_n      = 20
+);
+```
+
+Returns `(hugo_gene_symbol, altered_samples, profiled_samples, frequency_pct, total_mutation_events)`, sorted by `altered_samples DESC` then gene symbol ASC (matching the backend's tiebreaker). Per-gene `profiled_samples` correctly reflects which samples were assayed for that gene — for targeted-panel cohorts (`large_genomic_cohort` = msk_impact_50k_2026), the denominator is samples on a panel that includes the gene; for WES cohorts (`pan_cancer_tcga`), every gene gets the same WES-sample denominator.
+
+### Variant: Spearman correlation between two genes (`gene_pair_coexpression`)
+
+When the user asks whether two genes' expression (or copy number, methylation, etc.) is correlated in a study, use this view. Mirrors cbioportal-backend's `ClickhouseCoExpressionMapper.getCoExpressions`, simplified to the typical agent question of *one pair of genes* rather than one ref gene vs all others.
+
+```sql
+SELECT *
+FROM gene_pair_coexpression(
+    study         = 'brca_metabric',
+    gene_a        = 'TP53',
+    gene_b        = 'MYC',
+    profile_type  = 'mrna'
+);
+```
+
+Returns one row: `(gene_a, gene_b, profile_type, spearman_correlation, num_samples)`. `spearman_correlation` is in [−1, 1]; `NULL` when fewer than 3 valid paired samples.
+
+Discover available profile types for a study:
+
+```sql
+SELECT DISTINCT profile_type
+FROM genetic_alteration_derived
+WHERE cancer_study_identifier = 'brca_metabric'
+ORDER BY profile_type;
+```
+
+Common values: `mrna`, `mrna_median_Zscores`, `mrna_seq_v2_rsem`, `mrna_seq_v2_rsem_Zscores` for expression; `cna`, `linear_CNA`, `gistic` for copy number; `methylation_*` for methylation.
+
+> **Don't use this view to claim "co-occurrence of mutations".** Spearman correlation is for continuous values (expression, copy number). For mutation–mutation co-occurrence the agent should compute a 2×2 sample contingency table and run Fisher's exact / log odds-ratio — `gene_pair_coexpression` will silently return something close to 0 because the input is essentially two binary columns and Spearman is the wrong tool.
+
 ### Why this works
 - **`cancer_study_query_preferences` enforces a non-overlapping cohort.** Every shipped preference resolves to studies with no shared samples, so `COUNT(DISTINCT sample_unique_id)` doesn't double-count.
 - **`CANCER_TYPE` from `clinical_data_derived`, not `type_of_cancer_id` from `cancer_study`.** Multi-cancer-type studies (MSK-CHORD, MSK-IMPACT-50k, GENIE) carry `cancer_study.type_of_cancer_id = 'mixed'`; the per-sample diagnosis lives in the clinical data. Using the clinical attribute also works uniformly for single-cancer-type studies in the same cohort.

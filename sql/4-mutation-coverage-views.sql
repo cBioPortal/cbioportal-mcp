@@ -140,3 +140,139 @@ SELECT a.cancer_type,
 FROM altered a
 JOIN profiled p USING (cancer_type)
 WHERE p.profiled_samples >= 50;
+
+-- ============================================================================
+-- top_mutated_genes_in_cohort — top-N most-mutated genes in a cohort
+-- ============================================================================
+-- Mirrors cbioportal-backend's StudyViewMapper.getMutatedGenes, but with
+-- a WES-aware gene-specific profiled denominator (so the percentage
+-- reflects real biology instead of being inflated for low-coverage
+-- genes).
+--
+-- The trick to keeping this cheap at cohort scale: WES samples are
+-- profiled for ALL genes, so their count is a single number per cohort
+-- (computed once). For named-panel samples, profiled count is per-gene
+-- and only needs to include the genes the panel actually lists. We
+-- compute these two pieces separately and add them per gene.
+--
+-- Parameters:
+--   preference  — cancer_study_query_preferences.preference_name
+--                 (e.g. 'pan_cancer_tcga' default; see
+--                 gene_mutation_frequency_by_cancer_type docstring)
+--   top_n       — UInt32, max number of genes to return
+--                 (e.g. 20 for the typical "top 20 mutated genes" question)
+--
+-- Usage:
+--   SELECT *
+--   FROM top_mutated_genes_in_cohort(
+--       preference='pan_cancer_tcga',
+--       top_n=20
+--   );
+--
+-- Returns one row per gene: (hugo_gene_symbol, altered_samples,
+-- profiled_samples, frequency_pct, total_mutation_events). Sorted by
+-- altered_samples DESC, then hugo_gene_symbol ASC (same as backend).
+-- ============================================================================
+
+DROP VIEW IF EXISTS top_mutated_genes_in_cohort;
+
+CREATE VIEW top_mutated_genes_in_cohort AS
+WITH cohort AS (
+    SELECT cancer_study_identifier
+    FROM cancer_study_query_preferences
+    WHERE preference_name = {preference:String}
+),
+wes_profiled_count AS (
+    -- WES samples are profiled for every gene; one number for the cohort.
+    SELECT COUNT(DISTINCT w.sample_unique_id) AS n
+    FROM mutation_wes_coverage w
+    JOIN cohort c USING (cancer_study_identifier)
+),
+panel_profiled_per_gene AS (
+    -- For each gene, count cohort samples on a named panel that lists it.
+    SELECT mpgc.hugo_gene_symbol, COUNT(DISTINCT mpgc.sample_unique_id) AS n
+    FROM mutation_panel_gene_coverage mpgc
+    JOIN cohort c USING (cancer_study_identifier)
+    GROUP BY mpgc.hugo_gene_symbol
+),
+altered_per_gene AS (
+    SELECT ged.hugo_gene_symbol,
+           COUNT(DISTINCT ged.sample_unique_id) AS altered_samples,
+           COUNT(*) AS total_mutation_events
+    FROM genomic_event_derived ged
+    JOIN cohort c USING (cancer_study_identifier)
+    WHERE ged.variant_type = 'mutation'
+      AND ged.mutation_status != 'UNCALLED'
+      AND ged.off_panel = 0
+    GROUP BY ged.hugo_gene_symbol
+)
+SELECT a.hugo_gene_symbol,
+       a.altered_samples,
+       (SELECT n FROM wes_profiled_count) + COALESCE(p.n, 0) AS profiled_samples,
+       ROUND(a.altered_samples * 100.0 / NULLIF((SELECT n FROM wes_profiled_count) + COALESCE(p.n, 0), 0), 1) AS frequency_pct,
+       a.total_mutation_events
+FROM altered_per_gene a
+LEFT JOIN panel_profiled_per_gene p USING (hugo_gene_symbol)
+ORDER BY altered_samples DESC, hugo_gene_symbol ASC
+LIMIT {top_n:UInt32};
+
+-- ============================================================================
+-- gene_pair_coexpression — Spearman correlation between two genes
+-- ============================================================================
+-- Mirrors cbioportal-backend's ClickhouseCoExpressionMapper.getCoExpressions,
+-- simplified to a pair-of-genes lookup (the backend computes one ref
+-- gene vs all other genes for the coexpression page; here the agent
+-- asks about a specific pair like "TP53 vs MYC").
+--
+-- Parameters:
+--   study         — cancer_study.cancer_study_identifier
+--                   (single study; expression profiles are study-scoped)
+--   gene_a        — first HUGO gene symbol
+--   gene_b        — second HUGO gene symbol
+--   profile_type  — one of the values in genetic_alteration_derived.profile_type
+--                   Common: 'mrna', 'mrna_median_Zscores',
+--                   'mrna_seq_v2_rsem', 'mrna_seq_v2_rsem_Zscores'
+--                   Discover available: SELECT DISTINCT profile_type
+--                   FROM genetic_alteration_derived
+--                   WHERE cancer_study_identifier = '<study>'
+--
+-- Usage:
+--   SELECT * FROM gene_pair_coexpression(
+--       study='brca_metabric',
+--       gene_a='TP53',
+--       gene_b='MYC',
+--       profile_type='mrna'
+--   );
+--
+-- Returns one row: (gene_a, gene_b, profile_type,
+-- spearman_correlation, num_samples). spearman_correlation is in
+-- [-1, 1]; NULL if fewer than 3 samples have valid pair values.
+-- ============================================================================
+
+DROP VIEW IF EXISTS gene_pair_coexpression;
+
+CREATE VIEW gene_pair_coexpression AS
+WITH a AS (
+    SELECT sample_unique_id, toFloat64OrNull(alteration_value) AS v
+    FROM genetic_alteration_derived
+    WHERE cancer_study_identifier = {study:String}
+      AND profile_type = {profile_type:String}
+      AND hugo_gene_symbol = {gene_a:String}
+      AND alteration_value NOT IN ('', 'NA')
+      AND toFloat64OrNull(alteration_value) IS NOT NULL
+),
+b AS (
+    SELECT sample_unique_id, toFloat64OrNull(alteration_value) AS v
+    FROM genetic_alteration_derived
+    WHERE cancer_study_identifier = {study:String}
+      AND profile_type = {profile_type:String}
+      AND hugo_gene_symbol = {gene_b:String}
+      AND alteration_value NOT IN ('', 'NA')
+      AND toFloat64OrNull(alteration_value) IS NOT NULL
+)
+SELECT {gene_a:String}      AS gene_a,
+       {gene_b:String}      AS gene_b,
+       {profile_type:String} AS profile_type,
+       if(count() >= 3, rankCorr(a.v, b.v), NULL) AS spearman_correlation,
+       count() AS num_samples
+FROM a INNER JOIN b USING (sample_unique_id);
