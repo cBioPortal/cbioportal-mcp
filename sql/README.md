@@ -13,7 +13,8 @@ MCP agent can reason about it.
 | 1 | `1-add-column-comments.sql` | Attach human-readable `COMMENT`s so the agent can self-introspect column meaning. |
 | 2 | `2-add-oncotree-fields.sql` | Add OncoTree fields to `type_of_cancer` (auto-generated). |
 | 3 | `3-add-cancer-study-query-preferences.sql` | Creates `cancer_study_query_preferences` table + pattern-detected preferences (currently `pan_cancer_tcga`). |
-| 4 | `4-mutation-coverage-views.sql` | Creates `mutation_panel_gene_coverage` + `mutation_wes_coverage` building-block views and the parameterized `gene_mutation_frequency_by_cancer_type(preference, gene)` recipe view. Handles the "WES is not in `gene_panel`" trap that produces >100% frequencies. See `cbioportal://mutation-frequency-guide`. |
+| 4 | `4-mutation-frequency-views.sql` | Mutation-frequency parameterized views (`gene_mutation_frequency_by_cancer_type`, `top_mutated_genes_in_cohort`) and the two coverage building-block views (`mutation_panel_gene_coverage`, `mutation_wes_coverage`). Handles the "WES is not in `gene_panel`" trap that produces >100% frequencies. See `cbioportal://mutation-frequency-guide`. |
+| 5 | `5-gene-expression-views.sql` | Gene-expression / copy-number-value / methylation views, backed by `genetic_alteration_derived`. Currently `gene_pair_coexpression(study, gene_a, gene_b, profile_type)` for Spearman correlation between two genes. See `cbioportal://gene-expression-guide`. |
 
 Everything under `sql/` directly is **portable** — works against any cBioPortal deployment. Deployment-specific SQL lives under `sql/portal-specific/<portal-name>/`:
 
