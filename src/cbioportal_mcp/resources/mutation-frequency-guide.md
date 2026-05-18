@@ -64,7 +64,67 @@ Returns `(cancer_type, altered_samples, profiled_samples, frequency_pct)` for ev
 
 The view is defined in `sql/4-mutation-frequency-views.sql` and handles the WES-vs-named-panel split internally (see "Why this works" below). The agent should prefer this view for any "gene X across cancer types in cohort Y" question instead of writing the JOIN chain by hand.
 
-For variations the view doesn't cover (top-N most-mutated genes per cancer type, comparing two specific cancer types, single-study queries that need extra filters), drop down to the expanded CTE form below and adapt — but start from this CTE form, not a from-scratch JOIN chain that risks missing the WES branch:
+### Variant: a single named study (`gene_mutation_frequency_in_study`)
+
+Use when the user names a specific study by id and that study isn't part of a shipped preference. Returns one row per cancer type with ≥ 50 profiled samples — typically one row for single-cancer-type studies (`brca_metabric`, `lung_msk_2017`, ...) and one row per cancer type for multi-cancer-type studies (`msk_chord_2024`).
+
+```sql
+SELECT *
+FROM gene_mutation_frequency_in_study(
+    study = 'brca_metabric',
+    gene  = 'TP53'
+)
+ORDER BY frequency_pct DESC;
+```
+
+Same WES-aware denominator handling as the cohort view.
+
+### Variant: copy-number or structural-variant alterations (`gene_alteration_frequency_by_cancer_type`)
+
+The cohort view above filters to point mutations only. For amplifications, deep deletions, or fusions/SVs, use the generalized view that takes an `alteration` token:
+
+```sql
+SELECT *
+FROM gene_alteration_frequency_by_cancer_type(
+    preference = 'pan_cancer_tcga',
+    gene       = 'MYC',
+    alteration = 'amplification'         -- or 'deep_deletion', 'structural_variant', 'mutation'
+)
+ORDER BY frequency_pct DESC;
+```
+
+Numerator and denominator both switch on the `alteration` parameter:
+
+| `alteration` token   | Counts (numerator)                              | Profiled denominator (alteration_type)  |
+|----------------------|-------------------------------------------------|-----------------------------------------|
+| `mutation`           | `variant_type='mutation'` AND `mutation_status != 'UNCALLED'` | `MUTATION_EXTENDED`                     |
+| `amplification`      | `variant_type='cna'` AND `cna_alteration = 2`   | `COPY_NUMBER_ALTERATION`                |
+| `deep_deletion`      | `variant_type='cna'` AND `cna_alteration = -2`  | `COPY_NUMBER_ALTERATION`                |
+| `structural_variant` | `variant_type='structural_variant'`             | `STRUCTURAL_VARIANT`                    |
+
+For `alteration='mutation'` the result equals `gene_mutation_frequency_by_cancer_type` (which is kept as the cleaner shorthand for that case).
+
+### Variant: top-N most-mutated genes in a cohort (`top_mutated_genes_in_cohort`)
+
+When the user asks "what are the most-mutated genes in cohort X" instead of naming a specific gene, use this view. Mirrors cbioportal-backend's `StudyViewMapper.getMutatedGenes` with the same WES-aware per-gene denominator as the gene-frequency view.
+
+```sql
+SELECT *
+FROM top_mutated_genes_in_cohort(
+    preference = 'pan_cancer_tcga',
+    top_n      = 20
+);
+```
+
+Returns `(hugo_gene_symbol, altered_samples, profiled_samples, frequency_pct, total_mutation_events)`, sorted by `altered_samples DESC` then gene symbol ASC (matching the backend's tiebreaker). Per-gene `profiled_samples` correctly reflects which samples were assayed for that gene — for targeted-panel cohorts (`large_genomic_cohort` = msk_impact_50k_2026), the denominator is samples on a panel that includes the gene; for WES cohorts (`pan_cancer_tcga`), every gene gets the same WES-sample denominator.
+
+### Variant: Spearman correlation between two genes
+
+Gene expression / copy-number correlation questions ("are TP53 and MYC expression correlated in METABRIC?") belong in `cbioportal://gene-expression-guide`, which covers the `genetic_alteration_derived` table and the `gene_pair_coexpression(study, gene_a, gene_b, profile_type)` view. Don't try to express expression queries through the mutation-frequency views.
+
+### When to drop down to the expanded CTE form
+
+For variations none of these three views cover (top-N most-mutated genes per cancer type, comparing two specific cancer types, custom alteration filters), drop down to the expanded CTE form below and adapt — but start from this CTE form, not a from-scratch JOIN chain that risks missing the WES branch:
 
 ```sql
 WITH cohort AS (
@@ -115,24 +175,6 @@ JOIN profiled p USING (cancer_type)
 WHERE p.profiled_samples >= 50  -- suppress tiny cancer types
 ORDER BY frequency_pct DESC;
 ```
-
-### Variant: top-N most-mutated genes in a cohort (`top_mutated_genes_in_cohort`)
-
-When the user asks "what are the most-mutated genes in cohort X" instead of naming a specific gene, use this view. Mirrors cbioportal-backend's `StudyViewMapper.getMutatedGenes` with the same WES-aware per-gene denominator as the gene-frequency view.
-
-```sql
-SELECT *
-FROM top_mutated_genes_in_cohort(
-    preference = 'pan_cancer_tcga',
-    top_n      = 20
-);
-```
-
-Returns `(hugo_gene_symbol, altered_samples, profiled_samples, frequency_pct, total_mutation_events)`, sorted by `altered_samples DESC` then gene symbol ASC (matching the backend's tiebreaker). Per-gene `profiled_samples` correctly reflects which samples were assayed for that gene — for targeted-panel cohorts (`large_genomic_cohort` = msk_impact_50k_2026), the denominator is samples on a panel that includes the gene; for WES cohorts (`pan_cancer_tcga`), every gene gets the same WES-sample denominator.
-
-### Variant: Spearman correlation between two genes
-
-Gene expression / copy-number correlation questions ("are TP53 and MYC expression correlated in METABRIC?") belong in `cbioportal://gene-expression-guide`, which covers the `genetic_alteration_derived` table and the `gene_pair_coexpression(study, gene_a, gene_b, profile_type)` view. Don't try to express expression queries through the mutation-frequency views.
 
 ### Why this works
 - **`cancer_study_query_preferences` enforces a non-overlapping cohort.** Every shipped preference resolves to studies with no shared samples, so `COUNT(DISTINCT sample_unique_id)` doesn't double-count.
