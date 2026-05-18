@@ -234,6 +234,81 @@ JOIN profiled p USING (cancer_type)
 WHERE p.profiled_samples >= 50;
 
 -- ============================================================================
+-- gene_mutation_frequency_in_studies — ad-hoc cohort of named studies
+-- ============================================================================
+-- Same recipe as gene_mutation_frequency_in_study, but takes an Array of
+-- study ids. Use when the user names a handful of studies that aren't a
+-- shipped preference and there's no time to add one — e.g. "TP53 in
+-- METABRIC, MSK-IMPACT, and Pan-LungCancer".
+--
+-- IMPORTANT: this is your responsibility, not the view's: the studies
+-- you pass must NOT share samples. Sample IDs are study-prefixed
+-- (cancer_study_id_ + sample.stable_id), so the same physical sample
+-- in two studies will count twice and you can get >100% frequencies.
+-- The shipped preferences (`all_studies_non_redundant`, `pan_cancer_tcga`)
+-- are vetted to be non-overlapping; ad-hoc lists are not.
+--
+-- Parameters:
+--   studies  — Array(String) of cancer_study_identifier values
+--              (e.g. ['brca_metabric', 'brca_tcga_pan_can_atlas_2018'])
+--   gene     — HUGO gene symbol
+--
+-- Usage:
+--   SELECT *
+--   FROM gene_mutation_frequency_in_studies(
+--       studies=['brca_metabric','brca_tcga_pan_can_atlas_2018'],
+--       gene='TP53'
+--   )
+--   ORDER BY frequency_pct DESC;
+-- ============================================================================
+
+DROP VIEW IF EXISTS gene_mutation_frequency_in_studies;
+
+CREATE VIEW gene_mutation_frequency_in_studies AS
+WITH sample_cancer_type AS (
+    SELECT cd.sample_unique_id, cd.attribute_value AS cancer_type
+    FROM clinical_data_derived cd
+    WHERE cd.cancer_study_identifier IN {studies:Array(String)}
+      AND cd.attribute_name = 'CANCER_TYPE'
+),
+altered AS (
+    SELECT sct.cancer_type,
+           COUNT(DISTINCT ged.sample_unique_id) AS altered_samples
+    FROM genomic_event_derived ged
+    JOIN sample_cancer_type sct USING (sample_unique_id)
+    WHERE ged.cancer_study_identifier IN {studies:Array(String)}
+      AND ged.variant_type = 'mutation'
+      AND ged.mutation_status != 'UNCALLED'
+      AND ged.hugo_gene_symbol = {gene:String}
+      AND ged.off_panel = 0
+    GROUP BY sct.cancer_type
+),
+profiled_samples_for_gene AS (
+    SELECT sample_unique_id, cancer_study_identifier
+    FROM mutation_panel_gene_coverage
+    WHERE hugo_gene_symbol = {gene:String}
+      AND cancer_study_identifier IN {studies:Array(String)}
+    UNION ALL
+    SELECT sample_unique_id, cancer_study_identifier
+    FROM mutation_wes_coverage
+    WHERE cancer_study_identifier IN {studies:Array(String)}
+),
+profiled AS (
+    SELECT sct.cancer_type,
+           COUNT(DISTINCT p.sample_unique_id) AS profiled_samples
+    FROM profiled_samples_for_gene p
+    JOIN sample_cancer_type sct USING (sample_unique_id)
+    GROUP BY sct.cancer_type
+)
+SELECT a.cancer_type,
+       a.altered_samples,
+       p.profiled_samples,
+       ROUND(a.altered_samples * 100.0 / NULLIF(p.profiled_samples, 0), 1) AS frequency_pct
+FROM altered a
+JOIN profiled p USING (cancer_type)
+WHERE p.profiled_samples >= 50;
+
+-- ============================================================================
 -- gene_alteration_frequency_by_cancer_type — generalize to CNA + SV
 -- ============================================================================
 -- gene_mutation_frequency_by_cancer_type only handles point mutations.

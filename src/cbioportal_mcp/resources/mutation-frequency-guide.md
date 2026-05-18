@@ -79,6 +79,21 @@ ORDER BY frequency_pct DESC;
 
 Same WES-aware denominator handling as the cohort view.
 
+### Variant: a handful of named studies (`gene_mutation_frequency_in_studies`)
+
+Use when the user names two or more studies that aren't a shipped preference and aren't worth defining one for — e.g. *"TP53 in METABRIC and TCGA Pan-Cancer Atlas breast"*. Takes an `Array(String)` of study ids:
+
+```sql
+SELECT *
+FROM gene_mutation_frequency_in_studies(
+    studies = ['brca_metabric', 'brca_tcga_pan_can_atlas_2018'],
+    gene    = 'TP53'
+)
+ORDER BY frequency_pct DESC;
+```
+
+**You are responsible for non-overlap.** Sample IDs are study-prefixed (`<study_id>_<sample.stable_id>`), so the same physical sample appearing in two studies under different IDs WILL be double-counted by this view and produce a frequency that's higher than reality. The shipped preferences (`all_studies_non_redundant`, `pan_cancer_tcga`) are vetted to be non-overlapping; ad-hoc lists are not. If you can't vouch for non-overlap, fall back to the single-study view or a shipped preference.
+
 ### Variant: copy-number or structural-variant alterations (`gene_alteration_frequency_by_cancer_type`)
 
 The cohort view above filters to point mutations only. For amplifications, deep deletions, or fusions/SVs, use the generalized view that takes an `alteration` token:
