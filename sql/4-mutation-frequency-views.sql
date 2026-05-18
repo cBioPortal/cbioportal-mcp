@@ -1,4 +1,22 @@
 -- ============================================================================
+-- Mutation-frequency views (coverage building blocks + frequency recipes)
+-- ============================================================================
+-- This file is the mutation side of the agent's gene-frequency API:
+--   - Two coverage building-block views (`mutation_panel_gene_coverage`,
+--     `mutation_wes_coverage`).
+--   - Parameterized "frequency by cancer type for cohort Y" recipe.
+--   - Parameterized "top-N most-mutated genes in cohort" recipe.
+--
+-- Sibling files in this directory:
+--   sql/5-gene-expression-views.sql — gene_pair_coexpression and any
+--     other expression / copy-number-value / methylation correlation
+--     views. Anything backed by `genetic_alteration_derived` lives
+--     there, not here.
+--
+-- The agent-facing docs are at `cbioportal://mutation-frequency-guide`.
+-- ============================================================================
+
+-- ============================================================================
 -- mutation_panel_gene_coverage + mutation_wes_coverage
 -- ============================================================================
 -- The canonical "is this sample profiled for gene G?" query has to handle
@@ -140,3 +158,79 @@ SELECT a.cancer_type,
 FROM altered a
 JOIN profiled p USING (cancer_type)
 WHERE p.profiled_samples >= 50;
+
+-- ============================================================================
+-- top_mutated_genes_in_cohort — top-N most-mutated genes in a cohort
+-- ============================================================================
+-- Mirrors cbioportal-backend's StudyViewMapper.getMutatedGenes, but with
+-- a WES-aware gene-specific profiled denominator (so the percentage
+-- reflects real biology instead of being inflated for low-coverage
+-- genes).
+--
+-- The trick to keeping this cheap at cohort scale: WES samples are
+-- profiled for ALL genes, so their count is a single number per cohort
+-- (computed once). For named-panel samples, profiled count is per-gene
+-- and only needs to include the genes the panel actually lists. We
+-- compute these two pieces separately and add them per gene.
+--
+-- Parameters:
+--   preference  — cancer_study_query_preferences.preference_name
+--                 (e.g. 'pan_cancer_tcga' default; see
+--                 gene_mutation_frequency_by_cancer_type docstring)
+--   top_n       — UInt32, max number of genes to return
+--                 (e.g. 20 for the typical "top 20 mutated genes" question)
+--
+-- Usage:
+--   SELECT *
+--   FROM top_mutated_genes_in_cohort(
+--       preference='pan_cancer_tcga',
+--       top_n=20
+--   );
+--
+-- Returns one row per gene: (hugo_gene_symbol, altered_samples,
+-- profiled_samples, frequency_pct, total_mutation_events). Sorted by
+-- altered_samples DESC, then hugo_gene_symbol ASC (same as backend).
+-- ============================================================================
+
+DROP VIEW IF EXISTS top_mutated_genes_in_cohort;
+
+CREATE VIEW top_mutated_genes_in_cohort AS
+WITH cohort AS (
+    SELECT cancer_study_identifier
+    FROM cancer_study_query_preferences
+    WHERE preference_name = {preference:String}
+),
+wes_profiled_count AS (
+    -- WES samples are profiled for every gene; one number for the cohort.
+    SELECT COUNT(DISTINCT w.sample_unique_id) AS n
+    FROM mutation_wes_coverage w
+    JOIN cohort c USING (cancer_study_identifier)
+),
+panel_profiled_per_gene AS (
+    -- For each gene, count cohort samples on a named panel that lists it.
+    SELECT mpgc.hugo_gene_symbol, COUNT(DISTINCT mpgc.sample_unique_id) AS n
+    FROM mutation_panel_gene_coverage mpgc
+    JOIN cohort c USING (cancer_study_identifier)
+    GROUP BY mpgc.hugo_gene_symbol
+),
+altered_per_gene AS (
+    SELECT ged.hugo_gene_symbol,
+           COUNT(DISTINCT ged.sample_unique_id) AS altered_samples,
+           COUNT(*) AS total_mutation_events
+    FROM genomic_event_derived ged
+    JOIN cohort c USING (cancer_study_identifier)
+    WHERE ged.variant_type = 'mutation'
+      AND ged.mutation_status != 'UNCALLED'
+      AND ged.off_panel = 0
+    GROUP BY ged.hugo_gene_symbol
+)
+SELECT a.hugo_gene_symbol,
+       a.altered_samples,
+       (SELECT n FROM wes_profiled_count) + COALESCE(p.n, 0) AS profiled_samples,
+       ROUND(a.altered_samples * 100.0 / NULLIF((SELECT n FROM wes_profiled_count) + COALESCE(p.n, 0), 0), 1) AS frequency_pct,
+       a.total_mutation_events
+FROM altered_per_gene a
+LEFT JOIN panel_profiled_per_gene p USING (hugo_gene_symbol)
+ORDER BY altered_samples DESC, hugo_gene_symbol ASC
+LIMIT {top_n:UInt32};
+

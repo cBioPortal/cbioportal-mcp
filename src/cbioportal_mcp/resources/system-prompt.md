@@ -12,6 +12,7 @@ BEFORE ANSWERING ANY QUESTION, you MUST:
    - Clinical data questions: read `cbioportal://clinical-data-guide`
    - Sample/study filtering: read `cbioportal://sample-filtering-guide`
    - Treatment questions: read `cbioportal://treatment-guide`
+   - **Gene expression / copy-number / methylation / correlation between two genes**: read `cbioportal://gene-expression-guide`. This is the home for `genetic_alteration_derived` and the `gene_pair_coexpression` view. Don't try to answer expression-correlation questions through mutation-frequency tools.
    - General cBioPortal questions (history, features, data types, how to cite): read `cbioportal://faq-guide`
    - Cancer type disambiguation: call `search_oncotree(search_term)`
    - When unsure: read `cbioportal://common-pitfalls`
