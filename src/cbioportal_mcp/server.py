@@ -232,6 +232,9 @@ def _faq_guide_text() -> str:
 def _statistical_tests_guide_text() -> str:
     return _load_resource("statistical-tests-guide.md")
 
+def _gene_expression_guide_text() -> str:
+    return _load_resource("gene-expression-guide.md")
+
 # --- MCP resources (decorator registers them) --------------------------------
 @mcp.resource("cbioportal://mutation-frequency-guide")
 def mutation_frequency_guide() -> str:
@@ -260,6 +263,10 @@ def faq_guide() -> str:
 @mcp.resource("cbioportal://statistical-tests-guide")
 def statistical_tests_guide() -> str:
     return _statistical_tests_guide_text()
+
+@mcp.resource("cbioportal://gene-expression-guide")
+def gene_expression_guide() -> str:
+    return _gene_expression_guide_text()
 
 
 @mcp.tool(
@@ -429,6 +436,10 @@ def list_guides() -> list[dict]:
             "description": "Statistical test selection guide — decision matrix for choosing Fisher's exact, Wilcoxon, chi-squared, t-test, ANOVA, etc. based on data type and group count"
         },
         {
+            "uri": "cbioportal://gene-expression-guide",
+            "description": "Gene expression / copy-number / methylation analysis. Covers genetic_alteration_derived, profile_type discovery, and the gene_pair_coexpression view for Spearman correlation between two genes"
+        },
+        {
             "uri": "cbioportal://study-guide/{study_id}",
             "description": "Dynamic study-specific guide - use get_study_guide(study_id) tool to generate"
         }
@@ -452,7 +463,8 @@ def read_guide(uri: str) -> str:
         "cbioportal://common-pitfalls": _common_pitfalls_guide_text(),
         "cbioportal://treatment-guide": _treatment_guide_text(),
         "cbioportal://faq-guide": _faq_guide_text(),
-        "cbioportal://statistical-tests-guide": _statistical_tests_guide_text()
+        "cbioportal://statistical-tests-guide": _statistical_tests_guide_text(),
+        "cbioportal://gene-expression-guide": _gene_expression_guide_text()
     }
 
     if uri not in resources:
