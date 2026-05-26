@@ -43,6 +43,20 @@ export CLICKHOUSE_SECURE=true  # or false for insecure connections
 export CLICKHOUSE_MCP_SERVER_TRANSPORT=stdio # or http or sse
 ```
 
+Study-level authorization configuration is present but not yet wired into query
+execution. Defaults preserve current development behavior until auth is enabled:
+
+```bash
+export CBIOPORTAL_AUTH_ENABLED=false
+export CBIOPORTAL_AUTH_REQUIRED=false
+export CBIOPORTAL_KEYCLOAK_CLIENT_ID=cbioportal
+export CBIOPORTAL_ALL_STUDIES_ROLE=cbioportal:ALL
+export CBIOPORTAL_DEFAULT_STUDIES=
+export CBIOPORTAL_CLICKHOUSE_ALLOWED_STUDIES_SETTING=cbioportal_allowed_studies
+export CBIOPORTAL_CLICKHOUSE_ALLOW_ALL_SETTING=cbioportal_allow_all
+export CBIOPORTAL_MCP_PROFILE=internal
+```
+
 ## Preparing the database
 
 **We strongly recommend pointing the MCP at a *separate* ClickHouse database, not your production cBioPortal database directly.** Two reasons:

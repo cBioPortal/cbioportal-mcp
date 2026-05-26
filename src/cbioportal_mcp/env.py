@@ -1,8 +1,7 @@
 """Environment configuration for cBioPortal MCP server."""
 
-from dataclasses import dataclass
 import os
-from typing import Optional
+from dataclasses import dataclass
 from enum import Enum
 
 
@@ -76,6 +75,98 @@ class McpConfig:
         """
 
         return str(os.getenv("CLICKHOUSE_DATABASE", "cgds_public_2025_06_24"))
+
+    @property
+    def cbioportal_auth_enabled(self) -> bool:
+        """Whether cBioPortal study authorization is enabled.
+
+        Default: false
+        """
+        return _env_bool("CBIOPORTAL_AUTH_ENABLED", default=False)
+
+    @property
+    def cbioportal_auth_required(self) -> bool:
+        """Whether unauthenticated HTTP/SSE requests should fail closed.
+
+        Request enforcement is wired in a later authorization PR. This flag is
+        exposed now so scope parsing can distinguish required auth from
+        compatibility mode.
+
+        Default: false
+        """
+        return _env_bool("CBIOPORTAL_AUTH_REQUIRED", default=False)
+
+    @property
+    def cbioportal_keycloak_client_id(self) -> str:
+        """Get the Keycloak client ID containing cBioPortal study roles.
+
+        Default: "cbioportal"
+        """
+        return os.getenv("CBIOPORTAL_KEYCLOAK_CLIENT_ID", "cbioportal")
+
+    @property
+    def cbioportal_all_studies_role(self) -> str:
+        """Get the role value that grants unrestricted study access.
+
+        Default: "cbioportal:ALL"
+        """
+        return os.getenv("CBIOPORTAL_ALL_STUDIES_ROLE", "cbioportal:ALL")
+
+    @property
+    def cbioportal_default_studies(self) -> str:
+        """Get comma-separated fallback studies for unauthenticated/default users.
+
+        Empty by default. Parsing and validation happens in the study-scope
+        module because it shares the study-ID validation contract.
+        """
+        return os.getenv("CBIOPORTAL_DEFAULT_STUDIES", "")
+
+    @property
+    def cbioportal_clickhouse_allowed_studies_setting(self) -> str:
+        """Get the ClickHouse custom setting name for allowed studies.
+
+        Default: "cbioportal_allowed_studies"
+        """
+        return os.getenv(
+            "CBIOPORTAL_CLICKHOUSE_ALLOWED_STUDIES_SETTING",
+            "cbioportal_allowed_studies",
+        )
+
+    @property
+    def cbioportal_clickhouse_allow_all_setting(self) -> str:
+        """Get the ClickHouse custom setting name for unrestricted access.
+
+        Default: "cbioportal_allow_all"
+        """
+        return os.getenv(
+            "CBIOPORTAL_CLICKHOUSE_ALLOW_ALL_SETTING",
+            "cbioportal_allow_all",
+        )
+
+    @property
+    def cbioportal_mcp_profile(self) -> str:
+        """Get the MCP exposure profile.
+
+        Reserved for later public-mode hardening. Default: "internal".
+        """
+        return os.getenv("CBIOPORTAL_MCP_PROFILE", "internal")
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    """Parse a boolean environment variable using common true/false spellings."""
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        return default
+
+    value = raw.strip().lower()
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(
+        f"Invalid boolean value for {name}: {raw!r}. "
+        "Use one of: true/false, yes/no, on/off, 1/0."
+    )
 
 
 # Global instance placeholders for the singleton pattern
