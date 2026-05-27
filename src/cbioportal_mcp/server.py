@@ -10,10 +10,12 @@ from importlib import resources as importlib_resources
 from pathlib import Path
 from typing import Optional
 from fastmcp import FastMCP
+from starlette.middleware import Middleware
 
 
 from cbioportal_mcp.env import get_mcp_config, TransportType
 from cbioportal_mcp.authentication.permissions import ensure_db_permissions
+from cbioportal_mcp.authentication.request_context import StudyAuthMiddleware
 
 logger = logging.getLogger(__name__)
 
@@ -195,7 +197,15 @@ def main():
         if transport in http_transports:
             # Use the configured bind host (defaults to 127.0.0.1, can be set to 0.0.0.0)
             # and bind port (defaults to 8000)
-            mcp.run(transport=transport, host=config.mcp_bind_host, port=config.mcp_bind_port)
+            middleware = []
+            if config.cbioportal_auth_enabled:
+                middleware.append(Middleware(StudyAuthMiddleware, config=config))
+            mcp.run(
+                transport=transport,
+                host=config.mcp_bind_host,
+                port=config.mcp_bind_port,
+                middleware=middleware,
+            )
         else:
             # For stdio transport, no host or port is needed
             mcp.run(transport=transport)

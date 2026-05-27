@@ -9,6 +9,12 @@ def clean_auth_env(monkeypatch):
         "CBIOPORTAL_AUTH_ENABLED",
         "CBIOPORTAL_AUTH_REQUIRED",
         "CBIOPORTAL_KEYCLOAK_CLIENT_ID",
+        "CBIOPORTAL_AUTH_ISSUER",
+        "CBIOPORTAL_AUTH_AUDIENCE",
+        "CBIOPORTAL_AUTH_JWKS_URI",
+        "CBIOPORTAL_AUTH_PUBLIC_KEY",
+        "CBIOPORTAL_AUTH_JWT_ALGORITHM",
+        "CBIOPORTAL_AUTH_ALLOW_UNVERIFIED_JWT_FOR_DEV",
         "CBIOPORTAL_ALL_STUDIES_ROLE",
         "CBIOPORTAL_DEFAULT_STUDIES",
         "CBIOPORTAL_CLICKHOUSE_ALLOWED_STUDIES_SETTING",
@@ -24,6 +30,12 @@ def test_auth_config_defaults_are_compatible():
     assert config.cbioportal_auth_enabled is False
     assert config.cbioportal_auth_required is False
     assert config.cbioportal_keycloak_client_id == "cbioportal"
+    assert config.cbioportal_auth_issuer == ""
+    assert config.cbioportal_auth_audience == ""
+    assert config.cbioportal_auth_jwks_uri == ""
+    assert config.cbioportal_auth_public_key == ""
+    assert config.cbioportal_auth_jwt_algorithm == "RS256"
+    assert config.cbioportal_auth_allow_unverified_jwt_for_dev is False
     assert config.cbioportal_all_studies_role == "cbioportal:ALL"
     assert config.cbioportal_default_studies == ""
     assert config.cbioportal_clickhouse_allowed_studies_setting == "cbioportal_allowed_studies"
@@ -35,6 +47,12 @@ def test_auth_config_reads_env(monkeypatch):
     monkeypatch.setenv("CBIOPORTAL_AUTH_ENABLED", "yes")
     monkeypatch.setenv("CBIOPORTAL_AUTH_REQUIRED", "1")
     monkeypatch.setenv("CBIOPORTAL_KEYCLOAK_CLIENT_ID", "custom-client")
+    monkeypatch.setenv("CBIOPORTAL_AUTH_ISSUER", "https://issuer.example")
+    monkeypatch.setenv("CBIOPORTAL_AUTH_AUDIENCE", "cbioportal-api")
+    monkeypatch.setenv("CBIOPORTAL_AUTH_JWKS_URI", "https://issuer.example/jwks")
+    monkeypatch.setenv("CBIOPORTAL_AUTH_PUBLIC_KEY", "public-key")
+    monkeypatch.setenv("CBIOPORTAL_AUTH_JWT_ALGORITHM", "RS512")
+    monkeypatch.setenv("CBIOPORTAL_AUTH_ALLOW_UNVERIFIED_JWT_FOR_DEV", "true")
     monkeypatch.setenv("CBIOPORTAL_ALL_STUDIES_ROLE", "all-studies")
     monkeypatch.setenv("CBIOPORTAL_DEFAULT_STUDIES", "brca_tcga")
     monkeypatch.setenv("CBIOPORTAL_CLICKHOUSE_ALLOWED_STUDIES_SETTING", "allowed")
@@ -46,6 +64,12 @@ def test_auth_config_reads_env(monkeypatch):
     assert config.cbioportal_auth_enabled is True
     assert config.cbioportal_auth_required is True
     assert config.cbioportal_keycloak_client_id == "custom-client"
+    assert config.cbioportal_auth_issuer == "https://issuer.example"
+    assert config.cbioportal_auth_audience == "cbioportal-api"
+    assert config.cbioportal_auth_jwks_uri == "https://issuer.example/jwks"
+    assert config.cbioportal_auth_public_key == "public-key"
+    assert config.cbioportal_auth_jwt_algorithm == "RS512"
+    assert config.cbioportal_auth_allow_unverified_jwt_for_dev is True
     assert config.cbioportal_all_studies_role == "all-studies"
     assert config.cbioportal_default_studies == "brca_tcga"
     assert config.cbioportal_clickhouse_allowed_studies_setting == "allowed"

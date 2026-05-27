@@ -105,6 +105,57 @@ class McpConfig:
         return os.getenv("CBIOPORTAL_KEYCLOAK_CLIENT_ID", "cbioportal")
 
     @property
+    def cbioportal_auth_issuer(self) -> str:
+        """Get the expected JWT issuer.
+
+        Empty by default. When configured, verified JWTs must match this
+        issuer. In dev-unverified mode this is still checked after decoding.
+        """
+        return os.getenv("CBIOPORTAL_AUTH_ISSUER", "")
+
+    @property
+    def cbioportal_auth_audience(self) -> str:
+        """Get the expected JWT audience.
+
+        Empty by default. When configured, decoded JWTs must include this
+        audience value.
+        """
+        return os.getenv("CBIOPORTAL_AUTH_AUDIENCE", "")
+
+    @property
+    def cbioportal_auth_jwks_uri(self) -> str:
+        """Get the JWKS URI used for JWT signature verification.
+
+        Empty by default.
+        """
+        return os.getenv("CBIOPORTAL_AUTH_JWKS_URI", "")
+
+    @property
+    def cbioportal_auth_public_key(self) -> str:
+        """Get a PEM public key used for JWT signature verification.
+
+        Empty by default. Intended mainly for local tests and deployments that
+        pin a static signing key.
+        """
+        return os.getenv("CBIOPORTAL_AUTH_PUBLIC_KEY", "")
+
+    @property
+    def cbioportal_auth_jwt_algorithm(self) -> str:
+        """Get the expected JWT signing algorithm.
+
+        Default: "RS256"
+        """
+        return os.getenv("CBIOPORTAL_AUTH_JWT_ALGORITHM", "RS256")
+
+    @property
+    def cbioportal_auth_allow_unverified_jwt_for_dev(self) -> bool:
+        """Whether to decode unsigned/unverified JWTs for local development.
+
+        Default: false. Do not enable this in production.
+        """
+        return _env_bool("CBIOPORTAL_AUTH_ALLOW_UNVERIFIED_JWT_FOR_DEV", default=False)
+
+    @property
     def cbioportal_all_studies_role(self) -> str:
         """Get the role value that grants unrestricted study access.
 
