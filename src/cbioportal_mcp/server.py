@@ -16,6 +16,7 @@ from starlette.middleware import Middleware
 from cbioportal_mcp.env import get_mcp_config, TransportType
 from cbioportal_mcp.authentication.permissions import ensure_db_permissions
 from cbioportal_mcp.authentication.request_context import StudyAuthMiddleware
+from cbioportal_mcp.clickhouse_auth import execute_authorized_select_query
 
 logger = logging.getLogger(__name__)
 
@@ -384,12 +385,10 @@ def run_select_query(query: str) -> list[dict]:
     Returns:
         list: A list of rows, where each row is a dictionary with column names as keys and corresponding values.
     """
-    from mcp_clickhouse.mcp_server import run_select_query
-
-    # DB-level read-only permissions (enforced on startup) prevent non-SELECT queries,
-    # so we don't need application-level query filtering. This allows CTEs (WITH ... AS).
-    logger.debug("run_select_query: delegate the query to run_select_query tool of ClickHouse MCP")
-    ch_query_result = run_select_query(query)
+    # DB-level read-only permissions (enforced on startup) prevent non-SELECT queries.
+    # Study authorization is passed as per-query ClickHouse settings for row policies.
+    logger.debug("run_select_query: executing through authorized ClickHouse wrapper")
+    ch_query_result = execute_authorized_select_query(query)
     result = zip_select_query_result(ch_query_result)
     return result
 
