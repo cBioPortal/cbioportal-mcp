@@ -15,6 +15,7 @@ MCP agent can reason about it.
 | 3 | `3-add-cancer-study-query-preferences.sql` | Creates `cancer_study_query_preferences` table + pattern-detected preferences (currently `pan_cancer_tcga`). |
 | 4 | `4-mutation-frequency-views.sql` | Mutation-frequency parameterized views (`gene_mutation_frequency_by_cancer_type`, `top_mutated_genes_in_cohort`) and the two coverage building-block views (`mutation_panel_gene_coverage`, `mutation_wes_coverage`). Handles the "WES is not in `gene_panel`" trap that produces >100% frequencies. See `cbioportal://mutation-frequency-guide`. |
 | 5 | `5-gene-expression-views.sql` | Gene-expression / copy-number-value / methylation views, backed by `genetic_alteration_derived`. Currently `gene_pair_coexpression(study, gene_a, gene_b, profile_type)` for Spearman correlation between two genes. See `cbioportal://gene-expression-guide`. |
+| 6 | `6-study-auth-row-policies.sql` | ClickHouse row policies that enforce request-local study authorization using MCP-provided `cbioportal_*` custom settings. See `docs/study-auth-row-policies.md`. |
 
 Everything under `sql/` directly is **portable** — works against any cBioPortal deployment. Deployment-specific SQL lives under `sql/portal-specific/<portal-name>/`:
 

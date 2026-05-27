@@ -72,6 +72,11 @@ export CBIOPORTAL_MCP_PROFILE=internal
 
 The recommended pattern is a periodic clone job: copy your production cBioPortal database into a separate ClickHouse database, then apply the SQL files in [`sql/`](sql/) — these add column comments, drop misleading columns, denormalize OncoTree, and materialize the `cancer_study_query_preferences` table the agent uses for cohort lookups. Point the MCP at this cloned-and-prepped database. See [`sql/README.md`](sql/README.md) for the full schema-prep contract and how to add deployment-specific preferences.
 
+For study-level authorization deployments, also review
+[`docs/study-auth-row-policies.md`](docs/study-auth-row-policies.md). The
+ClickHouse row policies are the enforcement boundary; prompts/resources are not
+a security boundary.
+
 To apply the SQL files manually (e.g. for ad-hoc testing), use the helper script:
 
 ```bash
