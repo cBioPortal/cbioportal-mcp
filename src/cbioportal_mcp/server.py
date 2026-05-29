@@ -19,18 +19,43 @@ logger = logging.getLogger(__name__)
 
 # Regex pattern for valid cBioPortal study identifiers
 # Allows alphanumeric characters, underscores, and hyphens
-VALID_STUDY_ID_PATTERN = re.compile(r'^[a-zA-Z0-9_-]+$')
-VALID_TABLE_NAME_PATTERN = re.compile(r'^[a-zA-Z0-9_]+$')
+VALID_STUDY_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
+VALID_TABLE_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_]+$")
+
+VALID_GENE_SYMBOL_PATTERN = re.compile(r"^[a-zA-Z0-9._-]+$")
+VALID_ATTRIBUTE_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_]+$")
+
+ALTERATION_CONFIGS = {
+    "mutation": {
+        "event_filter": "variant_type = 'mutation' AND mutation_status != 'UNCALLED'",
+        "profiling_type": "MUTATION_EXTENDED",
+    },
+    "amplification": {
+        "event_filter": "variant_type = 'cna' AND cna_alteration = 2",
+        "profiling_type": "COPY_NUMBER_ALTERATION",
+    },
+    "deep_deletion": {
+        "event_filter": "variant_type = 'cna' AND cna_alteration = -2",
+        "profiling_type": "COPY_NUMBER_ALTERATION",
+    },
+    "structural_variant": {
+        "event_filter": "variant_type = 'structural_variant'",
+        "profiling_type": "STRUCTURAL_VARIANT",
+    },
+}
+
+MAX_ANALYSIS_GENES = 25
+
 
 def _validate_study_id(study_id: str) -> str:
     """Validate and sanitize a study ID to prevent SQL injection.
-    
+
     Args:
         study_id: The study identifier to validate
-        
+
     Returns:
         The validated study_id if valid
-        
+
     Raises:
         ValueError: If study_id contains invalid characters
     """
@@ -66,10 +91,10 @@ def _validate_table_name(table: str) -> str:
 
 def _sanitize_search_term(search: str) -> str:
     """Sanitize a search term by escaping SQL special characters.
-    
+
     Args:
         search: The search term to sanitize
-        
+
     Returns:
         The sanitized search term safe for use in LIKE clauses
     """
@@ -81,6 +106,32 @@ def _sanitize_search_term(search: str) -> str:
     sanitized = sanitized.replace("%", "\\%")
     sanitized = sanitized.replace("_", "\\_")
     return sanitized
+
+def _validate_gene_symbol(gene: str) -> str:
+    if not gene:
+        raise ValueError("Gene symbol cannot be empty")
+    if not VALID_GENE_SYMBOL_PATTERN.match(gene):
+        raise ValueError(
+            f"Invalid gene symbol '{gene}'. "
+            "Gene symbols may only contain alphanumeric characters, dots, underscores, and hyphens."
+        )
+    return gene
+
+def _validate_alteration_type(alteration_type: str) -> dict:
+    if alteration_type not in ALTERATION_CONFIGS:
+        valid = ", ".join(ALTERATION_CONFIGS.keys())
+        raise ValueError(f"Invalid alteration_type '{alteration_type}'. Valid options: {valid}")
+    return ALTERATION_CONFIGS[alteration_type]
+
+def _validate_attribute_name(attr: str) -> str:
+    if not attr:
+        raise ValueError("Attribute name cannot be empty")
+    if not VALID_ATTRIBUTE_NAME_PATTERN.match(attr):
+        raise ValueError(
+            f"Invalid attribute name '{attr}'. "
+            "Attribute names may only contain alphanumeric characters and underscores."
+        )
+    return attr
 
 # Resource loading using importlib.resources for proper package support
 def _get_resources_path() -> Path:
@@ -125,14 +176,20 @@ def _list_available_study_guides() -> list[str]:
         study_guides_path = resources_path / "study-guides"
         # For Traversable (importlib.resources), iterate contents
         # For Path, use glob
-        if hasattr(study_guides_path, 'iterdir'):
+        if hasattr(study_guides_path, "iterdir"):
             # It's a Path-like object
-            return [f.stem for f in study_guides_path.iterdir() 
-                    if f.name.endswith('.md') and not f.name.startswith('_')]
+            return [
+                f.stem
+                for f in study_guides_path.iterdir()
+                if f.name.endswith(".md") and not f.name.startswith("_")
+            ]
         else:
             # It's a Traversable from importlib.resources
-            return [f.name.removesuffix('.md') for f in study_guides_path.iterdir() 
-                    if f.name.endswith('.md') and not f.name.startswith('_')]
+            return [
+                f.name.removesuffix(".md")
+                for f in study_guides_path.iterdir()
+                if f.name.endswith(".md") and not f.name.startswith("_")
+            ]
     except Exception as e:
         logger.error(f"Error listing study guides: {e}")
         return []
@@ -310,6 +367,7 @@ def clickhouse_list_tables() -> dict[str, list[dict] | str]:
 
     try:
         from mcp_clickhouse.mcp_server import execute_query
+
         raw = execute_query("SHOW TABLES")
         rows = raw.get("rows", [])
         result = [{"name": row[0]} for row in rows if row]
@@ -339,6 +397,7 @@ def clickhouse_list_table_columns(table: str) -> dict[str, list[dict] | str]:
     try:
         table = _validate_table_name(table)
         from mcp_clickhouse.mcp_server import execute_query
+
         raw = execute_query(f"DESCRIBE TABLE {table}")
         columns_list = raw.get("columns", [])
         rows = raw.get("rows", [])
@@ -367,7 +426,7 @@ def clickhouse_list_table_columns(table: str) -> dict[str, list[dict] | str]:
 def run_select_query(query: str) -> list[dict]:
     """
     Execute arbitrary ClickHouse SQL SELECT query.
-    
+
     Note: CTEs (WITH ... AS) are supported. Query validation is handled at the
     database level via read-only user permissions (see authentication/permissions.py).
 
@@ -409,40 +468,40 @@ def list_guides() -> list[dict]:
     return [
         {
             "uri": "cbioportal://mutation-frequency-guide",
-            "description": "Comprehensive guide for calculating gene mutation frequencies with gene-specific profiling denominators"
+            "description": "Comprehensive guide for calculating gene mutation frequencies with gene-specific profiling denominators",
         },
         {
             "uri": "cbioportal://clinical-data-guide",
-            "description": "Guide for querying clinical data including patient vs sample level considerations"
+            "description": "Guide for querying clinical data including patient vs sample level considerations",
         },
         {
             "uri": "cbioportal://sample-filtering-guide",
-            "description": "Guide for filtering samples and studies in cBioPortal queries"
+            "description": "Guide for filtering samples and studies in cBioPortal queries",
         },
         {
             "uri": "cbioportal://common-pitfalls",
-            "description": "Guide to avoid common mistakes when querying cBioPortal data"
+            "description": "Guide to avoid common mistakes when querying cBioPortal data",
         },
         {
             "uri": "cbioportal://treatment-guide",
-            "description": "Guide for querying treatment/clinical event data including drug agents, timelines, and linking to genomic data"
+            "description": "Guide for querying treatment/clinical event data including drug agents, timelines, and linking to genomic data",
         },
         {
             "uri": "cbioportal://faq-guide",
-            "description": "General cBioPortal FAQ: history, how to cite, data types, reference genome, abbreviations, GISTIC thresholds, API access"
+            "description": "General cBioPortal FAQ: history, how to cite, data types, reference genome, abbreviations, GISTIC thresholds, API access",
         },
         {
             "uri": "cbioportal://statistical-tests-guide",
-            "description": "Statistical test selection guide — decision matrix for choosing Fisher's exact, Wilcoxon, chi-squared, t-test, ANOVA, etc. based on data type and group count"
+            "description": "Statistical test selection guide — decision matrix for choosing Fisher's exact, Wilcoxon, chi-squared, t-test, ANOVA, etc. based on data type and group count",
         },
         {
             "uri": "cbioportal://gene-expression-guide",
-            "description": "Gene expression / copy-number / methylation analysis. Covers genetic_alteration_derived, profile_type discovery, and the gene_pair_coexpression view for Spearman correlation between two genes"
+            "description": "Gene expression / copy-number / methylation analysis. Covers genetic_alteration_derived, profile_type discovery, and the gene_pair_coexpression view for Spearman correlation between two genes",
         },
         {
             "uri": "cbioportal://study-guide/{study_id}",
-            "description": "Dynamic study-specific guide - use get_study_guide(study_id) tool to generate"
-        }
+            "description": "Dynamic study-specific guide - use get_study_guide(study_id) tool to generate",
+        },
     ]
 
 
@@ -464,7 +523,7 @@ def read_guide(uri: str) -> str:
         "cbioportal://treatment-guide": _treatment_guide_text(),
         "cbioportal://faq-guide": _faq_guide_text(),
         "cbioportal://statistical-tests-guide": _statistical_tests_guide_text(),
-        "cbioportal://gene-expression-guide": _gene_expression_guide_text()
+        "cbioportal://gene-expression-guide": _gene_expression_guide_text(),
     }
 
     if uri not in resources:
@@ -481,15 +540,15 @@ def read_guide(uri: str) -> str:
 @mcp.tool()
 def get_study_guide(study_id: str) -> str:
     """Get a guide for a specific cBioPortal study.
-    
+
     First checks for a pre-generated guide in resources/study-guides/{study_id}.md.
     If not found, dynamically generates one by querying the database.
-    
+
     Pre-generated guides may include curated notes and tips specific to each study.
-    
+
     Args:
         study_id: The cancer study identifier (e.g., "msk_chord_2024", "brca_tcga_pan_can_atlas_2018")
-    
+
     Returns:
         A markdown-formatted guide specific to the requested study
     """
@@ -498,18 +557,18 @@ def get_study_guide(study_id: str) -> str:
         study_id = _validate_study_id(study_id)
     except ValueError as e:
         return f"Error: {str(e)}"
-    
+
     # First, check for a pre-generated guide file
     static_guide = _load_study_guide(study_id)
     if static_guide:
         logger.info(f"Loaded static study guide for {study_id}")
         return static_guide
-    
+
     # Fall back to dynamic generation
     logger.info(f"Generating dynamic study guide for {study_id}")
     try:
         guide_sections = []
-        
+
         # 1. Basic study info
         study_info = run_select_query(f"""
             SELECT 
@@ -520,18 +579,18 @@ def get_study_guide(study_id: str) -> str:
             FROM cancer_study 
             WHERE cancer_study_identifier = '{study_id}'
         """)
-        
+
         if not study_info:
             return f"Study '{study_id}' not found. Use clickhouse_list_tables or query cancer_study table to find valid study identifiers."
-        
+
         info = study_info[0]
-        guide_sections.append(f"""# Study Guide: {info.get('name', study_id)}
+        guide_sections.append(f"""# Study Guide: {info.get("name", study_id)}
 
 **Study ID:** `{study_id}`
-**Cancer Type:** {info.get('type_of_cancer_id', 'N/A')}
-**Description:** {info.get('description', 'N/A')}
+**Cancer Type:** {info.get("type_of_cancer_id", "N/A")}
+**Description:** {info.get("description", "N/A")}
 """)
-        
+
         # 2. Patient and sample counts
         counts = run_select_query(f"""
             SELECT 
@@ -543,10 +602,10 @@ def get_study_guide(study_id: str) -> str:
         if counts:
             c = counts[0]
             guide_sections.append(f"""## Cohort Statistics
-- **Patients:** {c.get('patient_count', 'N/A'):,}
-- **Samples:** {c.get('sample_count', 'N/A'):,}
+- **Patients:** {c.get("patient_count", "N/A"):,}
+- **Samples:** {c.get("sample_count", "N/A"):,}
 """)
-        
+
         # 3. Available data types
         profiles = run_select_query(f"""
             SELECT DISTINCT 
@@ -560,9 +619,11 @@ def get_study_guide(study_id: str) -> str:
         if profiles:
             guide_sections.append("## Available Data Types\n")
             for p in profiles:
-                guide_sections.append(f"- **{p.get('genetic_alteration_type', 'Unknown')}**: {p.get('name', 'N/A')}")
+                guide_sections.append(
+                    f"- **{p.get('genetic_alteration_type', 'Unknown')}**: {p.get('name', 'N/A')}"
+                )
             guide_sections.append("")
-        
+
         # 4. Gene panels used
         panels = run_select_query(f"""
             SELECT DISTINCT gene_panel_id, COUNT(DISTINCT sample_unique_id) as sample_count
@@ -575,14 +636,16 @@ def get_study_guide(study_id: str) -> str:
         if panels:
             guide_sections.append("## Gene Panels\n")
             for p in panels:
-                panel_id = p.get('gene_panel_id', 'Unknown')
-                count = p.get('sample_count', 0)
-                if panel_id == 'WES':
-                    guide_sections.append(f"- **{panel_id}** (Whole Exome): {count:,} samples — all genes profiled")
+                panel_id = p.get("gene_panel_id", "Unknown")
+                count = p.get("sample_count", 0)
+                if panel_id == "WES":
+                    guide_sections.append(
+                        f"- **{panel_id}** (Whole Exome): {count:,} samples — all genes profiled"
+                    )
                 else:
                     guide_sections.append(f"- **{panel_id}**: {count:,} samples")
             guide_sections.append("")
-        
+
         # 5. Clinical attributes available
         attrs = run_select_query(f"""
             SELECT DISTINCT attribute_name, COUNT(DISTINCT sample_unique_id) as coverage
@@ -597,9 +660,11 @@ def get_study_guide(study_id: str) -> str:
             guide_sections.append("| Attribute | Samples with Data |")
             guide_sections.append("|-----------|------------------|")
             for a in attrs:
-                guide_sections.append(f"| {a.get('attribute_name', 'Unknown')} | {a.get('coverage', 0):,} |")
+                guide_sections.append(
+                    f"| {a.get('attribute_name', 'Unknown')} | {a.get('coverage', 0):,} |"
+                )
             guide_sections.append("")
-        
+
         # 6. Top mutated genes (if mutation data exists)
         top_genes = run_select_query(f"""
             SELECT 
@@ -618,9 +683,11 @@ def get_study_guide(study_id: str) -> str:
             guide_sections.append("| Gene | Altered Samples |")
             guide_sections.append("|------|----------------|")
             for g in top_genes:
-                guide_sections.append(f"| {g.get('hugo_gene_symbol', 'Unknown')} | {g.get('altered_samples', 0):,} |")
+                guide_sections.append(
+                    f"| {g.get('hugo_gene_symbol', 'Unknown')} | {g.get('altered_samples', 0):,} |"
+                )
             guide_sections.append("")
-        
+
         # 7. Sample type distribution
         sample_types = run_select_query(f"""
             SELECT attribute_value as sample_type, COUNT(DISTINCT sample_unique_id) as count
@@ -633,9 +700,11 @@ def get_study_guide(study_id: str) -> str:
         if sample_types:
             guide_sections.append("## Sample Types\n")
             for st in sample_types:
-                guide_sections.append(f"- **{st.get('sample_type', 'Unknown')}**: {st.get('count', 0):,} samples")
+                guide_sections.append(
+                    f"- **{st.get('sample_type', 'Unknown')}**: {st.get('count', 0):,} samples"
+                )
             guide_sections.append("")
-        
+
         # 8. Query tips for this study
         guide_sections.append(f"""## Query Tips for {study_id}
 
@@ -659,9 +728,9 @@ WHERE cancer_study_identifier = '{study_id}'
     AND attribute_name IN ('CANCER_TYPE', 'SAMPLE_TYPE', 'OS_MONTHS');
 ```
 """)
-        
+
         return "\n".join(guide_sections)
-        
+
     except Exception as e:
         logger.error(f"get_study_guide error: {e}")
         return f"Error generating study guide for '{study_id}': {str(e)}"
@@ -684,10 +753,10 @@ def list_studies(search: str = None, limit: int = 20) -> list[dict]:
         List of studies with their identifiers, names, descriptions, sample counts, and guide availability
     """
     available_guides = set(_list_available_study_guides())
-    
+
     # Clamp limit to safe bounds
     safe_limit = max(1, min(int(limit), MAX_LIST_LIMIT))
-    
+
     try:
         if search:
             # Sanitize search term to prevent SQL injection
@@ -723,16 +792,16 @@ def list_studies(search: str = None, limit: int = 20) -> list[dict]:
                 ORDER BY sample_count DESC
                 LIMIT {safe_limit}
             """
-        
+
         results = run_select_query(query)
-        
+
         # Add has_guide field
         for study in results:
-            study_id = study.get('cancer_study_identifier', '')
-            study['has_guide'] = study_id in available_guides
-        
+            study_id = study.get("cancer_study_identifier", "")
+            study["has_guide"] = study_id in available_guides
+
         return results
-        
+
     except Exception as e:
         logger.error(f"list_studies error: {e}")
         return [{"error": str(e)}]
