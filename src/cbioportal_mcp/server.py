@@ -7,8 +7,8 @@ import re
 import sys
 from functools import lru_cache
 from importlib import resources as importlib_resources
+from importlib.resources.abc import Traversable
 from pathlib import Path
-from typing import Optional
 from fastmcp import FastMCP
 
 
@@ -166,7 +166,7 @@ def _validate_attribute_name(attr: str) -> str:
 
 
 # Resource loading using importlib.resources for proper package support
-def _get_resources_path() -> Path:
+def _get_resources_path() -> Traversable:
     """Get the resources directory path, supporting both installed packages and dev mode."""
     try:
         # Python 3.9+ approach using importlib.resources.files
@@ -209,22 +209,12 @@ def _list_available_study_guides() -> list[str]:
     try:
         resources_path = _get_resources_path()
         study_guides_path = resources_path / "study-guides"
-        # For Traversable (importlib.resources), iterate contents
-        # For Path, use glob
-        if hasattr(study_guides_path, "iterdir"):
-            # It's a Path-like object
-            return [
-                f.stem
-                for f in study_guides_path.iterdir()
-                if f.name.endswith(".md") and not f.name.startswith("_")
-            ]
-        else:
-            # It's a Traversable from importlib.resources
-            return [
-                f.name.removesuffix(".md")
-                for f in study_guides_path.iterdir()
-                if f.name.endswith(".md") and not f.name.startswith("_")
-            ]
+        # Both pathlib.Path and importlib.resources Traversable expose iterdir()/name
+        return [
+            f.name.removesuffix(".md")
+            for f in study_guides_path.iterdir()
+            if f.name.endswith(".md") and not f.name.startswith("_")
+        ]
     except Exception as e:
         logger.error(f"Error listing study guides: {e}")
         return []
@@ -483,7 +473,8 @@ def run_select_query(query: str) -> list[dict]:
     database level via read-only user permissions (see authentication/permissions.py).
 
     Returns:
-        list: A list of rows, where each row is a dictionary with column names as keys and corresponding values.
+        list: A list of rows, where each row is a dictionary with
+              column names as keys and corresponding values.
     """
     from mcp_clickhouse.mcp_server import run_select_query
 
@@ -623,12 +614,12 @@ def get_study_guide(study_id: str) -> str:
 
         # 1. Basic study info
         study_info = run_select_query(f"""
-            SELECT 
+            SELECT
                 cancer_study_identifier,
                 name,
                 description,
                 type_of_cancer_id
-            FROM cancer_study 
+            FROM cancer_study
             WHERE cancer_study_identifier = '{study_id}'
         """)
 
@@ -645,10 +636,10 @@ def get_study_guide(study_id: str) -> str:
 
         # 2. Patient and sample counts
         counts = run_select_query(f"""
-            SELECT 
+            SELECT
                 COUNT(DISTINCT patient_unique_id) as patient_count,
                 COUNT(DISTINCT sample_unique_id) as sample_count
-            FROM clinical_data_derived 
+            FROM clinical_data_derived
             WHERE cancer_study_identifier = '{study_id}'
         """)
         if counts:
@@ -660,7 +651,7 @@ def get_study_guide(study_id: str) -> str:
 
         # 3. Available data types
         profiles = run_select_query(f"""
-            SELECT DISTINCT 
+            SELECT DISTINCT
                 gp.genetic_alteration_type,
                 gp.datatype,
                 gp.name
@@ -719,7 +710,7 @@ def get_study_guide(study_id: str) -> str:
 
         # 6. Top mutated genes (if mutation data exists)
         top_genes = run_select_query(f"""
-            SELECT 
+            SELECT
                 hugo_gene_symbol,
                 COUNT(DISTINCT sample_unique_id) as altered_samples
             FROM genomic_event_derived
@@ -799,11 +790,13 @@ def list_studies(search: str = None, limit: int = 20) -> list[dict]:
     Studies with pre-generated guides (in resources/study-guides/) will have has_guide=True.
 
     Args:
-        search: Optional search term to filter studies by name, identifier, cancer type, or description
+        search: Optional search term to filter studies by name, identifier,
+                cancer type, or description
         limit: Maximum number of studies to return (default 20, max 100)
 
     Returns:
-        List of studies with their identifiers, names, descriptions, sample counts, and guide availability
+        List of studies with their identifiers, names, descriptions,
+        sample counts, and guide availability
     """
     available_guides = set(_list_available_study_guides())
 
