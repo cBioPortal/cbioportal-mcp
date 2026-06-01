@@ -784,7 +784,7 @@ MAX_LIST_LIMIT = 100
 
 
 @mcp.tool()
-def list_studies(search: str = None, limit: int = 20) -> list[dict]:
+def list_studies(search: str | None = None, limit: int = 20) -> list[dict]:
     """List available cBioPortal studies.
 
     Studies with pre-generated guides (in resources/study-guides/) will have has_guide=True.
