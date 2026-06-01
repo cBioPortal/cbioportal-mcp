@@ -68,6 +68,7 @@ def _validate_study_id(study_id: str) -> str:
         )
     return study_id
 
+
 def _validate_table_name(table: str) -> str:
     """Validate a table name to prevent SQL injection.
 
@@ -89,6 +90,7 @@ def _validate_table_name(table: str) -> str:
         )
     return table
 
+
 def _sanitize_search_term(search: str) -> str:
     """Sanitize a search term by escaping SQL special characters.
 
@@ -107,7 +109,16 @@ def _sanitize_search_term(search: str) -> str:
     sanitized = sanitized.replace("_", "\\_")
     return sanitized
 
+
 def _validate_gene_symbol(gene: str) -> str:
+    """Sanitize a gene symbol by escaping SQL special characters.
+
+    Args:
+        search: The gene to sanitize
+
+    Returns:
+        The sanitized gene to use in queries
+    """
     if not gene:
         raise ValueError("Gene symbol cannot be empty")
     if not VALID_GENE_SYMBOL_PATTERN.match(gene):
@@ -117,13 +128,33 @@ def _validate_gene_symbol(gene: str) -> str:
         )
     return gene
 
+
 def _validate_alteration_type(alteration_type: str) -> dict:
+    """Sanitize alteration type by escaping SQL special characters.
+
+    Args:
+        search: The alteration type to sanitize
+
+    Returns:
+        The sanitized alteration type object to use in queries
+    """
+
     if alteration_type not in ALTERATION_CONFIGS:
         valid = ", ".join(ALTERATION_CONFIGS.keys())
         raise ValueError(f"Invalid alteration_type '{alteration_type}'. Valid options: {valid}")
     return ALTERATION_CONFIGS[alteration_type]
 
+
 def _validate_attribute_name(attr: str) -> str:
+    """Sanitize a attribute name by escaping SQL special characters.
+
+    Args:
+        search: The attribute to sanitize
+
+    Returns:
+        The sanitized attribute to use in queries
+    """
+
     if not attr:
         raise ValueError("Attribute name cannot be empty")
     if not VALID_ATTRIBUTE_NAME_PATTERN.match(attr):
@@ -132,6 +163,7 @@ def _validate_attribute_name(attr: str) -> str:
             "Attribute names may only contain alphanumeric characters and underscores."
         )
     return attr
+
 
 # Resource loading using importlib.resources for proper package support
 def _get_resources_path() -> Path:
@@ -142,6 +174,7 @@ def _get_resources_path() -> Path:
     except (TypeError, AttributeError):
         # Fallback for older Python or if package isn't installed
         return Path(__file__).parent / "resources"
+
 
 def _load_resource(filename: str) -> str:
     """Load a resource guide from the resources directory."""
@@ -157,6 +190,7 @@ def _load_resource(filename: str) -> str:
         logger.error(f"Error loading resource {filename}: {e}")
         return f"Error: Could not load resource: {filename}"
 
+
 def _load_study_guide(study_id: str) -> str | None:
     """Load a study guide from the study-guides directory if it exists."""
     try:
@@ -168,6 +202,7 @@ def _load_study_guide(study_id: str) -> str | None:
     except Exception as e:
         logger.error(f"Error loading study guide for {study_id}: {e}")
         return None
+
 
 def _list_available_study_guides() -> list[str]:
     """List all available pre-generated study guides."""
@@ -193,6 +228,7 @@ def _list_available_study_guides() -> list[str]:
     except Exception as e:
         logger.error(f"Error listing study guides: {e}")
         return []
+
 
 @lru_cache(maxsize=1)
 def _load_oncotree_data() -> list[dict]:
@@ -268,58 +304,74 @@ def main():
         logger.error(f"Failed to start MCP server: {e}")
         raise
 
+
 def _mutation_frequency_guide_text() -> str:
     return _load_resource("mutation-frequency-guide.md")
+
 
 def _clinical_data_guide_text() -> str:
     return _load_resource("clinical-data-guide.md")
 
+
 def _sample_filtering_guide_text() -> str:
     return _load_resource("sample-filtering-guide.md")
+
 
 def _common_pitfalls_guide_text() -> str:
     return _load_resource("common-pitfalls.md")
 
+
 def _treatment_guide_text() -> str:
     return _load_resource("treatment-guide.md")
+
 
 def _faq_guide_text() -> str:
     return _load_resource("faq-guide.md")
 
+
 def _statistical_tests_guide_text() -> str:
     return _load_resource("statistical-tests-guide.md")
 
+
 def _gene_expression_guide_text() -> str:
     return _load_resource("gene-expression-guide.md")
+
 
 # --- MCP resources (decorator registers them) --------------------------------
 @mcp.resource("cbioportal://mutation-frequency-guide")
 def mutation_frequency_guide() -> str:
     return _mutation_frequency_guide_text()
 
+
 @mcp.resource("cbioportal://clinical-data-guide")
 def clinical_data_guide() -> str:
     return _clinical_data_guide_text()
+
 
 @mcp.resource("cbioportal://sample-filtering-guide")
 def sample_filtering_guide() -> str:
     return _sample_filtering_guide_text()
 
+
 @mcp.resource("cbioportal://common-pitfalls")
 def common_pitfalls_guide() -> str:
     return _common_pitfalls_guide_text()
+
 
 @mcp.resource("cbioportal://treatment-guide")
 def treatment_guide() -> str:
     return _treatment_guide_text()
 
+
 @mcp.resource("cbioportal://faq-guide")
 def faq_guide() -> str:
     return _faq_guide_text()
 
+
 @mcp.resource("cbioportal://statistical-tests-guide")
 def statistical_tests_guide() -> str:
     return _statistical_tests_guide_text()
+
 
 @mcp.resource("cbioportal://gene-expression-guide")
 def gene_expression_guide() -> str:
@@ -738,6 +790,7 @@ WHERE cancer_study_identifier = '{study_id}'
 
 # Maximum allowed limit for list queries to prevent expensive unbounded queries
 MAX_LIST_LIMIT = 100
+
 
 @mcp.tool()
 def list_studies(search: str = None, limit: int = 20) -> list[dict]:
