@@ -10,7 +10,7 @@ from typing import Any
 import mcp.types as mt
 from fastmcp.server.middleware import Middleware, MiddlewareContext, CallNext
 from opentelemetry import trace
-from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 from opentelemetry.sdk.resources import Resource, SERVICE_NAME
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
@@ -36,10 +36,11 @@ def configure_telemetry() -> TracerProvider | None:
     service_name = os.getenv("OTEL_SERVICE_NAME", "cbioportal-mcp")
 
     # OTEL_EXPORTER_OTLP_ENDPOINT takes precedence; otherwise derive from DD_AGENT_HOST.
+    # Uses OTLP/HTTP on port 4318 (lighter than gRPC — no grpcio dependency).
     endpoint = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
     if not endpoint:
         agent_host = os.getenv("DD_AGENT_HOST", "localhost")
-        endpoint = f"http://{agent_host}:4317"
+        endpoint = f"http://{agent_host}:4318"
 
     try:
         resource = Resource.create({SERVICE_NAME: service_name})
