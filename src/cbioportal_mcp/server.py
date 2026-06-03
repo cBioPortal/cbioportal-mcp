@@ -14,6 +14,7 @@ from fastmcp import FastMCP
 
 from cbioportal_mcp.env import get_mcp_config, TransportType
 from cbioportal_mcp.authentication.permissions import ensure_db_permissions
+from cbioportal_mcp.telemetry import configure_telemetry, TelemetryMiddleware
 
 logger = logging.getLogger(__name__)
 
@@ -186,6 +187,11 @@ def main():
     except PermissionError as e:
         logger.critical("❌ ClickHouse permission check failed: %s", e)
         sys.exit(2)
+
+    # Set up OpenTelemetry → Datadog agent (no-op if env vars not set or agent unreachable)
+    provider = configure_telemetry()
+    if provider is not None:
+        mcp.add_middleware(TelemetryMiddleware())
 
     transport = config.mcp_server_transport
 

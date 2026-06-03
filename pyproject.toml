@@ -17,6 +17,8 @@ dependencies = [
     # 0.3.0 renamed run_select_query → run_query (breaking change)
     "mcp-clickhouse==0.1.11",
     "clickhouse-driver>=0.2.0",
+    "opentelemetry-sdk>=1.27.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.27.0",
 ]
 
 [project.optional-dependencies]
