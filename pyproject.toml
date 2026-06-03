@@ -13,7 +13,7 @@ authors = [
     { name = "cBioPortal MCP Contributors" }
 ]
 dependencies = [
-    "fastmcp==2.10.6",
+    "fastmcp",
     # 0.3.0 renamed run_select_query → run_query (breaking change)
     "mcp-clickhouse==0.1.11",
     "clickhouse-driver>=0.2.0",

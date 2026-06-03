@@ -121,7 +121,7 @@ dev = [
 requires-dist = [
     { name = "black", marker = "extra == 'dev'" },
     { name = "clickhouse-driver", specifier = ">=0.2.0" },
-    { name = "fastmcp", specifier = "==2.10.6" },
+    { name = "fastmcp" },
     { name = "mcp-clickhouse", specifier = "==0.1.11" },
     { name = "opentelemetry-exporter-otlp-proto-grpc", specifier = ">=1.27.0" },
     { name = "opentelemetry-sdk", specifier = ">=1.27.0" },
