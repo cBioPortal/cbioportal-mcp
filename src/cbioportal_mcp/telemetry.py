@@ -37,10 +37,12 @@ def configure_telemetry() -> TracerProvider | None:
 
     # OTEL_EXPORTER_OTLP_ENDPOINT takes precedence; otherwise derive from DD_AGENT_HOST.
     # Uses OTLP/HTTP on port 4318 (lighter than gRPC — no grpcio dependency).
+    # Note: OTLPSpanExporter only appends /v1/traces when reading from the env var,
+    # not when the endpoint is passed directly — so we include the full path here.
     endpoint = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
     if not endpoint:
         agent_host = os.getenv("DD_AGENT_HOST", "localhost")
-        endpoint = f"http://{agent_host}:4318"
+        endpoint = f"http://{agent_host}:4318/v1/traces"
 
     try:
         resource = Resource.create({SERVICE_NAME: service_name})
