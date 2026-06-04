@@ -70,11 +70,13 @@ For an end-to-end reference deployment (Kubernetes CronJob that handles the clon
 
 To connect to the MCP server and see requests and replies, use MCP Inspector.
 You can run it with:
+
 ```bash
 fastmcp dev inspector src/cbioportal_mcp/server.py
 ```
 
 ### Running the Server
+
 ```bash
 # For development
 python -m cbioportal_mcp.server
@@ -84,11 +86,22 @@ cbioportal-mcp
 ```
 
 ### Running in Docker
+
 ```bash
 # Build the image
 docker build -t cbioportal-mcp -f docker/Dockerfile .
 docker run -i -p 8000:8000 cbioportal-mcp
 ```
+
+### Running tests
+
+```bash
+pip install -e ".[dev]"
+pytest
+```
+
+The survival statistics and the `survival_curve` data contract are covered by unit tests
+in [`tests/`](tests/) and run without a live ClickHouse instance (the DB is faked).
 
 ## License
 
