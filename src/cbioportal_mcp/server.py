@@ -1,6 +1,19 @@
 #!/usr/bin/env python3
 """cBioPortal MCP Server - FastMCP implementation."""
 
+import os
+
+from ddtrace.llmobs import LLMObs
+
+_dd_api_key = os.getenv("DD_API_KEY")
+if _dd_api_key:
+    LLMObs.enable(
+        ml_app=os.getenv("DD_LLMOBS_ML_APP", "cbioportal-mcp"),
+        api_key=_dd_api_key,
+        site=os.getenv("DD_SITE", "datadoghq.com"),
+        agentless_enabled=True,
+    )
+
 import json
 import logging
 import re
