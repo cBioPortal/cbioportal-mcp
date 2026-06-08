@@ -494,6 +494,42 @@ WHERE attribute_name = 'TUMOR_GRADE' AND cancer_study_identifier = 'brca_tcga';
 
 **Key rule:** Never assume a table or column exists. Always check with `clickhouse_list_tables` and `clickhouse_list_table_columns` first.
 
+### 16. 🚨 SILENT QUERY SUBSTITUTION ("did you mean...")
+
+When the user's wording differs from canonical terminology (e.g. "V600V" looks like "V600E" with a typo, or "point mutation" sounds like "missense"), it is forbidden to silently rewrite the question and answer the rewritten version. Doing so produces an answer that looks confident but is for a different question — the user cannot tell what was changed.
+
+#### ❌ Wrong: silently substitute
+
+> User: *"Find patients in colorectal cancer with the V600V alteration in BRAF"*
+> Agent: *(internally treats this as V600E)* "I found 412 samples with BRAF V600E in colorectal studies..."
+
+> User: *"What is the most prevalent TP53 mutation in uterine cancer that is not a point mutation?"*
+> Agent: *(internally treats "point mutation" = "missense", silently excludes only missense)* "The most prevalent non-missense TP53 mutation is..."
+
+#### ✅ Correct: answer the literal question, flag any normalization
+
+For an unusual-looking variant the user may have typed deliberately:
+- Query for what was asked, literally.
+- If 0 rows come back, **explain *why* zero is the expected answer** before suggesting a likely-intended alternative. For synonymous variants (e.g. BRAF V600V, TP53 R175R), the explanation is: *cBioPortal's mutation tables filter out synonymous (silent) variants in most studies, so 0 hits means "filtered upstream", not "no such variant exists in any patient"*. Then ask: *"Did you mean V600E (the canonical activating variant)? Or would you like me to look for V600V in the studies that do retain synonymous calls?"*
+- If the wording is ambiguous (e.g. "point mutation"), ask the user which definition they meant before querying — do not pick one silently.
+
+#### Mutation-type terminology mapping (use this to disambiguate)
+
+| User says | Canonical definition | `mutation_type` filter |
+|---|---|---|
+| "point mutation" | Any SNV (single-nucleotide variant) — includes missense, nonsense, synonymous, splice-site SNVs | `mutation_type IN ('Missense_Mutation','Nonsense_Mutation','Silent','Splice_Site')` — **but ask the user to confirm scope first** |
+| "missense" | Single amino-acid substitution that changes the protein | `mutation_type = 'Missense_Mutation'` |
+| "nonsense" / "stop-gain" | Premature stop codon | `mutation_type = 'Nonsense_Mutation'` |
+| "synonymous" / "silent" | Nucleotide change with no amino-acid change | `mutation_type = 'Silent'` (**often filtered out of public datasets** — see below) |
+| "splice site" | Mutation in canonical splice acceptor/donor | `mutation_type = 'Splice_Site'` |
+| "frameshift" | Indel changing reading frame | `mutation_type IN ('Frame_Shift_Ins','Frame_Shift_Del')` |
+| "indel" / "in-frame" | In-frame insertion or deletion | `mutation_type IN ('In_Frame_Ins','In_Frame_Del')` |
+| "truncating" | Anything that disrupts the protein early | `mutation_type IN ('Nonsense_Mutation','Frame_Shift_Ins','Frame_Shift_Del','Splice_Site','Nonstop_Mutation')` |
+
+**Synonymous-variant filter.** Most cBioPortal studies drop `Silent` calls during the MAF/import pipeline because they're not biologically interesting and not annotated. A literal query for a synonymous variant (e.g. BRAF V600V) will return 0 rows from almost every study — the correct answer is *"filtered out of the dataset"*, not *"does not exist"*.
+
+**Promoter mutations.** TERT promoter variants (C228T, C250T) are *not* missense — they sit in the 5' UTR/promoter. Don't search for them with a missense filter; use `mutation_variant LIKE '%promoter%'` or `Start_Position` ranges. See `mutation-frequency-guide.md` for the canonical pattern.
+
 ## Best Practices Summary
 
 1. **Always use gene-specific denominators** for mutation frequencies
@@ -513,7 +549,7 @@ WHERE attribute_name = 'TUMOR_GRADE' AND cancer_study_identifier = 'brca_tcga';
 15. **Check resource tables before saying "out of scope"** — `resource_sample`, `resource_patient`, `resource_study`, `resource_definition` may have external links
 16. **Always verify schema** — never assume tables or columns exist without checking first
 17. **Never fabricate OncoKB/driver annotations** — check for driver columns first
-18. **Check resource tables before saying "out of scope"** — `resource_sample`, `resource_patient`, `resource_study`, `resource_definition` may have external links
+18. **Never silently rewrite the user's query** — if "point mutation" or "V600V" is ambiguous or unusual, surface the normalization or ask, don't substitute. See pitfall #16.
 
 ## Validation Checklist
 
@@ -531,3 +567,4 @@ Before trusting your results, ask:
 - [ ] Did I avoid fabricating OncoKB/driver annotations without checking driver columns first?
 - [ ] Before saying "out of scope", did I check `resource_sample`, `resource_patient`, `resource_study`, and `resource_definition` for external links?
 - [ ] Did I verify all tables and columns exist before querying them?
+- [ ] Did I answer the literal question, or did I silently rewrite it? If I normalized a term ("point mutation" → SNV set, "V600V" → V600E), did I surface that to the user?
