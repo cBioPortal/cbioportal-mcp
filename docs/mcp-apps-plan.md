@@ -1,8 +1,40 @@
 # MCP UI Apps Plan — cBioPortal
 
-> **Status:** Draft / parked for later. Created 2026-06-01.
+> **Status:** Phase 1 (Foundation + Kaplan–Meier) **implemented 2026-06-04**. Created 2026-06-01.
+> **Widget host bridge rewritten 2026-06-08:** the hand-rolled defensive postMessage bridge did not
+> implement the MCP Apps `2026-01-26` View↔Host handshake (wrong `protocolVersion`, no
+> `ui/notifications/initialized`), so hosts never delivered the tool result and the widget hung on
+> "Loading…". It was replaced by the official [`@modelcontextprotocol/ext-apps`](https://www.npmjs.com/package/@modelcontextprotocol/ext-apps)
+> `App` SDK, bundled with Vite into the single self-contained `survival.html`.
 > **Direction locked:** Interactive UI apps (MCP Apps / `mcp-ui` extension), prioritizing
 > **mutation landscape** and **survival analysis**.
+
+## Implementation status
+
+- **Phase 1 — DONE.** `survival_curve` tool + `ui://cbioportal/survival` widget, backed by a
+  pure-Python Kaplan–Meier + log-rank module (`survival_stats.py`). See "Key finding" below.
+- Phases 2–4 (OncoPrint, lollipop, co-occurrence) — not started.
+
+### Key finding — FastMCP ships native MCP Apps support
+
+`fastmcp==3.3.1` (now pinned) implements the **MCP Apps extension** (`io.modelcontextprotocol/ui`)
+directly: a tool declares `app=AppConfig(resource_uri="ui://…")` and the host renders that `ui://`
+HTML resource in a sandboxed iframe, passing the tool's structured result to the widget. This made
+most of the "decisions to lock" moot and **eliminated the heavy build surface** the draft assumed:
+
+- **Self-contained HTML, but now Vite-built (updated 2026-06-08)** — the inline-SVG render is still
+  hand-written, but the host bridge is the official ext-apps `App` SDK, so the widget is built from
+  `frontend/survival/` by Vite (`vite-plugin-singlefile`) into one self-contained HTML file (SDK + deps
+  inlined). Shipped via the existing `resources/` force-include (`resources/widgets/survival.html`,
+  committed). A dev-time Node toolchain is required to rebuild the widget; the Python runtime/wheel
+  stays pure-Python. (This supersedes the original "no esbuild/Node" goal — see decision #5.)
+- **No `lifelines`/`scipy`** — KM and log-rank (incl. the chi-square p-value) are pure standard library.
+- **No `prefab_ui`** — we use the custom `ui://` HTML resource path, not Prefab components.
+- **Host (decision #1):** standardized on the native MCP Apps extension. The widget uses the official
+  `@modelcontextprotocol/ext-apps` `App` SDK (handshake `protocolVersion 2026-01-26`:
+  `ui/initialize` → `ui/notifications/initialized` → render `ui/notifications/tool-result`'s
+  `structuredContent`). Render path validated via headless preview; recommend a final check in
+  Claude Desktop / `fastmcp dev apps`.
 
 ## Context
 
@@ -68,9 +100,10 @@ Each app is **three pieces**, mirroring existing patterns:
 
 ## Suggested phasing
 
-- **Phase 1 — Foundation + Kaplan–Meier.** Simplest rendering (a line chart) and self-contained
-  server-side stats, so it de-risks the whole MCP-UI pipeline end-to-end while immediately
-  demonstrating the mutation↔survival tie-in.
+- **Phase 1 — Foundation + Kaplan–Meier. ✅ DONE (2026-06-04).** Simplest rendering (a line chart)
+  and self-contained server-side stats, so it de-risks the whole MCP-UI pipeline end-to-end while
+  immediately demonstrating the mutation↔survival tie-in. Delivered: `survival_curve` tool,
+  `ui://cbioportal/survival` widget, `survival_stats.py`, `ui.py`, and tests in `tests/`.
 - **Phase 2 — OncoPrint.** The signature visualization; establishes the matrix + clinical-track
   data contract and the heavier-viz-library decision.
 - **Phase 3 — Lollipop.** Reuses gene-level fetch; introduces the external-annotation question.
@@ -78,9 +111,10 @@ Each app is **three pieces**, mirroring existing patterns:
 
 ## Decisions to lock before building
 
-1. **Target host.** Claude (desktop/web), ChatGPT (Apps SDK), or any `mcp-ui` host? The render
-   bridge differs — lean toward standardizing on `ui://` + `mcp-ui` for breadth and confirm the
-   primary client. **(Lock this first — it shapes the scaffold.)**
+1. **Target host.** ✅ *Resolved:* standardized on the native MCP Apps extension
+   (`io.modelcontextprotocol/ui`) that `fastmcp==3.3.1` implements. The widget bridge is host-defensive
+   (OpenAI Apps SDK + ext-apps postMessage + injection). Still TODO: validate against a live
+   Claude/ChatGPT host.
 2. **Patient vs. sample grain** — a classic cBioPortal trap: **survival is per-patient,
    alterations per-sample.** The KM tool must join through sample→patient (see
    `cbioportal://clinical-data-guide`).
@@ -90,9 +124,13 @@ Each app is **three pieces**, mirroring existing patterns:
 4. **Viz fidelity vs. effort** — reuse cBioPortal's own `oncoprintjs`/`react-mutation-mapper`
    (canonical, heavier React integration) vs. lightweight D3/Plotly. Current lean: Plotly/D3 for
    KM + co-occurrence, the cBioPortal libs for OncoPrint/lollipop.
-5. **New build surface** — adds `lifelines`/`scipy` (Python stats) and a Node/esbuild toolchain
-   to a currently pure-Python repo. Needs an explicit yes, plus **pinning `fastmcp`** (currently
-   unpinned) once its `ui://`/`_meta` support is confirmed.
+5. **New build surface** — *Updated 2026-06-08:* stats stay pure standard library (no
+   `lifelines`/`scipy`). The widget originally avoided Node/esbuild, but the hand-rolled host bridge
+   didn't conform to the MCP Apps handshake, so we adopted the official `@modelcontextprotocol/ext-apps`
+   `App` SDK and a **dev-time Vite build** (`frontend/survival/`) that bundles it into one
+   self-contained `survival.html`. The built artifact is committed and shipped via `resources/`
+   force-include, so the **Python runtime/wheel remains pure-Python**; only rebuilding the widget needs
+   Node. `fastmcp` stays **pinned to `==3.3.1`** (its `ui://`/`_meta`/`app=` support confirmed).
 6. **Iframe external calls** — lollipop domain data means iframe → Genome Nexus; decide
    allow-direct vs. proxy-through-a-tool (CSP).
 
