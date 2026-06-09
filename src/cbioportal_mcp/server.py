@@ -10,10 +10,13 @@ from importlib import resources as importlib_resources
 from importlib.resources.abc import Traversable
 from pathlib import Path
 from fastmcp import FastMCP
+from fastmcp.apps import UI_MIME_TYPE
 
 
 from cbioportal_mcp.env import get_mcp_config, TransportType
 from cbioportal_mcp.authentication.permissions import ensure_db_permissions
+from cbioportal_mcp import ui
+from cbioportal_mcp.survival_stats import kaplan_meier, logrank_test
 
 logger = logging.getLogger(__name__)
 
@@ -247,6 +250,353 @@ def _build_hierarchy_path(code: str, entries_by_code: dict[str, dict]) -> str:
         current = entry.get("parent")
     parts.reverse()
     return " > ".join(parts)
+
+
+# --- Kaplan-Meier survival app helpers ---------------------------------------
+
+# Supported survival endpoints -> human label. Each maps to clinical attributes
+# "{endpoint}_MONTHS" (follow-up time) and "{endpoint}_STATUS" (event indicator).
+SURVIVAL_ENDPOINTS = {
+    "OS": "Overall Survival",
+    "PFS": "Progression-Free Survival",
+    "DFS": "Disease-Free Survival",
+    "DSS": "Disease-Specific Survival",
+}
+
+MAX_SURVIVAL_GROUPS = 4
+
+# *_STATUS strings encode the event indicator. cBioPortal normally prefixes a
+# numeric code ("1:DECEASED"); these keyword sets are a fallback for un-coded
+# values. Censored keywords are checked first so "Progression Free" is not
+# misread as an event by the "PROGRESSED" rule.
+_SURVIVAL_CENSORED_KEYWORDS = (
+    "LIVING",
+    "ALIVE",
+    "CENSORED",
+    "DISEASEFREE",
+    "DISEASE FREE",
+    "DISEASE-FREE",
+    "NO EVENT",
+    "REMISSION",
+    "FREE",
+)
+_SURVIVAL_EVENT_KEYWORDS = (
+    "DECEASED",
+    "DEAD",
+    "PROGRESSED",
+    "PROGRESSION",
+    "RECURRED",
+    "RELAPSED",
+    "METASTA",
+    "EVENT",
+)
+
+
+def _validate_endpoint(endpoint: str) -> str:
+    """Validate a survival endpoint against the supported set.
+
+    Args:
+        endpoint: Endpoint code (e.g. "OS", "PFS"); case-insensitive.
+
+    Returns:
+        The normalized upper-case endpoint code.
+
+    Raises:
+        ValueError: If the endpoint is not supported.
+    """
+    ep = (endpoint or "").strip().upper()
+    if ep not in SURVIVAL_ENDPOINTS:
+        valid = ", ".join(SURVIVAL_ENDPOINTS)
+        raise ValueError(f"Invalid endpoint '{endpoint}'. Valid options: {valid}")
+    return ep
+
+
+def _parse_survival_status(value: str | None) -> int | None:
+    """Map a *_STATUS value to 1 (event), 0 (censored), or None (unknown).
+
+    Prefers the leading numeric code in cBioPortal's "code:label" form, then
+    falls back to keyword matching.
+    """
+    if value is None:
+        return None
+    s = str(value).strip()
+    if not s:
+        return None
+    # "code:label" form — the leading code is authoritative.
+    if ":" in s:
+        code = s.split(":", 1)[0].strip()
+        if code == "1":
+            return 1
+        if code == "0":
+            return 0
+    if s == "1":
+        return 1
+    if s == "0":
+        return 0
+    upper = s.upper()
+    if any(k in upper for k in _SURVIVAL_CENSORED_KEYWORDS):
+        return 0
+    if any(k in upper for k in _SURVIVAL_EVENT_KEYWORDS):
+        return 1
+    return None
+
+
+def _survival_time_ticks(max_time: float, n: int = 5) -> list[float]:
+    """Return ``n`` evenly spaced, rounded tick times spanning [0, max_time]."""
+    if max_time <= 0:
+        return [0.0]
+    step = max_time / (n - 1)
+    # Round the step to a "nice" value for readable axis labels.
+    if step >= 12:
+        nice = round(step / 6) * 6
+    elif step >= 1:
+        nice = round(step)
+    else:
+        nice = round(step, 1)
+    nice = nice or 1
+    ticks = [round(nice * i, 1) for i in range(n)]
+    # Ensure the axis covers the full range.
+    if ticks[-1] < max_time:
+        ticks.append(round(ticks[-1] + nice, 1))
+    return ticks
+
+
+def _fetch_survival_observations(
+    study_id: str, endpoint: str
+) -> tuple[dict[str, tuple[float, int]], int]:
+    """Fetch per-patient (time, event) observations for an endpoint.
+
+    Survival is per-patient, so this aggregates to ``patient_unique_id``.
+
+    Returns:
+        (observations keyed by patient, count of patients dropped for
+        missing/unparseable time or status).
+    """
+    rows = run_select_query(f"""
+        SELECT
+            patient_unique_id,
+            MAX(CASE WHEN attribute_name = '{endpoint}_MONTHS'
+                THEN toFloat64OrNull(attribute_value) END) AS time,
+            MAX(CASE WHEN attribute_name = '{endpoint}_STATUS'
+                THEN attribute_value END) AS status
+        FROM clinical_data_derived
+        WHERE cancer_study_identifier = '{study_id}'
+            AND attribute_name IN ('{endpoint}_MONTHS', '{endpoint}_STATUS')
+        GROUP BY patient_unique_id
+    """)
+    observations: dict[str, tuple[float, int]] = {}
+    n_dropped = 0
+    for row in rows:
+        pid = row.get("patient_unique_id")
+        if not pid:
+            continue
+        event = _parse_survival_status(row.get("status"))
+        raw_time = row.get("time")
+        if event is None or raw_time is None:
+            n_dropped += 1
+            continue
+        try:
+            t = float(raw_time)
+        except (TypeError, ValueError):
+            n_dropped += 1
+            continue
+        if t < 0:
+            n_dropped += 1
+            continue
+        observations[pid] = (t, event)
+    return observations, n_dropped
+
+
+def _altered_patients(study_id: str, gene: str, alteration_types: list[str]) -> set[str]:
+    """Return the set of patients with a qualifying alteration in ``gene``.
+
+    A patient is "altered" if any of their samples carries one of the requested
+    alteration types (alterations are per-sample; aggregated to the patient).
+    """
+    filters = []
+    for alt in alteration_types:
+        cfg = _validate_alteration_type(alt)
+        filters.append(f"({cfg['event_filter']})")
+    combined = " OR ".join(filters)
+    rows = run_select_query(f"""
+        SELECT DISTINCT patient_unique_id
+        FROM genomic_event_derived
+        WHERE cancer_study_identifier = '{study_id}'
+            AND hugo_gene_symbol = '{gene}'
+            AND ({combined})
+    """)
+    altered: set[str] = set()
+    for row in rows:
+        pid = row.get("patient_unique_id")
+        if pid:
+            altered.add(pid)
+    return altered
+
+
+def _clinical_patient_values(study_id: str, attribute: str) -> tuple[dict[str, str], int]:
+    """Map each patient to a single value of ``attribute``.
+
+    Patients with conflicting values across samples are excluded (and counted),
+    since a single grouping value cannot be assigned.
+    """
+    rows = run_select_query(f"""
+        SELECT DISTINCT patient_unique_id, attribute_value
+        FROM clinical_data_derived
+        WHERE cancer_study_identifier = '{study_id}'
+            AND attribute_name = '{attribute}'
+    """)
+    values: dict[str, str] = {}
+    ambiguous: set[str] = set()
+    for row in rows:
+        pid = row.get("patient_unique_id")
+        val = row.get("attribute_value")
+        if not pid or val in (None, ""):
+            continue
+        if pid in values and values[pid] != val:
+            ambiguous.add(pid)
+        else:
+            values[pid] = val
+    for pid in ambiguous:
+        values.pop(pid, None)
+    return values, len(ambiguous)
+
+
+def _build_survival_payload(
+    study_id: str,
+    endpoint: str,
+    group_by_gene: str | None,
+    alteration_types: list[str] | None,
+    group_by_clinical: str | None,
+) -> dict:
+    """Assemble the Kaplan-Meier data contract consumed by the survival widget.
+
+    Returns a dict with study/endpoint metadata, one entry per group (curve,
+    counts, median), the log-rank result when 2+ groups exist, and warnings.
+    """
+    endpoint = _validate_endpoint(endpoint)
+    warnings: list[str] = []
+
+    observations, n_dropped = _fetch_survival_observations(study_id, endpoint)
+    payload: dict = {
+        "study_id": study_id,
+        "endpoint": endpoint,
+        "endpoint_label": SURVIVAL_ENDPOINTS[endpoint],
+        "time_unit": "months",
+        "grouping": {"type": "none"},
+        "groups": [],
+        "time_ticks": [],
+        "stats": None,
+        "warnings": warnings,
+        "notes": (
+            "Survival is per-patient; alteration status is aggregated to the "
+            "patient (any altered sample => altered). 'Wild-type' means no "
+            "qualifying alteration among this study's patients with survival "
+            "data and is not adjusted for gene-panel coverage."
+        ),
+    }
+    if not observations:
+        payload["error"] = (
+            f"No {endpoint} survival data found for study '{study_id}'. "
+            f"Expected clinical attributes '{endpoint}_MONTHS' and '{endpoint}_STATUS'."
+        )
+        return payload
+    if n_dropped:
+        warnings.append(
+            f"{n_dropped} patient(s) excluded for missing or unparseable "
+            f"{endpoint}_MONTHS / {endpoint}_STATUS."
+        )
+
+    # Decide how to split the cohort into groups (gene alteration takes
+    # precedence over a clinical attribute; both unset => whole cohort).
+    grouped: list[tuple[str, list[tuple[float, int]]]] = []
+    if group_by_gene and group_by_clinical:
+        warnings.append("Both group_by_gene and group_by_clinical were given; grouping by gene.")
+    if group_by_gene:
+        gene = _validate_gene_symbol(group_by_gene)
+        alt_types = alteration_types or ["mutation"]
+        altered = _altered_patients(study_id, gene, alt_types)
+        altered_obs = [obs for pid, obs in observations.items() if pid in altered]
+        wt_obs = [obs for pid, obs in observations.items() if pid not in altered]
+        grouped = [
+            (f"{gene} altered", altered_obs),
+            (f"{gene} wild-type", wt_obs),
+        ]
+        payload["grouping"] = {
+            "type": "alteration",
+            "gene": gene,
+            "alteration_types": alt_types,
+        }
+    elif group_by_clinical:
+        attribute = _validate_attribute_name(group_by_clinical)
+        pat_values, n_ambiguous = _clinical_patient_values(study_id, attribute)
+        if n_ambiguous:
+            warnings.append(
+                f"{n_ambiguous} patient(s) excluded from grouping due to "
+                f"conflicting {attribute} values across samples."
+            )
+        buckets: dict[str, list[tuple[float, int]]] = {}
+        for pid, obs in observations.items():
+            val = pat_values.get(pid)
+            if val is None:
+                continue
+            buckets.setdefault(val, []).append(obs)
+        ordered = sorted(buckets.items(), key=lambda kv: len(kv[1]), reverse=True)
+        if len(ordered) > MAX_SURVIVAL_GROUPS:
+            warnings.append(
+                f"{attribute} has {len(ordered)} values; showing the "
+                f"{MAX_SURVIVAL_GROUPS} largest groups."
+            )
+            ordered = ordered[:MAX_SURVIVAL_GROUPS]
+        grouped = [(f"{attribute}: {val}", obs) for val, obs in ordered]
+        payload["grouping"] = {"type": "clinical", "attribute": attribute}
+    else:
+        grouped = [("All patients", list(observations.values()))]
+
+    # Drop empty groups; bail out if nothing is left to plot.
+    grouped = [(name, obs) for name, obs in grouped if obs]
+    if not grouped:
+        payload["error"] = "No patients remained after grouping; nothing to plot."
+        return payload
+
+    max_time = max(t for _, obs in grouped for t, _ in obs)
+    time_ticks = _survival_time_ticks(max_time)
+    payload["time_ticks"] = time_ticks
+
+    groups_out = []
+    for name, obs in grouped:
+        km = kaplan_meier(obs, time_ticks=time_ticks)
+        groups_out.append(
+            {
+                "name": name,
+                "n_patients": km["n_patients"],
+                "n_events": km["n_events"],
+                "n_censored": km["n_censored"],
+                "median_survival": (
+                    round(km["median_survival"], 2) if km["median_survival"] is not None else None
+                ),
+                "curve": [
+                    {
+                        "time": round(p["time"], 3),
+                        "survival": round(p["survival"], 5),
+                        "at_risk": p["at_risk"],
+                        "events": p["events"],
+                        "censored": p["censored"],
+                    }
+                    for p in km["curve"]
+                ],
+                "at_risk_at_ticks": km["at_risk_at_ticks"],
+            }
+        )
+    payload["groups"] = groups_out
+
+    if len(grouped) >= 2:
+        lr = logrank_test({name: obs for name, obs in grouped})
+        if lr.get("p_value") is not None:
+            lr["p_value"] = round(lr["p_value"], 6)
+            lr["chi_square"] = round(lr["chi_square"], 4)
+        payload["stats"] = lr
+
+    return payload
 
 
 # Create FastMCP instance
@@ -954,6 +1304,79 @@ def search_oncotree(search_term: str) -> list[dict]:
     # Sort by score desc, then by code for stability
     scored.sort(key=lambda x: (-x[0], x[1]["code"]))
     return [item for _, item in scored[:25]]
+
+
+# --- Survival / Kaplan-Meier UI app -----------------------------------------
+
+
+@mcp.resource(
+    uri=ui.SURVIVAL_UI_URI,
+    mime_type=UI_MIME_TYPE,
+    name="Kaplan-Meier Survival Widget",
+    description="Self-contained HTML widget that renders a Kaplan-Meier survival curve.",
+)
+def survival_widget() -> str:
+    return ui.load_widget("survival.html")
+
+
+@mcp.tool(
+    app=ui.survival_app_config(),
+    description="""
+    Generate an interactive Kaplan-Meier survival curve for a cBioPortal study.
+
+    Returns structured survival data AND renders an embedded KM chart in
+    supporting clients (MCP Apps / io.modelcontextprotocol/ui extension).
+
+    Survival is computed at the **patient** level.
+    Groups can be formed by gene-alteration status or a clinical attribute.
+
+    Args:
+        study_id: cBioPortal study identifier (e.g. "brca_tcga_pan_can_atlas_2018")
+        endpoint: Survival endpoint — one of OS, PFS, DFS, DSS (default: OS)
+        group_by_gene: Hugo gene symbol to split the cohort (altered vs wild-type).
+                       Requires the study to have genomic data. Optional.
+        alteration_types: Which alteration types count as "altered" when using
+                          group_by_gene. Subset of: mutation, amplification,
+                          deep_deletion, structural_variant (default: mutation).
+        group_by_clinical: Clinical attribute name to split the cohort
+                           (e.g. "SUBTYPE", "ER_STATUS"). Optional.
+                           Ignored when group_by_gene is also given.
+
+    Returns:
+        Structured JSON with per-group KM curves, medians, patient/event counts,
+        at-risk tables, and a log-rank test result when 2+ groups are present.
+""",
+)
+def survival_curve(
+    study_id: str,
+    endpoint: str = "OS",
+    group_by_gene: str | None = None,
+    alteration_types: list[str] | None = None,
+    group_by_clinical: str | None = None,
+) -> dict:
+    # Error returns keep the contract shape (endpoint + empty groups) so the
+    # widget recognizes and renders them consistently across host transports.
+    def _error(message: str) -> dict:
+        return {"error": message, "endpoint": (endpoint or "OS").upper(), "groups": []}
+
+    try:
+        study_id = _validate_study_id(study_id)
+    except ValueError as e:
+        return _error(str(e))
+
+    try:
+        return _build_survival_payload(
+            study_id=study_id,
+            endpoint=endpoint,
+            group_by_gene=group_by_gene,
+            alteration_types=alteration_types or ["mutation"],
+            group_by_clinical=group_by_clinical,
+        )
+    except ValueError as e:
+        return _error(str(e))
+    except Exception as e:
+        logger.error("survival_curve error: %s", e)
+        return _error(f"Unexpected error computing survival curve: {e}")
 
 
 if __name__ == "__main__":
