@@ -69,5 +69,10 @@ clickhouse-data/
 # Logs
 *.log
 
+# Frontend widget build (Node/Vite). The built survival.html is committed under
+# src/cbioportal_mcp/resources/widgets/; only the Node sources here are ignored.
+frontend/*/node_modules/
+frontend/*/dist/
+
 # Local configuration
 .env.localsql/clone_db.sql
