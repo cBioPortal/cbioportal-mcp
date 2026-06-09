@@ -9,23 +9,15 @@ description = "A specialized MCP interface for cBioPortal data analysis"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
-authors = [
-    { name = "cBioPortal MCP Contributors" }
-]
+authors = [{ name = "cBioPortal MCP Contributors" }]
 dependencies = [
-    "fastmcp",
-    # 0.3.0 renamed run_select_query → run_query (breaking change)
-    "mcp-clickhouse==0.1.11",
-    "clickhouse-driver>=0.2.0",
+  "fastmcp==3.3.1",
+  "mcp-clickhouse==0.1.11",
+  "clickhouse-driver>=0.2.0",
 ]
 
 [project.optional-dependencies]
-dev = [
-    "pytest",
-    "pytest-asyncio",
-    "black",
-    "ruff",
-]
+dev = ["pytest", "pytest-asyncio", "black", "ruff"]
 
 [project.scripts]
 cbioportal-mcp = "cbioportal_mcp.server:main"
@@ -34,15 +26,14 @@ cbioportal-mcp = "cbioportal_mcp.server:main"
 packages = ["src/cbioportal_mcp"]
 
 [tool.hatch.build.targets.sdist]
-include = [
-    "/src",
-    "/README.md",
-    "/pyproject.toml",
-]
+include = ["/src", "/README.md", "/pyproject.toml"]
 
-# Include resource files in the package
 [tool.hatch.build.targets.wheel.force-include]
 "src/cbioportal_mcp/resources" = "cbioportal_mcp/resources"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
 
 [tool.black]
 line-length = 100
