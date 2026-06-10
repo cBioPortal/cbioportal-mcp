@@ -60,6 +60,21 @@ class McpConfig:
         return int(os.getenv("CLICKHOUSE_MCP_BIND_PORT", "8000"))
 
     @property
+    def mcp_http_path(self) -> Optional[str]:
+        """Get the HTTP path under which to mount the MCP server.
+
+        Set when the server is reverse-proxied behind a sub-path so that
+        FastMCP's generated URLs (e.g. trailing-slash redirects) include
+        the external prefix. Example: "/db/mcp" when served at
+        https://host/db/mcp via Traefik without stripPrefix.
+
+        Only used when transport is "http" or "sse". When unset, FastMCP
+        uses its default path ("/mcp").
+        """
+        value = os.getenv("CLICKHOUSE_MCP_HTTP_PATH")
+        return value if value else None
+
+    @property
     def mcp_user(self) -> str:
         """Get the clickhouse user for which the MCP server is running for.
 
