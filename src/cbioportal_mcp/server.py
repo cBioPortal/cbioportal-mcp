@@ -214,7 +214,14 @@ def main():
         if transport in http_transports:
             # Use the configured bind host (defaults to 127.0.0.1, can be set to 0.0.0.0)
             # and bind port (defaults to 8000)
-            mcp.run(transport=transport, host=config.mcp_bind_host, port=config.mcp_bind_port)
+            run_kwargs = {
+                "transport": transport,
+                "host": config.mcp_bind_host,
+                "port": config.mcp_bind_port,
+            }
+            if config.mcp_http_path:
+                run_kwargs["path"] = config.mcp_http_path
+            mcp.run(**run_kwargs)
         else:
             # For stdio transport, no host or port is needed
             mcp.run(transport=transport)
