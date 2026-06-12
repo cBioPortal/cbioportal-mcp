@@ -1,6 +1,9 @@
 # MCP UI Apps Plan — cBioPortal
 
 > **Status:** Phase 1 (Foundation + Kaplan–Meier) **implemented 2026-06-04**. Created 2026-06-01.
+> **Phase 2 (OncoPrint) implemented 2026-06-11** — `oncoprint` tool + `ui://cbioportal/oncoprint`
+> widget (custom inline SVG, full fidelity: alteration matrix + clinical tracks + panel-coverage
+> "not profiled" cells).
 > **Widget host bridge rewritten 2026-06-08:** the hand-rolled defensive postMessage bridge did not
 > implement the MCP Apps `2026-01-26` View↔Host handshake (wrong `protocolVersion`, no
 > `ui/notifications/initialized`), so hosts never delivered the tool result and the widget hung on
@@ -13,7 +16,27 @@
 
 - **Phase 1 — DONE.** `survival_curve` tool + `ui://cbioportal/survival` widget, backed by a
   pure-Python Kaplan–Meier + log-rank module (`survival_stats.py`). See "Key finding" below.
-- Phases 2–4 (OncoPrint, lollipop, co-occurrence) — not started.
+- **Phase 2 — DONE (2026-06-11).** `oncoprint` tool + `ui://cbioportal/oncoprint` widget. Delivered:
+  server-side data shaping in `server.py` (`_build_oncoprint_payload` + `_fetch_oncoprint_events`,
+  `_fetch_profiled_samples`, `_memo_sort`, `_fetch_clinical_tracks`, `_oncoprint_gene_stats`),
+  `ui.oncoprint_app_config()`, the Vite widget `frontend/oncoprint/` → built
+  `resources/widgets/oncoprint.html`, and `tests/test_oncoprint.py`. Custom inline SVG (no
+  `oncoprintjs`), full fidelity (matrix + clinical tracks + panel-coverage gray cells via
+  `mutation_panel_gene_coverage` ∪ `mutation_wes_coverage`). Sample columns capped at 200 (altered
+  first); per-gene `%` computed over the full profiled set. Note: per-gene coverage uses
+  MUTATION_EXTENDED profiling; CNA/SV-only panels remain a TODO.
+- Phases 3–4 (lollipop, co-occurrence) — not started.
+
+> **fastmcp ↔ mcp_clickhouse import fix (Phase 2):** `import cbioportal_mcp.server` was failing
+> because the pinned `fastmcp==3.3.1` (required for MCP Apps) rejects the `dependencies=` kwarg that
+> `mcp_clickhouse==0.1.11` passes at import — and no published `mcp_clickhouse` supports fastmcp 3.x
+> (0.4.0 still requires `fastmcp<3`), so upgrading is not an option. **Fixed** by
+> `src/cbioportal_mcp/_compat.py` (`patch_fastmcp_removed_kwargs`), applied at the top of the package
+> `__init__`, which strips the removed kwarg from `FastMCP(...)` before `mcp_clickhouse` is imported.
+> Safe because the server only uses mcp_clickhouse's plain query helpers
+> (`execute_query`/`run_select_query`), which never touch its FastMCP instance. The DB-free tests
+> exercise this real import path (no stub). Note: `server.py` uses `importlib.resources.abc`, so
+> **Python ≥3.11 is required** (the repo `.venv` was 3.10; use 3.11+/3.12).
 
 ### Key finding — FastMCP ships native MCP Apps support
 
@@ -104,8 +127,9 @@ Each app is **three pieces**, mirroring existing patterns:
   and self-contained server-side stats, so it de-risks the whole MCP-UI pipeline end-to-end while
   immediately demonstrating the mutation↔survival tie-in. Delivered: `survival_curve` tool,
   `ui://cbioportal/survival` widget, `survival_stats.py`, `ui.py`, and tests in `tests/`.
-- **Phase 2 — OncoPrint.** The signature visualization; establishes the matrix + clinical-track
-  data contract and the heavier-viz-library decision.
+- **Phase 2 — OncoPrint. ✅ DONE (2026-06-11).** The signature visualization; established the matrix
+  + clinical-track data contract. Viz-library decision resolved in favor of custom inline SVG
+  (mirroring Phase 1), not `oncoprintjs`.
 - **Phase 3 — Lollipop.** Reuses gene-level fetch; introduces the external-annotation question.
 - **Phase 4 (stretch) — Co-occurrence.**
 
