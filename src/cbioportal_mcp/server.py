@@ -599,6 +599,457 @@ def _build_survival_payload(
     return payload
 
 
+# --- OncoPrint app helpers ---------------------------------------------------
+
+# Max sample columns rendered in the OncoPrint matrix. Studies can have tens of
+# thousands of samples; the widget shows altered samples first, then fills with
+# unaltered profiled samples up to this cap. Per-gene frequencies in gene_stats
+# are computed over the full profiled set, not just the shown columns.
+MAX_ONCOPRINT_SAMPLES = 200
+DEFAULT_ONCOPRINT_GENES = 20
+
+# Alteration types eligible for the matrix (subset of ALTERATION_CONFIGS keys).
+ONCOPRINT_ALTERATION_TYPES = (
+    "mutation",
+    "amplification",
+    "deep_deletion",
+    "structural_variant",
+)
+
+# MAF mutation_type values grouped into the classes used for cell coloring.
+# Anything unrecognized falls through to "other".
+_TRUNCATING_MUTATION_TYPES = {
+    "Nonsense_Mutation",
+    "Frame_Shift_Del",
+    "Frame_Shift_Ins",
+    "Splice_Site",
+    "Splice_Region",
+    "Nonstop_Mutation",
+    "Translation_Start_Site",
+}
+_INFRAME_MUTATION_TYPES = {"In_Frame_Del", "In_Frame_Ins"}
+
+# Severity order for picking a cell's representative class when a (gene, sample)
+# carries multiple mutations.
+_MUT_CLASS_PRIORITY = {"truncating": 3, "missense": 2, "inframe": 1, "other": 0}
+
+
+def _is_float(value) -> bool:
+    """True if ``value`` parses as a float (used to type clinical tracks)."""
+    try:
+        float(value)
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
+def _mutation_class(mutation_type: str | None) -> str:
+    """Classify a MAF mutation_type into missense/truncating/inframe/other."""
+    if not mutation_type:
+        return "other"
+    mt = str(mutation_type).strip()
+    if mt == "Missense_Mutation":
+        return "missense"
+    if mt in _TRUNCATING_MUTATION_TYPES:
+        return "truncating"
+    if mt in _INFRAME_MUTATION_TYPES:
+        return "inframe"
+    return "other"
+
+
+def _more_severe_mut(current: str | None, candidate: str) -> str:
+    """Keep the higher-priority mutation class for a cell with several mutations."""
+    if current is None:
+        return candidate
+    return candidate if _MUT_CLASS_PRIORITY[candidate] > _MUT_CLASS_PRIORITY[current] else current
+
+
+def _oncoprint_event_filter(alteration_types: list[str]) -> str:
+    """Build the combined SQL predicate for the requested alteration types.
+
+    Reuses the per-type ``event_filter`` strings in ``ALTERATION_CONFIGS`` so the
+    OncoPrint and the rest of the server agree on what each alteration means.
+    """
+    filters = []
+    for alt in alteration_types:
+        cfg = _validate_alteration_type(alt)
+        filters.append(f"({cfg['event_filter']})")
+    return " OR ".join(filters)
+
+
+def _resolve_oncoprint_genes(study_id: str, genes: list[str] | None) -> list[str]:
+    """Return the gene row list for the OncoPrint.
+
+    If ``genes`` is given, validate and de-duplicate (preserving order), clamped
+    to ``MAX_ANALYSIS_GENES``. Otherwise default to the study's most-altered
+    genes across all alteration types.
+    """
+    if genes:
+        resolved: list[str] = []
+        seen: set[str] = set()
+        for g in genes:
+            gene = _validate_gene_symbol(g)
+            if gene not in seen:
+                seen.add(gene)
+                resolved.append(gene)
+        return resolved[:MAX_ANALYSIS_GENES]
+
+    combined = _oncoprint_event_filter(list(ONCOPRINT_ALTERATION_TYPES))
+    rows = run_select_query(f"""
+        SELECT hugo_gene_symbol, COUNT(DISTINCT sample_unique_id) AS altered_samples
+        FROM genomic_event_derived
+        WHERE cancer_study_identifier = '{study_id}'
+            AND ({combined})
+        GROUP BY hugo_gene_symbol
+        ORDER BY altered_samples DESC, hugo_gene_symbol ASC
+        LIMIT {DEFAULT_ONCOPRINT_GENES}
+    """)
+    return [r["hugo_gene_symbol"] for r in rows if r.get("hugo_gene_symbol")]
+
+
+def _fetch_oncoprint_events(
+    study_id: str, genes: list[str], alteration_types: list[str]
+) -> tuple[dict[str, dict[str, dict]], dict[str, str]]:
+    """Fetch per-sample alterations for ``genes`` (study-wide, not just shown).
+
+    Returns ``(cells, sample_to_patient)`` where ``cells[gene][sample]`` is
+    ``{"cna": "amp"|"deepdel"|None, "mut": <class>|None, "sv": bool}`` for every
+    altered (gene, sample) pair, and ``sample_to_patient`` maps each altered
+    sample to its patient (for clinical-track grain resolution).
+    """
+    gene_list = ", ".join(f"'{g}'" for g in genes)
+    combined = _oncoprint_event_filter(alteration_types)
+    rows = run_select_query(f"""
+        SELECT sample_unique_id, patient_unique_id, hugo_gene_symbol,
+               variant_type, mutation_type, cna_alteration
+        FROM genomic_event_derived
+        WHERE cancer_study_identifier = '{study_id}'
+            AND hugo_gene_symbol IN ({gene_list})
+            AND ({combined})
+    """)
+    cells: dict[str, dict[str, dict]] = {}
+    sample_to_patient: dict[str, str] = {}
+    for row in rows:
+        sid = row.get("sample_unique_id")
+        gene = row.get("hugo_gene_symbol")
+        if not sid or not gene:
+            continue
+        pid = row.get("patient_unique_id")
+        if pid:
+            sample_to_patient[sid] = pid
+        cell = cells.setdefault(gene, {}).setdefault(sid, {"cna": None, "mut": None, "sv": False})
+        vt = row.get("variant_type")
+        if vt == "structural_variant":
+            cell["sv"] = True
+        elif vt == "cna":
+            try:
+                cna_val = int(row.get("cna_alteration"))
+            except (TypeError, ValueError):
+                cna_val = None
+            if cna_val == 2:
+                cell["cna"] = "amp"
+            elif cna_val == -2:
+                cell["cna"] = "deepdel"
+        elif vt == "mutation":
+            cell["mut"] = _more_severe_mut(cell["mut"], _mutation_class(row.get("mutation_type")))
+    return cells, sample_to_patient
+
+
+def _fetch_profiled_samples(study_id: str, genes: list[str]) -> dict[str, set[str]]:
+    """Return, per gene, the set of samples profiled for that gene.
+
+    Uses the canonical coverage views: ``mutation_panel_gene_coverage`` (panel
+    gene membership) plus ``mutation_wes_coverage`` (WES samples, profiled for
+    every gene). This is the documented way to avoid the >100% frequency trap
+    from treating WES as a named panel. Covers MUTATION_EXTENDED profiling.
+    """
+    gene_list = ", ".join(f"'{g}'" for g in genes)
+    profiled: dict[str, set[str]] = {g: set() for g in genes}
+
+    panel_rows = run_select_query(f"""
+        SELECT sample_unique_id, hugo_gene_symbol
+        FROM mutation_panel_gene_coverage
+        WHERE cancer_study_identifier = '{study_id}'
+            AND hugo_gene_symbol IN ({gene_list})
+    """)
+    for row in panel_rows:
+        sid = row.get("sample_unique_id")
+        gene = row.get("hugo_gene_symbol")
+        if sid and gene in profiled:
+            profiled[gene].add(sid)
+
+    wes_rows = run_select_query(f"""
+        SELECT sample_unique_id
+        FROM mutation_wes_coverage
+        WHERE cancer_study_identifier = '{study_id}'
+    """)
+    wes_samples = {r.get("sample_unique_id") for r in wes_rows if r.get("sample_unique_id")}
+    for gene in genes:
+        profiled[gene].update(wes_samples)
+    return profiled
+
+
+def _select_oncoprint_samples(
+    profiled_union: set[str], altered: set[str], max_samples: int
+) -> tuple[list[str], int, bool]:
+    """Choose which samples become matrix columns.
+
+    Altered samples first (the alteration landscape), then unaltered profiled
+    samples for frequency context, capped at ``max_samples``. The returned order
+    is provisional — ``_memo_sort`` reorders the final columns.
+
+    Returns ``(selected_samples, n_total, truncated)``.
+    """
+    universe = profiled_union | altered
+    n_total = len(universe)
+    selected = sorted(altered)[:max_samples]
+    if len(selected) < max_samples:
+        selected += sorted(universe - altered)[: max_samples - len(selected)]
+    return selected, n_total, n_total > len(selected)
+
+
+def _memo_sort(
+    samples: list[str],
+    genes: list[str],
+    cells: dict[str, dict[str, dict]],
+    not_profiled: dict[str, set[str]],
+) -> list[str]:
+    """Order samples MemoSort-style so alterations cluster top-left.
+
+    Per (sample, gene): score = cna(4) + mut(2) + sv(1), or -1 if the sample is
+    not profiled for that gene. Samples are compared gene-by-gene in row order
+    (descending score); the first gene that differs decides. Ties break on the
+    sample id for determinism.
+    """
+
+    def cell_score(gene: str, sid: str) -> int:
+        if sid in not_profiled.get(gene, ()):
+            return -1  # not profiled sinks below "profiled, no alteration"
+        cell = cells.get(gene, {}).get(sid)
+        if not cell:
+            return 0
+        return (
+            (4 if cell.get("cna") else 0)
+            + (2 if cell.get("mut") else 0)
+            + (1 if cell.get("sv") else 0)
+        )
+
+    return sorted(samples, key=lambda sid: (tuple(-cell_score(g, sid) for g in genes), sid))
+
+
+def _fetch_clinical_tracks(
+    study_id: str,
+    samples: list[str],
+    sample_to_patient: dict[str, str],
+    attributes: list[str],
+) -> list[dict]:
+    """Build one clinical annotation track per attribute for the shown samples.
+
+    Resolves each sample's value at the right grain using the ``type`` column:
+    sample-level rows map directly by ``sample_unique_id``; patient-level rows
+    fan out to that patient's shown samples. A track is "numeric" iff every
+    present value parses as a float.
+    """
+    if not samples or not attributes:
+        return []
+    sample_set = set(samples)
+    patient_to_samples: dict[str, list[str]] = {}
+    for sid in samples:
+        pid = sample_to_patient.get(sid)
+        if pid:
+            patient_to_samples.setdefault(pid, []).append(sid)
+
+    tracks: list[dict] = []
+    for attr in attributes:
+        try:
+            attribute = _validate_attribute_name(attr)
+        except ValueError:
+            continue
+        rows = run_select_query(f"""
+            SELECT sample_unique_id, patient_unique_id, attribute_value, type
+            FROM clinical_data_derived
+            WHERE cancer_study_identifier = '{study_id}'
+                AND attribute_name = '{attribute}'
+        """)
+        values: dict[str, str] = {}
+        patient_values: dict[str, str] = {}
+        for row in rows:
+            val = row.get("attribute_value")
+            if val in (None, ""):
+                continue
+            if row.get("type") == "patient":
+                pid = row.get("patient_unique_id")
+                if pid:
+                    patient_values.setdefault(pid, val)
+            else:  # sample-level
+                sid = row.get("sample_unique_id")
+                if sid and sid in sample_set:
+                    values[sid] = val
+        # Fall back to patient-level values for samples without a sample-level row.
+        for pid, val in patient_values.items():
+            for sid in patient_to_samples.get(pid, ()):
+                values.setdefault(sid, val)
+        if not values:
+            continue
+        tracks.append(
+            {
+                "name": attribute,
+                "label": attribute.replace("_", " ").title(),
+                "kind": "numeric" if all(_is_float(v) for v in values.values()) else "categorical",
+                "values": values,
+            }
+        )
+    return tracks
+
+
+def _oncoprint_gene_stats(
+    genes: list[str],
+    cells: dict[str, dict[str, dict]],
+    profiled: dict[str, set[str]],
+) -> list[dict]:
+    """Per-gene altered/profiled counts and frequency over the full study set."""
+    stats = []
+    for gene in genes:
+        gene_cells = cells.get(gene, {})
+        altered = len(gene_cells)
+        prof = len(profiled.get(gene, set()))
+        by_type = {"mutation": 0, "amplification": 0, "deep_deletion": 0, "structural_variant": 0}
+        for cell in gene_cells.values():
+            if cell.get("mut"):
+                by_type["mutation"] += 1
+            if cell.get("cna") == "amp":
+                by_type["amplification"] += 1
+            elif cell.get("cna") == "deepdel":
+                by_type["deep_deletion"] += 1
+            if cell.get("sv"):
+                by_type["structural_variant"] += 1
+        stats.append(
+            {
+                "gene": gene,
+                "altered": altered,
+                "profiled": prof,
+                "freq_pct": round(altered * 100.0 / prof, 1) if prof else None,
+                "by_type": by_type,
+            }
+        )
+    return stats
+
+
+def _build_oncoprint_payload(
+    study_id: str,
+    genes: list[str] | None,
+    alteration_types: list[str] | None,
+    clinical_tracks: list[str] | None,
+    max_samples: int | None,
+) -> dict:
+    """Assemble the OncoPrint data contract consumed by the widget."""
+    warnings: list[str] = []
+    alt_types = alteration_types or list(ONCOPRINT_ALTERATION_TYPES)
+    for alt in alt_types:  # validate up front (raises ValueError on bad input)
+        _validate_alteration_type(alt)
+    cap = (
+        MAX_ONCOPRINT_SAMPLES
+        if max_samples is None
+        else max(1, min(int(max_samples), MAX_ONCOPRINT_SAMPLES))
+    )
+    track_attrs = clinical_tracks if clinical_tracks is not None else ["CANCER_TYPE", "SAMPLE_TYPE"]
+
+    payload: dict = {
+        "study_id": study_id,
+        "genes": [],
+        "samples": [],
+        "alteration_types": alt_types,
+        "cells": {},
+        "not_profiled": {},
+        "gene_stats": [],
+        "clinical_tracks": [],
+        "n_samples_total": 0,
+        "n_samples_shown": 0,
+        "warnings": warnings,
+        "notes": (
+            "OncoPrint is per-sample (columns = samples). Cells show the "
+            "alteration type; a gray cell means the sample was not profiled for "
+            "that gene (gene-panel coverage). Per-gene % is computed over the "
+            "full profiled set, not just the shown columns; for cohorts larger "
+            "than the column cap, altered samples are shown first and the matrix "
+            "is truncated."
+        ),
+    }
+
+    genes_resolved = _resolve_oncoprint_genes(study_id, genes)
+    if not genes_resolved:
+        payload["error"] = (
+            f"No genes to display for study '{study_id}'. The study may have no "
+            "genomic events, or the named genes have no alterations."
+        )
+        return payload
+
+    cells, sample_to_patient = _fetch_oncoprint_events(study_id, genes_resolved, alt_types)
+    profiled = _fetch_profiled_samples(study_id, genes_resolved)
+
+    # Order rows most-altered first (the staircase); ties keep input order.
+    orig_index = {g: i for i, g in enumerate(genes_resolved)}
+    genes_resolved.sort(key=lambda g: (-len(cells.get(g, {})), orig_index[g]))
+    payload["genes"] = genes_resolved
+
+    altered_samples: set[str] = set()
+    for gene_cells in cells.values():
+        altered_samples.update(gene_cells.keys())
+    profiled_union: set[str] = set()
+    for s in profiled.values():
+        profiled_union |= s
+
+    if not altered_samples and not profiled_union:
+        payload["error"] = (
+            f"No samples found for study '{study_id}' with the selected genes and alteration types."
+        )
+        return payload
+
+    selected, n_total, truncated = _select_oncoprint_samples(profiled_union, altered_samples, cap)
+    selected_set = set(selected)
+    payload["n_samples_total"] = n_total
+    payload["n_samples_shown"] = len(selected)
+    if truncated:
+        warnings.append(
+            f"Showing {len(selected)} of {n_total} profiled samples (altered "
+            f"samples prioritized). Per-gene frequencies reflect all {n_total} samples."
+        )
+
+    # Gray "not profiled" cells: shown samples outside the gene's profiled set.
+    # Only meaningful when coverage data exists for the study.
+    not_profiled: dict[str, set[str]] = {}
+    if profiled_union:
+        for gene in genes_resolved:
+            gene_profiled = profiled.get(gene, set())
+            np = {
+                sid
+                for sid in selected
+                if sid not in gene_profiled and sid not in cells.get(gene, {})
+            }
+            if np:
+                not_profiled[gene] = np
+    else:
+        warnings.append("Gene-panel coverage data unavailable; 'not profiled' cells are not shown.")
+
+    payload["samples"] = _memo_sort(selected, genes_resolved, cells, not_profiled)
+
+    # Trim alteration cells to the shown samples (matrix render only).
+    trimmed: dict[str, dict[str, dict]] = {}
+    for gene, gene_cells in cells.items():
+        kept = {sid: c for sid, c in gene_cells.items() if sid in selected_set}
+        if kept:
+            trimmed[gene] = kept
+    payload["cells"] = trimmed
+    payload["not_profiled"] = {g: sorted(s) for g, s in not_profiled.items()}
+
+    # gene_stats uses the full (untrimmed) cells + profiled set for accurate %.
+    payload["gene_stats"] = _oncoprint_gene_stats(genes_resolved, cells, profiled)
+    payload["clinical_tracks"] = _fetch_clinical_tracks(
+        study_id, payload["samples"], sample_to_patient, track_attrs
+    )
+    return payload
+
+
 # Create FastMCP instance
 mcp = FastMCP(
     name="cBioPortal MCP Server",
@@ -1377,6 +1828,84 @@ def survival_curve(
     except Exception as e:
         logger.error("survival_curve error: %s", e)
         return _error(f"Unexpected error computing survival curve: {e}")
+
+
+# --- OncoPrint UI app --------------------------------------------------------
+
+
+@mcp.resource(
+    uri=ui.ONCOPRINT_UI_URI,
+    mime_type=UI_MIME_TYPE,
+    name="OncoPrint Widget",
+    description="Self-contained HTML widget that renders an OncoPrint alteration matrix.",
+)
+def oncoprint_widget() -> str:
+    return ui.load_widget("oncoprint.html")
+
+
+@mcp.tool(
+    app=ui.oncoprint_app_config(),
+    description="""
+    Generate an interactive OncoPrint (gene x sample alteration matrix) for a cBioPortal study.
+
+    Returns structured alteration data AND renders an embedded OncoPrint in
+    supporting clients
+
+    OncoPrint is computed at the **sample** level (columns = samples). Each cell
+    shows that sample's alteration in the gene: mutation (colored by class),
+    copy-number amplification or deep deletion, and/or structural variant. A gray
+    cell marks a sample not profiled for that gene (gene-panel coverage).
+
+    Args:
+        study_id: cBioPortal study identifier (e.g. "brca_tcga_pan_can_atlas_2018").
+        genes: Hugo gene symbols for the matrix rows. Optional; defaults to the
+               study's most-altered genes. Clamped to 25 rows.
+        alteration_types: Which alterations to include. Subset of: mutation,
+                          amplification, deep_deletion, structural_variant
+                          (default: all four).
+        clinical_tracks: Clinical attribute names shown as annotation tracks below
+                         the matrix (e.g. "CANCER_TYPE", "SAMPLE_TYPE"). Optional;
+                         pass [] for none.
+        max_samples: Max sample columns to render (default 200, hard cap 200).
+                     Altered samples are prioritized; the view is truncated for
+                     larger cohorts (per-gene % still reflects all samples).
+
+    Returns:
+        Structured JSON: gene rows, sample columns (MemoSort order), a sparse
+        alteration-cell map, not-profiled cells, per-gene frequency stats, and
+        clinical tracks.
+""",
+)
+def oncoprint(
+    study_id: str,
+    genes: list[str] | None = None,
+    alteration_types: list[str] | None = None,
+    clinical_tracks: list[str] | None = None,
+    max_samples: int | None = None,
+) -> dict:
+    # Error returns keep the contract shape (study_id + empty genes/samples) so
+    # the widget recognizes and renders them consistently across host transports.
+    def _error(message: str) -> dict:
+        return {"error": message, "study_id": study_id, "genes": [], "samples": []}
+
+    try:
+        validated_study = _validate_study_id(study_id)
+    except ValueError as e:
+        return _error(str(e))
+
+    try:
+        return _build_oncoprint_payload(
+            study_id=validated_study,
+            genes=genes,
+            alteration_types=alteration_types,
+            clinical_tracks=clinical_tracks,
+            max_samples=max_samples,
+        )
+    except ValueError as e:
+        return _error(str(e))
+    except Exception as e:
+        logger.error("oncoprint error: %s", e)
+        return _error(f"Unexpected error computing OncoPrint: {e}")
 
 
 if __name__ == "__main__":
