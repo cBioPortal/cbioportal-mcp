@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 
 # ui:// resource URIs for the interactive apps.
 SURVIVAL_UI_URI = "ui://cbioportal/survival"
+ONCOPRINT_UI_URI = "ui://cbioportal/oncoprint"
 
 
 def _widgets_path() -> Traversable:
@@ -64,6 +65,21 @@ def survival_app_config() -> AppConfig:
     """
     return AppConfig(
         resource_uri=SURVIVAL_UI_URI,
+        visibility=["model"],
+        prefers_border=True,
+    )
+
+
+def oncoprint_app_config() -> AppConfig:
+    """AppConfig for the OncoPrint tool.
+
+    The widget is fully self-contained (inline SVG, no external scripts or
+    network calls), so no CSP connect/resource domains are required — only the
+    host<->iframe postMessage bridge is used. ``visibility=["model"]`` means the
+    model invokes this entry-point tool; the host then renders the ui:// widget.
+    """
+    return AppConfig(
+        resource_uri=ONCOPRINT_UI_URI,
         visibility=["model"],
         prefers_border=True,
     )
