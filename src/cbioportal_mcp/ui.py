@@ -27,6 +27,11 @@ logger = logging.getLogger(__name__)
 # ui:// resource URIs for the interactive apps.
 SURVIVAL_UI_URI = "ui://cbioportal/survival"
 ONCOPRINT_UI_URI = "ui://cbioportal/oncoprint"
+# Generic, model-driven chart widgets (data supplied by the tool caller, not a DB
+# query). One ui:// resource + AppConfig per chart type.
+PIE_UI_URI = "ui://cbioportal/pie"
+BAR_UI_URI = "ui://cbioportal/bar"
+LINE_UI_URI = "ui://cbioportal/line"
 
 
 def _widgets_path() -> Traversable:
@@ -83,3 +88,33 @@ def oncoprint_app_config() -> AppConfig:
         visibility=["model"],
         prefers_border=True,
     )
+
+
+def _chart_app_config(resource_uri: str) -> AppConfig:
+    """AppConfig for a generic chart widget.
+
+    Same wiring as the survival/oncoprint apps: a self-contained inline-SVG
+    widget (no external scripts or network calls), so only the host<->iframe
+    postMessage bridge is used. ``visibility=["model"]`` means the model invokes
+    the chart tool and the host renders the linked ui:// widget.
+    """
+    return AppConfig(
+        resource_uri=resource_uri,
+        visibility=["model"],
+        prefers_border=True,
+    )
+
+
+def pie_chart_app_config() -> AppConfig:
+    """AppConfig for the generic pie/donut chart tool."""
+    return _chart_app_config(PIE_UI_URI)
+
+
+def bar_chart_app_config() -> AppConfig:
+    """AppConfig for the generic bar chart tool."""
+    return _chart_app_config(BAR_UI_URI)
+
+
+def line_chart_app_config() -> AppConfig:
+    """AppConfig for the generic line chart tool."""
+    return _chart_app_config(LINE_UI_URI)
