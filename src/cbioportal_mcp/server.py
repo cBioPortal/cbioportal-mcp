@@ -1908,5 +1908,499 @@ def oncoprint(
         return _error(f"Unexpected error computing OncoPrint: {e}")
 
 
+# --- Generic chart UI apps (pie / bar / line) -------------------------------
+#
+# Unlike the survival/oncoprint apps, these do NOT query the database. The caller
+# (the model) supplies the data to plot directly, so the tools only validate and
+# normalize it into each widget's data contract. That makes them generic
+# visualization primitives the model can point at any data it already has (for
+# example, counts it computed from another cBioPortal tool).
+
+# Caller-supplied data is clamped so payloads and the rendered widget stay bounded.
+MAX_CHART_SLICES = 50
+MAX_CHART_CATEGORIES = 50
+MAX_CHART_SERIES = 12
+MAX_CHART_POINTS = 500
+
+# Colors accepted from callers for chart elements. Restricted to a safe subset
+# (hex, rgb()/rgba(), or a basic CSS color name) because the widget assigns them
+# to SVG fill attributes; anything else is dropped so a caller-supplied string
+# cannot inject styling or markup.
+_HEX_COLOR_RE = re.compile(r"^#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$")
+_RGB_COLOR_RE = re.compile(
+    r"^rgba?\(\s*\d{1,3}\s*,\s*\d{1,3}\s*,\s*\d{1,3}\s*(?:,\s*(?:0|1|0?\.\d+)\s*)?\)$"
+)
+_CSS_COLOR_NAMES = frozenset(
+    {
+        "black", "white", "red", "green", "blue", "yellow", "orange", "purple",
+        "pink", "brown", "gray", "grey", "cyan", "magenta", "teal", "navy",
+        "olive", "maroon", "lime", "aqua", "fuchsia", "silver", "gold", "indigo",
+        "violet", "coral", "salmon", "khaki", "crimson", "turquoise", "tomato",
+        "steelblue", "seagreen", "darkorange", "transparent",
+    }
+)
+
+
+def _coerce_number(value) -> float | None:
+    """Best-effort float coercion; returns None for non-numeric/NaN/inf/bool."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        f = float(value)
+    elif isinstance(value, str):
+        try:
+            f = float(value.strip())
+        except ValueError:
+            return None
+    else:
+        return None
+    if f != f or f == float("inf") or f == float("-inf"):  # NaN / ±inf
+        return None
+    return f
+
+
+def _label_of(value) -> str:
+    """String label for an x value; integer-valued floats render without a decimal
+    (so a numeric x forced to categorical matches the numeric axis formatting)."""
+    if isinstance(value, bool):
+        return str(value)
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)
+
+
+def _safe_color(value) -> str | None:
+    """Return a sanitized color string, or None if missing/unrecognized."""
+    if not isinstance(value, str):
+        return None
+    c = value.strip()
+    if not c:
+        return None
+    if _HEX_COLOR_RE.match(c) or _RGB_COLOR_RE.match(c):
+        return c
+    if c.lower() in _CSS_COLOR_NAMES:
+        return c.lower()
+    return None
+
+
+def _clamp_seq(seq: list, limit: int, warnings: list, noun: str) -> list:
+    """Truncate seq to limit, recording a warning when truncation happens."""
+    if len(seq) > limit:
+        warnings.append(f"Showing the first {limit} {noun} of {len(seq)}.")
+        return seq[:limit]
+    return seq
+
+
+def _opt_str(value) -> str | None:
+    """Normalize an optional text field: non-empty string or None."""
+    if value is None:
+        return None
+    s = str(value)
+    return s if s else None
+
+
+def _build_pie_payload(
+    slices: list,
+    title=None,
+    subtitle=None,
+    donut: bool = False,
+    show_values: bool = True,
+    show_percent: bool = True,
+) -> dict:
+    """Normalize caller-supplied slices into the pie widget's data contract."""
+    if not isinstance(slices, list) or not slices:
+        raise ValueError("pie_chart requires a non-empty 'slices' list.")
+
+    warnings: list = []
+    slices = _clamp_seq(slices, MAX_CHART_SLICES, warnings, "slices")
+
+    clean: list = []
+    for i, s in enumerate(slices):
+        if not isinstance(s, dict):
+            raise ValueError(f"slices[{i}] must be an object with 'label' and 'value'.")
+        label = s.get("label")
+        label = str(label) if label is not None else f"Slice {i + 1}"
+        value = _coerce_number(s.get("value"))
+        if value is None:
+            warnings.append(f"Dropped slice '{label}' (non-numeric value).")
+            continue
+        if value < 0:
+            warnings.append(f"Dropped slice '{label}' (negative value).")
+            continue
+        item = {"label": label, "value": value}
+        color = _safe_color(s.get("color"))
+        if color:
+            item["color"] = color
+        elif s.get("color") is not None:
+            warnings.append(f"Ignored unrecognized color for slice '{label}'.")
+        clean.append(item)
+
+    if not clean:
+        raise ValueError("pie_chart: no valid slices after parsing values.")
+
+    return {
+        "kind": "pie",
+        "title": _opt_str(title),
+        "subtitle": _opt_str(subtitle),
+        "donut": bool(donut),
+        "show_values": bool(show_values),
+        "show_percent": bool(show_percent),
+        "slices": clean,
+        "total": sum(item["value"] for item in clean),
+        "warnings": warnings,
+    }
+
+
+def _build_bar_payload(
+    categories: list,
+    series: list,
+    title=None,
+    subtitle=None,
+    x_label=None,
+    y_label=None,
+    orientation: str = "vertical",
+    stacked: bool = False,
+    show_values: bool = False,
+) -> dict:
+    """Normalize caller-supplied categories/series into the bar widget's contract."""
+    if not isinstance(categories, list) or not categories:
+        raise ValueError("bar_chart requires a non-empty 'categories' list.")
+    if not isinstance(series, list) or not series:
+        raise ValueError("bar_chart requires a non-empty 'series' list.")
+    orientation = (orientation or "vertical").lower()
+    if orientation not in ("vertical", "horizontal"):
+        raise ValueError("bar_chart 'orientation' must be 'vertical' or 'horizontal'.")
+
+    warnings: list = []
+    categories = [
+        str(c) for c in _clamp_seq(categories, MAX_CHART_CATEGORIES, warnings, "categories")
+    ]
+    series = _clamp_seq(series, MAX_CHART_SERIES, warnings, "series")
+    n = len(categories)
+
+    clean_series: list = []
+    for i, s in enumerate(series):
+        if not isinstance(s, dict):
+            raise ValueError(f"series[{i}] must be an object with 'name' and 'values'.")
+        name = s.get("name")
+        name = str(name) if name is not None else f"Series {i + 1}"
+        raw_values = s.get("values")
+        if not isinstance(raw_values, list):
+            raise ValueError(f"series '{name}' must have a 'values' list.")
+        coerced = [_coerce_number(v) for v in raw_values]
+        if any(v is None for v in coerced):
+            warnings.append(f"Series '{name}': some non-numeric values replaced with 0.")
+        values = [v if v is not None else 0.0 for v in coerced]
+        if len(values) < n:
+            warnings.append(f"Series '{name}' padded with zeros to {n} categories.")
+            values = values + [0.0] * (n - len(values))
+        elif len(values) > n:
+            warnings.append(f"Series '{name}' truncated to {n} categories.")
+            values = values[:n]
+        item = {"name": name, "values": values}
+        color = _safe_color(s.get("color"))
+        if color:
+            item["color"] = color
+        elif s.get("color") is not None:
+            warnings.append(f"Ignored unrecognized color for series '{name}'.")
+        clean_series.append(item)
+
+    return {
+        "kind": "bar",
+        "title": _opt_str(title),
+        "subtitle": _opt_str(subtitle),
+        "x_label": _opt_str(x_label),
+        "y_label": _opt_str(y_label),
+        "orientation": orientation,
+        "stacked": bool(stacked),
+        "show_values": bool(show_values),
+        "categories": categories,
+        "series": clean_series,
+        "warnings": warnings,
+    }
+
+
+def _build_line_payload(
+    series: list,
+    x=None,
+    title=None,
+    subtitle=None,
+    x_label=None,
+    y_label=None,
+    markers: bool = True,
+    smooth: bool = False,
+) -> dict:
+    """Normalize caller-supplied series into the line widget's data contract.
+
+    Each series carries its own x; a shared ``x`` fills in for series that omit
+    one, and point indices are the final fallback. If any x is non-numeric the
+    whole chart is treated as categorical (all x coerced to strings).
+    """
+    if not isinstance(series, list) or not series:
+        raise ValueError("line_chart requires a non-empty 'series' list.")
+
+    warnings: list = []
+    series = _clamp_seq(series, MAX_CHART_SERIES, warnings, "series")
+    shared_x = x if isinstance(x, list) else None
+
+    clean_series: list = []
+    all_numeric = True
+    for i, s in enumerate(series):
+        if not isinstance(s, dict):
+            raise ValueError(f"series[{i}] must be an object with a 'y' list.")
+        name = s.get("name")
+        name = str(name) if name is not None else f"Series {i + 1}"
+        raw_y = s.get("y")
+        if not isinstance(raw_y, list) or not raw_y:
+            raise ValueError(f"series '{name}' must have a non-empty 'y' list.")
+        coerced_y = [_coerce_number(v) for v in raw_y]
+        if any(v is None for v in coerced_y):
+            warnings.append(f"Series '{name}': some non-numeric y values replaced with 0.")
+        y = [v if v is not None else 0.0 for v in coerced_y]
+        y = _clamp_seq(y, MAX_CHART_POINTS, warnings, "points")
+
+        raw_x = s.get("x")
+        x_vals = raw_x if isinstance(raw_x, list) else shared_x
+        if isinstance(x_vals, list):
+            if len(x_vals) < len(y):
+                warnings.append(f"Series '{name}': x shorter than y; remainder filled by index.")
+                x_vals = list(x_vals) + list(range(len(x_vals), len(y)))
+            elif len(x_vals) > len(y):
+                x_vals = x_vals[: len(y)]
+            coerced_x = [_coerce_number(v) for v in x_vals]
+            if all(v is not None for v in coerced_x):
+                out_x = coerced_x
+            else:
+                out_x = [_label_of(v) for v in x_vals]
+                all_numeric = False
+        else:
+            out_x = list(range(len(y)))
+
+        item = {"name": name, "x": out_x, "y": y}
+        color = _safe_color(s.get("color"))
+        if color:
+            item["color"] = color
+        elif s.get("color") is not None:
+            warnings.append(f"Ignored unrecognized color for series '{name}'.")
+        clean_series.append(item)
+
+    if not all_numeric:
+        for item in clean_series:
+            item["x"] = [_label_of(v) for v in item["x"]]
+
+    return {
+        "kind": "line",
+        "title": _opt_str(title),
+        "subtitle": _opt_str(subtitle),
+        "x_label": _opt_str(x_label),
+        "y_label": _opt_str(y_label),
+        "markers": bool(markers),
+        "smooth": bool(smooth),
+        "x_is_numeric": all_numeric,
+        "series": clean_series,
+        "warnings": warnings,
+    }
+
+
+@mcp.resource(
+    uri=ui.PIE_UI_URI,
+    mime_type=UI_MIME_TYPE,
+    name="Pie Chart Widget",
+    description="Self-contained HTML widget that renders a pie or donut chart.",
+)
+def pie_chart_widget() -> str:
+    return ui.load_widget("charts.html")
+
+
+@mcp.resource(
+    uri=ui.BAR_UI_URI,
+    mime_type=UI_MIME_TYPE,
+    name="Bar Chart Widget",
+    description="Self-contained HTML widget that renders a bar chart.",
+)
+def bar_chart_widget() -> str:
+    return ui.load_widget("charts.html")
+
+
+@mcp.resource(
+    uri=ui.LINE_UI_URI,
+    mime_type=UI_MIME_TYPE,
+    name="Line Chart Widget",
+    description="Self-contained HTML widget that renders a line chart.",
+)
+def line_chart_widget() -> str:
+    return ui.load_widget("charts.html")
+
+
+@mcp.tool(
+    app=ui.pie_chart_app_config(),
+    description="""
+    Render a generic pie (or donut) chart from data you supply.
+
+    Generic visualization tool: it does NOT query cBioPortal. Pass the values you
+    want to plot (e.g. counts you already computed) and the host renders an
+    interactive pie chart; the same data is also returned as structured JSON.
+
+    Args:
+        slices: The wedges, as a list of objects, e.g.
+                [{"label": "Missense", "value": 42, "color": "#2e8b57"},
+                 {"label": "Truncating", "value": 18}].
+                "value" must be a non-negative number; "color" is optional (hex
+                like "#2e8b57", "rgb(...)", or a basic CSS color name).
+        title: Optional chart title.
+        subtitle: Optional secondary line under the title.
+        donut: Render as a donut (hole in the middle) instead of a full pie.
+        show_values: Show each slice's raw value in the legend (default True).
+        show_percent: Show each slice's percentage (default True).
+
+    Returns:
+        Structured JSON: {kind, title, slices:[{label,value,color?}], total, ...}.
+""",
+)
+def pie_chart(
+    slices: list,
+    title: str | None = None,
+    subtitle: str | None = None,
+    donut: bool = False,
+    show_values: bool = True,
+    show_percent: bool = True,
+) -> dict:
+    def _error(message: str) -> dict:
+        return {"error": message, "kind": "pie", "slices": []}
+
+    try:
+        return _build_pie_payload(
+            slices=slices,
+            title=title,
+            subtitle=subtitle,
+            donut=donut,
+            show_values=show_values,
+            show_percent=show_percent,
+        )
+    except ValueError as e:
+        return _error(str(e))
+    except Exception as e:
+        logger.error("pie_chart error: %s", e)
+        return _error(f"Unexpected error building pie chart: {e}")
+
+
+@mcp.tool(
+    app=ui.bar_chart_app_config(),
+    description="""
+    Render a generic bar chart from data you supply.
+
+    Generic visualization tool: it does NOT query cBioPortal. Supports one or
+    several series (grouped or stacked), vertical or horizontal bars.
+
+    Args:
+        categories: X-axis category labels, e.g. ["TP53", "KRAS", "PIK3CA"].
+        series: One or more series, as a list of objects, e.g.
+                [{"name": "Mutated %", "values": [40, 25, 18], "color": "#1f77b4"}].
+                Each "values" list lines up with "categories" (shorter/longer
+                lists are padded with zeros / truncated). "color" is optional.
+        title: Optional chart title.
+        subtitle: Optional secondary line under the title.
+        x_label: Optional x-axis label.
+        y_label: Optional y-axis label.
+        orientation: "vertical" (default) or "horizontal".
+        stacked: Stack series instead of grouping them side by side.
+        show_values: Draw the numeric value on each bar (default False).
+
+    Returns:
+        Structured JSON: {kind, categories, series:[{name,values,color?}], ...}.
+""",
+)
+def bar_chart(
+    categories: list,
+    series: list,
+    title: str | None = None,
+    subtitle: str | None = None,
+    x_label: str | None = None,
+    y_label: str | None = None,
+    orientation: str = "vertical",
+    stacked: bool = False,
+    show_values: bool = False,
+) -> dict:
+    def _error(message: str) -> dict:
+        return {"error": message, "kind": "bar", "categories": [], "series": []}
+
+    try:
+        return _build_bar_payload(
+            categories=categories,
+            series=series,
+            title=title,
+            subtitle=subtitle,
+            x_label=x_label,
+            y_label=y_label,
+            orientation=orientation,
+            stacked=stacked,
+            show_values=show_values,
+        )
+    except ValueError as e:
+        return _error(str(e))
+    except Exception as e:
+        logger.error("bar_chart error: %s", e)
+        return _error(f"Unexpected error building bar chart: {e}")
+
+
+@mcp.tool(
+    app=ui.line_chart_app_config(),
+    description="""
+    Render a generic line chart from data you supply.
+
+    Generic visualization tool: it does NOT query cBioPortal. Supports one or
+    several lines over a shared or per-series x-axis (numeric or categorical).
+
+    Args:
+        series: One or more lines, as a list of objects, e.g.
+                [{"name": "OS", "y": [100, 82, 61, 40], "x": [0, 12, 24, 36],
+                  "color": "#1f77b4"}].
+                "y" is required (numbers). "x" is optional per series; if omitted
+                the shared "x" (below) is used, else point indices 0,1,2,...
+                x values may be numbers (e.g. months) or strings (categories).
+        x: Optional shared x-axis values for series that don't supply their own,
+           e.g. [0, 12, 24, 36] or ["Q1", "Q2", "Q3"].
+        title: Optional chart title.
+        subtitle: Optional secondary line under the title.
+        x_label: Optional x-axis label.
+        y_label: Optional y-axis label.
+        markers: Draw a marker at each data point (default True).
+        smooth: Draw smoothed/curved lines instead of straight segments.
+
+    Returns:
+        Structured JSON: {kind, series:[{name,x,y,color?}], x_is_numeric, ...}.
+""",
+)
+def line_chart(
+    series: list,
+    x: list | None = None,
+    title: str | None = None,
+    subtitle: str | None = None,
+    x_label: str | None = None,
+    y_label: str | None = None,
+    markers: bool = True,
+    smooth: bool = False,
+) -> dict:
+    def _error(message: str) -> dict:
+        return {"error": message, "kind": "line", "series": []}
+
+    try:
+        return _build_line_payload(
+            series=series,
+            x=x,
+            title=title,
+            subtitle=subtitle,
+            x_label=x_label,
+            y_label=y_label,
+            markers=markers,
+            smooth=smooth,
+        )
+    except ValueError as e:
+        return _error(str(e))
+    except Exception as e:
+        logger.error("line_chart error: %s", e)
+        return _error(f"Unexpected error building line chart: {e}")
+
+
 if __name__ == "__main__":
     main()
