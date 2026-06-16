@@ -21,17 +21,26 @@ from importlib.resources.abc import Traversable
 from pathlib import Path
 
 from fastmcp.apps import AppConfig
+from fastmcp.apps.config import ResourceCSP
 
 logger = logging.getLogger(__name__)
 
 # ui:// resource URIs for the interactive apps.
 SURVIVAL_UI_URI = "ui://cbioportal/survival"
 ONCOPRINT_UI_URI = "ui://cbioportal/oncoprint"
+LOLLIPOP_UI_URI = "ui://cbioportal/lollipop"
+COOCCURRENCE_UI_URI = "ui://cbioportal/cooccurrence"
 # Generic, model-driven chart widgets (data supplied by the tool caller, not a DB
 # query). One ui:// resource + AppConfig per chart type.
 PIE_UI_URI = "ui://cbioportal/pie"
 BAR_UI_URI = "ui://cbioportal/bar"
 LINE_UI_URI = "ui://cbioportal/line"
+
+# The lollipop widget is the only app that talks to the network: it fetches the
+# canonical transcript's protein length + Pfam domains live from Genome Nexus
+# (react-mutation-mapper style). Its AppConfig declares this origin in the iframe
+# CSP connect-src allowlist; every other widget is fully self-contained.
+GENOME_NEXUS_ORIGIN = "https://www.genomenexus.org"
 
 
 def _widgets_path() -> Traversable:
@@ -85,6 +94,41 @@ def oncoprint_app_config() -> AppConfig:
     """
     return AppConfig(
         resource_uri=ONCOPRINT_UI_URI,
+        visibility=["model"],
+        prefers_border=True,
+    )
+
+
+def lollipop_app_config() -> AppConfig:
+    """AppConfig for the mutation lollipop (``mutation_diagram``) tool.
+
+    Unlike the other widgets, the lollipop is **not** fully self-contained: the
+    iframe fetches the gene's canonical-transcript protein length and Pfam
+    domains directly from Genome Nexus (mirroring cBioPortal's own
+    react-mutation-mapper). So this config adds ``GENOME_NEXUS_ORIGIN`` to the
+    iframe's CSP ``connect-src`` allowlist; without it the host blocks the fetch
+    and the widget falls back to a domain-less backbone scaled to the
+    highest observed mutation position. ``visibility=["model"]`` means the model
+    invokes the tool and the host renders the linked ui:// widget.
+    """
+    return AppConfig(
+        resource_uri=LOLLIPOP_UI_URI,
+        visibility=["model"],
+        prefers_border=True,
+        csp=ResourceCSP(connect_domains=[GENOME_NEXUS_ORIGIN]),
+    )
+
+
+def cooccurrence_app_config() -> AppConfig:
+    """AppConfig for the alteration co-occurrence (``alteration_cooccurrence``) tool.
+
+    The widget is fully self-contained (inline-SVG heatmap, no external scripts or
+    network calls), so no CSP connect/resource domains are required — only the
+    host<->iframe postMessage bridge is used. ``visibility=["model"]`` means the
+    model invokes this entry-point tool; the host then renders the ui:// widget.
+    """
+    return AppConfig(
+        resource_uri=COOCCURRENCE_UI_URI,
         visibility=["model"],
         prefers_border=True,
     )
