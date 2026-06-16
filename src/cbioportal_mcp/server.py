@@ -17,6 +17,11 @@ from cbioportal_mcp.env import get_mcp_config, TransportType
 from cbioportal_mcp.authentication.permissions import ensure_db_permissions
 from cbioportal_mcp import ui
 from cbioportal_mcp.survival_stats import kaplan_meier, logrank_test
+from cbioportal_mcp.cooccurrence_stats import (
+    benjamini_hochberg,
+    fisher_exact_two_sided,
+    log2_odds_ratio,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1050,6 +1055,376 @@ def _build_oncoprint_payload(
     return payload
 
 
+# --- Mutation lollipop app helpers -------------------------------------------
+
+# Max distinct protein-change lollipops kept in the payload (highest-recurrence
+# first). A single gene rarely exceeds this many distinct changes, but large
+# pan-cancer studies can; truncating keeps the payload and the widget readable.
+MAX_LOLLIPOP_MUTATIONS = 400
+
+# Codon-position parser for protein-change notation. HGVS protein strings in
+# mutation_variant look like p.V600E / p.R175H / p.E746_A750del / p.R213* /
+# p.K27fs; the codon number is the first run of digits in the string.
+_PROTEIN_POS_RE = re.compile(r"\d+")
+
+
+def _parse_protein_position(mutation_variant: str | None) -> int | None:
+    """Parse the 1-based codon position from a protein-change string.
+
+    Returns the first integer in the HGVS protein notation (``p.V600E`` -> 600,
+    ``p.E746_A750del`` -> 746), or ``None`` when there is no usable position
+    ("NA", blank, or notations without a codon number).
+    """
+    if not mutation_variant:
+        return None
+    m = _PROTEIN_POS_RE.search(str(mutation_variant))
+    if not m:
+        return None
+    try:
+        pos = int(m.group())
+    except ValueError:
+        return None
+    return pos if pos > 0 else None
+
+
+def _clean_protein_change(mutation_variant: str) -> str:
+    """Strip a leading ``p.`` from a protein-change label for display."""
+    s = str(mutation_variant).strip()
+    if s[:2].lower() == "p.":
+        s = s[2:]
+    return s
+
+
+def _fetch_lollipop_mutations(study_id: str, gene: str) -> list[dict]:
+    """Fetch raw per-sample mutation rows for one gene.
+
+    Uses the canonical mutation filter (``variant_type='mutation'`` excluding
+    UNCALLED, matching ``ALTERATION_CONFIGS['mutation']``). One row per stored
+    event, so the caller can count *distinct samples* per protein change exactly.
+    """
+    mut_filter = ALTERATION_CONFIGS["mutation"]["event_filter"]
+    return run_select_query(f"""
+        SELECT sample_unique_id, mutation_variant, mutation_type
+        FROM genomic_event_derived
+        WHERE cancer_study_identifier = '{study_id}'
+            AND hugo_gene_symbol = '{gene}'
+            AND ({mut_filter})
+    """)
+
+
+def _build_lollipop_payload(study_id: str, gene: str) -> dict:
+    """Assemble the mutation-lollipop data contract consumed by the widget."""
+    warnings: list[str] = []
+    payload: dict = {
+        "study_id": study_id,
+        "gene": gene,
+        "mutations": [],
+        "class_counts": {},
+        "n_samples_mutated": 0,
+        "protein_change_count": 0,
+        "unmapped_count": 0,
+        "max_position": None,
+        "warnings": warnings,
+        "notes": (
+            "Mutation lollipop for a single gene. Each lollipop is a distinct "
+            "protein change; its height/head is the number of samples carrying it "
+            "(recurrence) and its color is the mutation class. Positions are "
+            "parsed from the protein-change notation (mutation_variant). The "
+            "protein backbone length and Pfam domains are fetched live from Genome "
+            "Nexus by the widget; if unavailable, the axis is scaled to the highest "
+            "observed position and no domains are drawn. Counts are per sample "
+            "(somatic + germline, excluding UNCALLED)."
+        ),
+    }
+
+    rows = _fetch_lollipop_mutations(study_id, gene)
+    if not rows:
+        payload["error"] = (
+            f"No mutations found for {gene} in study '{study_id}'. The gene may "
+            "have no mutation events, or the study may have no mutation data."
+        )
+        return payload
+
+    # Aggregate per distinct protein change: the set of samples carrying it (for
+    # recurrence) and the most-severe mutation class + the MAF types seen for it.
+    by_change: dict[str, dict] = {}
+    all_samples: set[str] = set()
+    unmapped_samples: set[str] = set()
+    for row in rows:
+        sid = row.get("sample_unique_id")
+        if not sid:
+            continue
+        all_samples.add(sid)
+        variant = row.get("mutation_variant")
+        pos = _parse_protein_position(variant)
+        if variant is None or str(variant).strip().upper() == "NA" or pos is None:
+            unmapped_samples.add(sid)
+            continue
+        cls = _mutation_class(row.get("mutation_type"))
+        rec = by_change.get(variant)
+        if rec is None:
+            rec = {
+                "protein_change": _clean_protein_change(variant),
+                "position": pos,
+                "samples": set(),
+                "class": cls,
+                "types": set(),
+            }
+            by_change[variant] = rec
+        rec["samples"].add(sid)
+        rec["class"] = _more_severe_mut(rec["class"], cls)
+        mtype = row.get("mutation_type")
+        if mtype:
+            rec["types"].add(str(mtype))
+
+    mutations = [
+        {
+            "protein_change": rec["protein_change"],
+            "position": rec["position"],
+            "count": len(rec["samples"]),
+            "class": rec["class"],
+            "types": sorted(rec["types"]),
+        }
+        for rec in by_change.values()
+    ]
+    # Sort by recurrence (desc) then position so truncation keeps the hotspots;
+    # the widget re-sorts by position for drawing.
+    mutations.sort(key=lambda m: (-m["count"], m["position"]))
+    n_distinct = len(mutations)
+    if n_distinct > MAX_LOLLIPOP_MUTATIONS:
+        mutations = mutations[:MAX_LOLLIPOP_MUTATIONS]
+        warnings.append(
+            f"{n_distinct} distinct protein changes found; showing the "
+            f"{MAX_LOLLIPOP_MUTATIONS} most recurrent."
+        )
+
+    class_counts: dict[str, int] = {}
+    max_pos = 0
+    for m in mutations:
+        class_counts[m["class"]] = class_counts.get(m["class"], 0) + 1
+        max_pos = max(max_pos, m["position"])
+
+    payload["mutations"] = mutations
+    payload["class_counts"] = class_counts
+    payload["protein_change_count"] = n_distinct
+    payload["n_samples_mutated"] = len(all_samples)
+    payload["max_position"] = max_pos or None
+    payload["unmapped_count"] = len(unmapped_samples)
+    if not mutations:
+        payload["error"] = (
+            f"{gene} has mutation events in study '{study_id}', but none carry a "
+            "plottable protein-change position."
+        )
+        return payload
+    if unmapped_samples:
+        warnings.append(
+            f"{len(unmapped_samples)} sample(s) have mutations without a plottable "
+            "protein position (e.g. splice sites or 'NA'); they are counted but not "
+            "shown as lollipops."
+        )
+    return payload
+
+
+# --- Alteration co-occurrence app helpers ------------------------------------
+
+# Gene-count bounds for the pairwise co-occurrence analysis. The heatmap shows
+# every gene pair, so the pair count grows as G*(G-1)/2; cap the genes to keep
+# the matrix (and the all-pairs Fisher computation) bounded and readable.
+MAX_COOCCURRENCE_GENES = 12
+DEFAULT_COOCCURRENCE_GENES = 8
+
+# A pair is flagged significant when its Benjamini-Hochberg q-value is below this.
+COOCCURRENCE_Q_SIGNIFICANT = 0.05
+
+# Alteration types considered "altered" for a gene (same set as the OncoPrint).
+COOCCURRENCE_ALTERATION_TYPES = ONCOPRINT_ALTERATION_TYPES
+
+
+def _resolve_cooccurrence_genes(study_id: str, genes: list[str] | None) -> list[str]:
+    """Return the gene list for the co-occurrence analysis.
+
+    If ``genes`` is given, validate and de-duplicate (preserving order), clamped
+    to ``MAX_COOCCURRENCE_GENES``. Otherwise default to the study's most-altered
+    genes across all alteration types.
+    """
+    if genes:
+        resolved: list[str] = []
+        seen: set[str] = set()
+        for g in genes:
+            gene = _validate_gene_symbol(g)
+            if gene not in seen:
+                seen.add(gene)
+                resolved.append(gene)
+        return resolved[:MAX_COOCCURRENCE_GENES]
+
+    combined = _oncoprint_event_filter(list(COOCCURRENCE_ALTERATION_TYPES))
+    rows = run_select_query(f"""
+        SELECT hugo_gene_symbol, COUNT(DISTINCT sample_unique_id) AS altered_samples
+        FROM genomic_event_derived
+        WHERE cancer_study_identifier = '{study_id}'
+            AND ({combined})
+        GROUP BY hugo_gene_symbol
+        ORDER BY altered_samples DESC, hugo_gene_symbol ASC
+        LIMIT {DEFAULT_COOCCURRENCE_GENES}
+    """)
+    return [r["hugo_gene_symbol"] for r in rows if r.get("hugo_gene_symbol")]
+
+
+def _cooccurrence_pair(
+    gene_a: str,
+    gene_b: str,
+    altered: dict[str, set[str]],
+    profiled: dict[str, set[str]],
+) -> dict | None:
+    """Build the 2x2 contingency result for one gene pair, or None.
+
+    The sample universe is the set profiled for **both** genes (the correct
+    pairwise denominator). Returns ``None`` when that universe is empty (the two
+    genes share no profiled samples, e.g. disjoint panels), so the caller can
+    skip and warn.
+    """
+    universe = profiled[gene_a] & profiled[gene_b]
+    if not universe:
+        return None
+    alt_a = altered[gene_a] & universe
+    alt_b = altered[gene_b] & universe
+    both = alt_a & alt_b
+    a = len(both)
+    b = len(alt_a) - a
+    c = len(alt_b) - a
+    d = len(universe) - len(alt_a | alt_b)
+
+    p_value = fisher_exact_two_sided(a, b, c, d)
+    expected_both = (a + b) * (a + c) / len(universe)
+    tendency = "Co-occurrence" if a > expected_both else "Mutual exclusivity"
+    return {
+        "gene_a": gene_a,
+        "gene_b": gene_b,
+        "n_both": a,
+        "n_a_only": b,
+        "n_b_only": c,
+        "n_neither": d,
+        "n_profiled": len(universe),
+        "log2_odds_ratio": round(log2_odds_ratio(a, b, c, d), 3),
+        "p_value": p_value,
+        "tendency": tendency,
+    }
+
+
+def _build_cooccurrence_payload(
+    study_id: str,
+    genes: list[str] | None,
+    alteration_types: list[str] | None,
+) -> dict:
+    """Assemble the co-occurrence data contract consumed by the heatmap widget.
+
+    For every gene pair, builds a 2x2 alteration contingency table over the
+    samples profiled for both genes, runs a two-sided Fisher exact test, adds a
+    log2 odds ratio and tendency, then Benjamini-Hochberg-corrects the p-values
+    to q-values across all pairs.
+    """
+    warnings: list[str] = []
+    requested_types = alteration_types or list(COOCCURRENCE_ALTERATION_TYPES)
+    resolved_types: list[str] = []
+    seen_types: set[str] = set()
+    for alt in requested_types:
+        _validate_alteration_type(alt)  # raises ValueError on unknown types
+        if alt not in seen_types:
+            seen_types.add(alt)
+            resolved_types.append(alt)
+
+    payload: dict = {
+        "study_id": study_id,
+        "alteration_types": resolved_types,
+        "genes": [],
+        "gene_stats": [],
+        "pairs": [],
+        "n_significant": 0,
+        "q_threshold": COOCCURRENCE_Q_SIGNIFICANT,
+        "warnings": warnings,
+        "notes": (
+            "Pairwise alteration co-occurrence / mutual exclusivity. For each gene "
+            "pair a 2x2 table (both / either-only / neither altered) is built over "
+            "the samples profiled for both genes, scored with a two-sided Fisher "
+            "exact test and a log2 odds ratio (positive = tend to co-occur, "
+            "negative = mutually exclusive), and the p-values are Benjamini-Hochberg "
+            "corrected to q-values. Alterations are per sample; profiling uses "
+            "mutation (MUTATION_EXTENDED) coverage, so copy-number/structural events "
+            "on samples without mutation profiling are not counted."
+        ),
+    }
+
+    resolved_genes = _resolve_cooccurrence_genes(study_id, genes)
+    payload["genes"] = resolved_genes
+    if len(resolved_genes) < 2:
+        payload["error"] = (
+            "Co-occurrence analysis needs at least two genes. "
+            f"Found {len(resolved_genes)} for study '{study_id}'. Provide 2+ valid "
+            "gene symbols, or pick a study with alteration data."
+        )
+        return payload
+
+    cells, _ = _fetch_oncoprint_events(study_id, resolved_genes, resolved_types)
+    altered = {g: set(cells.get(g, {}).keys()) for g in resolved_genes}
+    profiled = _fetch_profiled_samples(study_id, resolved_genes)
+
+    payload["gene_stats"] = [
+        {
+            "gene": g,
+            "altered": len(altered[g] & profiled[g]),
+            "profiled": len(profiled[g]),
+            "freq_pct": (
+                round(len(altered[g] & profiled[g]) * 100.0 / len(profiled[g]), 1)
+                if profiled[g]
+                else None
+            ),
+        }
+        for g in resolved_genes
+    ]
+
+    pairs: list[dict] = []
+    skipped = 0
+    for i in range(len(resolved_genes)):
+        for j in range(i + 1, len(resolved_genes)):
+            pair = _cooccurrence_pair(resolved_genes[i], resolved_genes[j], altered, profiled)
+            if pair is None:
+                skipped += 1
+                continue
+            pairs.append(pair)
+
+    if not pairs:
+        payload["error"] = (
+            f"No gene pairs could be evaluated for study '{study_id}': the selected "
+            "genes share no profiled samples."
+        )
+        return payload
+
+    qvalues = benjamini_hochberg([p["p_value"] for p in pairs])
+    n_significant = 0
+    for pair, q in zip(pairs, qvalues, strict=True):
+        pair["q_value"] = q
+        pair["significant"] = q < COOCCURRENCE_Q_SIGNIFICANT
+        if pair["significant"]:
+            n_significant += 1
+
+    # Most significant first; the widget arranges the matrix by gene order.
+    pairs.sort(key=lambda p: (p["p_value"], -abs(p["log2_odds_ratio"])))
+    payload["pairs"] = pairs
+    payload["n_significant"] = n_significant
+
+    if skipped:
+        warnings.append(
+            f"{skipped} gene pair(s) skipped because the two genes share no profiled samples."
+        )
+    if any(t != "mutation" for t in resolved_types):
+        warnings.append(
+            "Copy-number/structural alterations are included, but profiling counts use "
+            "mutation coverage; pairs involving genes without copy-number/SV profiling may "
+            "be approximate."
+        )
+    return payload
+
+
 # Create FastMCP instance
 mcp = FastMCP(
     name="cBioPortal MCP Server",
@@ -1906,6 +2281,141 @@ def oncoprint(
     except Exception as e:
         logger.error("oncoprint error: %s", e)
         return _error(f"Unexpected error computing OncoPrint: {e}")
+
+
+# --- Mutation lollipop UI app ------------------------------------------------
+
+
+@mcp.resource(
+    uri=ui.LOLLIPOP_UI_URI,
+    mime_type=UI_MIME_TYPE,
+    name="Mutation Lollipop Widget",
+    description="HTML widget that renders a mutation lollipop diagram for one gene.",
+)
+def lollipop_widget() -> str:
+    return ui.load_widget("lollipop.html")
+
+
+@mcp.tool(
+    app=ui.lollipop_app_config(),
+    description="""
+    Generate an interactive mutation lollipop diagram for a single gene in a cBioPortal study.
+
+    Returns structured per-mutation data AND renders an embedded lollipop plot in
+    supporting clients.
+
+    A lollipop plot shows each distinct protein change as a "stick" at its codon
+    position along the protein; the head is sized/labeled by how many samples carry
+    it (recurrence) and colored by mutation class (missense, truncating, inframe,
+    other). The protein backbone and its Pfam domains are drawn from data the
+    widget fetches live from Genome Nexus.
+
+    Mutations are counted at the **sample** level (one count per sample carrying the
+    change; somatic + germline, excluding UNCALLED). Positions are parsed from the
+    protein-change notation; changes without a codon position (e.g. some splice
+    variants) are summarized in `unmapped_count` but not plotted.
+
+    Args:
+        study_id: cBioPortal study identifier (e.g. "brca_tcga_pan_can_atlas_2018").
+        gene: A single Hugo gene symbol (e.g. "TP53", "PIK3CA", "EGFR").
+
+    Returns:
+        Structured JSON: the gene, a list of distinct protein changes
+        (protein_change, position, count, class, types), per-class counts, the
+        number of mutated samples, the highest observed position, and the count of
+        unplottable mutations.
+""",
+)
+def mutation_diagram(study_id: str, gene: str) -> dict:
+    # Error returns keep the contract shape (study_id + gene + empty mutations) so
+    # the widget recognizes and renders them consistently across host transports.
+    def _error(message: str) -> dict:
+        return {"error": message, "study_id": study_id, "gene": gene, "mutations": []}
+
+    try:
+        validated_study = _validate_study_id(study_id)
+        validated_gene = _validate_gene_symbol(gene)
+    except ValueError as e:
+        return _error(str(e))
+
+    try:
+        return _build_lollipop_payload(validated_study, validated_gene)
+    except ValueError as e:
+        return _error(str(e))
+    except Exception as e:
+        logger.error("mutation_diagram error: %s", e)
+        return _error(f"Unexpected error computing mutation lollipop: {e}")
+
+
+# --- Alteration co-occurrence UI app -----------------------------------------
+
+
+@mcp.resource(
+    uri=ui.COOCCURRENCE_UI_URI,
+    mime_type=UI_MIME_TYPE,
+    name="Alteration Co-occurrence Widget",
+    description="HTML widget that renders a pairwise alteration co-occurrence heatmap.",
+)
+def cooccurrence_widget() -> str:
+    return ui.load_widget("cooccurrence.html")
+
+
+@mcp.tool(
+    app=ui.cooccurrence_app_config(),
+    description="""
+    Analyze pairwise alteration co-occurrence and mutual exclusivity among genes
+    in a cBioPortal study.
+
+    Returns structured per-pair statistics AND renders an embedded co-occurrence
+    heatmap in supporting clients.
+
+    For every pair of genes, a 2x2 contingency table is built over the samples
+    profiled for both genes (both altered / only one altered / neither), scored
+    with a two-sided Fisher exact test and a log2 odds ratio. A positive odds
+    ratio means the alterations tend to co-occur; negative means they tend to be
+    mutually exclusive. P-values are Benjamini-Hochberg corrected to q-values
+    across all pairs, and a pair is flagged significant at q < 0.05.
+
+    Alterations are counted per sample. Profiling uses mutation (MUTATION_EXTENDED)
+    coverage, so copy-number/structural events on samples without mutation
+    profiling are not counted (see the payload `notes`).
+
+    Args:
+        study_id: cBioPortal study identifier (e.g. "brca_tcga_pan_can_atlas_2018").
+        genes: Optional list of Hugo gene symbols (2-12). If omitted, the study's
+            most-altered genes are used.
+        alteration_types: Optional alteration types to count as "altered"
+            (any of "mutation", "amplification", "deep_deletion",
+            "structural_variant"). Defaults to all four.
+
+    Returns:
+        Structured JSON: the gene list, per-gene altered/profiled counts, and a
+        list of pairs (gene_a, gene_b, n_both, n_a_only, n_b_only, n_neither,
+        log2_odds_ratio, p_value, q_value, tendency, significant).
+""",
+)
+def alteration_cooccurrence(
+    study_id: str,
+    genes: list[str] | None = None,
+    alteration_types: list[str] | None = None,
+) -> dict:
+    # Error returns keep the contract shape (study_id + empty genes/pairs) so the
+    # widget recognizes and renders them consistently across host transports.
+    def _error(message: str) -> dict:
+        return {"error": message, "study_id": study_id, "genes": [], "pairs": []}
+
+    try:
+        validated_study = _validate_study_id(study_id)
+    except ValueError as e:
+        return _error(str(e))
+
+    try:
+        return _build_cooccurrence_payload(validated_study, genes, alteration_types)
+    except ValueError as e:
+        return _error(str(e))
+    except Exception as e:
+        logger.error("alteration_cooccurrence error: %s", e)
+        return _error(f"Unexpected error computing co-occurrence: {e}")
 
 
 # --- Generic chart UI apps (pie / bar / line) -------------------------------
