@@ -4,6 +4,14 @@
 > **Phase 2 (OncoPrint) implemented 2026-06-11** — `oncoprint` tool + `ui://cbioportal/oncoprint`
 > widget (custom inline SVG, full fidelity: alteration matrix + clinical tracks + panel-coverage
 > "not profiled" cells).
+> **Phase 3 (Mutation lollipop) implemented 2026-06-13** — `mutation_diagram` tool +
+> `ui://cbioportal/lollipop` widget (custom inline SVG; recurrence-scaled, class-colored heads on a
+> backbone whose protein length + Pfam domains are fetched live from Genome Nexus by the iframe, via
+> the tool's CSP `connect-src` allowlist).
+> **Phase 4 (Co-occurrence) implemented 2026-06-15** — `alteration_cooccurrence` tool +
+> `ui://cbioportal/cooccurrence` widget (custom inline-SVG symmetric heatmap; per-pair two-sided
+> Fisher exact test + log2 odds ratio + Benjamini–Hochberg q-values, all pure-Python in
+> `cooccurrence_stats.py`).
 > **Widget host bridge rewritten 2026-06-08:** the hand-rolled defensive postMessage bridge did not
 > implement the MCP Apps `2026-01-26` View↔Host handshake (wrong `protocolVersion`, no
 > `ui/notifications/initialized`), so hosts never delivered the tool result and the widget hung on
@@ -25,7 +33,34 @@
   `mutation_panel_gene_coverage` ∪ `mutation_wes_coverage`). Sample columns capped at 200 (altered
   first); per-gene `%` computed over the full profiled set. Note: per-gene coverage uses
   MUTATION_EXTENDED profiling; CNA/SV-only panels remain a TODO.
-- Phases 3–4 (lollipop, co-occurrence) — not started.
+- **Phase 3 — DONE (2026-06-13).** `mutation_diagram(study_id, gene)` tool +
+  `ui://cbioportal/lollipop` widget. Delivered: per-gene mutation fetch + aggregation in
+  `server.py` (`_build_lollipop_payload`, `_fetch_lollipop_mutations`, `_parse_protein_position`,
+  `_clean_protein_change`; reuses `_mutation_class`/`_more_severe_mut` for coloring),
+  `ui.lollipop_app_config()`, the Vite widget `frontend/lollipop/` → built
+  `resources/widgets/lollipop.html`, and `tests/test_lollipop.py` (32 tests). Custom inline-SVG
+  lollipop (no `react-mutation-mapper`): backbone + Pfam domains + recurrence-scaled heads colored by
+  mutation class. **Decisions resolved:** (#3) there is no protein-position column, so positions are
+  parsed from `mutation_variant` (e.g. `p.V600E` → 600); (#6) the iframe fetches the canonical
+  transcript's protein length + Pfam domains directly from Genome Nexus, allowed via the tool's CSP
+  `connect-src` allowlist (`ui.GENOME_NEXUS_ORIGIN`) — the only widget here that makes a network call.
+  Falls back to a domain-less backbone scaled to the highest observed position if the fetch fails.
+- **Phase 4 — DONE (2026-06-15).** `alteration_cooccurrence(study_id, genes=None, alteration_types=None)`
+  tool + `ui://cbioportal/cooccurrence` widget. Delivered: pure-Python stats in
+  `cooccurrence_stats.py` (`fisher_exact_two_sided`, `log2_odds_ratio` with Haldane–Anscombe
+  correction, `benjamini_hochberg`), server-side data shaping in `server.py`
+  (`_build_cooccurrence_payload`, `_resolve_cooccurrence_genes`, `_cooccurrence_pair`; reuses
+  `_fetch_oncoprint_events` + `_fetch_profiled_samples`), `ui.cooccurrence_app_config()`, the Vite
+  widget `frontend/cooccurrence/` → built `resources/widgets/cooccurrence.html`, and
+  `tests/test_cooccurrence_stats.py` + `tests/test_cooccurrence.py`. Custom inline-SVG symmetric
+  gene×gene heatmap (no D3): each off-diagonal cell is a pair colored by tendency (teal co-occur /
+  red mutually exclusive) with intensity ∝ −log₁₀(q) and a marker for q < 0.05; the diagonal shows
+  per-gene alteration frequency. For each pair a 2×2 table is built over the samples profiled for
+  **both** genes (pairwise denominator), scored with a two-sided Fisher exact test; p-values are
+  BH-corrected across all pairs. Genes capped at `MAX_COOCCURRENCE_GENES = 12`. **Decision #4 (stretch
+  viz):** resolved to custom inline SVG (mirroring all prior phases), and Fisher's exact test is
+  pure-Python (no scipy, mirroring Phase 1's KM/log-rank). Profiling caveat: the universe uses
+  mutation (MUTATION_EXTENDED) coverage, same as the OncoPrint.
 
 > **fastmcp ↔ mcp_clickhouse import fix (Phase 2):** `import cbioportal_mcp.server` was failing
 > because the pinned `fastmcp==3.3.1` (required for MCP Apps) rejects the `dependencies=` kwarg that
@@ -130,8 +165,13 @@ Each app is **three pieces**, mirroring existing patterns:
 - **Phase 2 — OncoPrint. ✅ DONE (2026-06-11).** The signature visualization; established the matrix
   + clinical-track data contract. Viz-library decision resolved in favor of custom inline SVG
   (mirroring Phase 1), not `oncoprintjs`.
-- **Phase 3 — Lollipop.** Reuses gene-level fetch; introduces the external-annotation question.
-- **Phase 4 (stretch) — Co-occurrence.**
+- **Phase 3 — Lollipop. ✅ DONE (2026-06-13).** `mutation_diagram` tool + `ui://cbioportal/lollipop`
+  widget. The external-annotation question (decision #6) was resolved in favor of the iframe fetching
+  Pfam domains + protein length directly from Genome Nexus (allowed via the tool's CSP), mirroring
+  cBioPortal's react-mutation-mapper, with a domain-less fallback.
+- **Phase 4 (stretch) — Co-occurrence. ✅ DONE (2026-06-15).** `alteration_cooccurrence` tool +
+  `ui://cbioportal/cooccurrence` heatmap. Fisher's exact test + BH correction implemented pure-Python
+  in `cooccurrence_stats.py` (no scipy, mirroring Phase 1); custom inline-SVG heatmap (not D3).
 
 ## Decisions to lock before building
 
@@ -142,12 +182,15 @@ Each app is **three pieces**, mirroring existing patterns:
 2. **Patient vs. sample grain** — a classic cBioPortal trap: **survival is per-patient,
    alterations per-sample.** The KM tool must join through sample→patient (see
    `cbioportal://clinical-data-guide`).
-3. **Data availability** — confirm `genomic_event_derived` has a **protein-change/position**
-   column for lollipops (else annotate from genomic coords via Genome Nexus), and the exact
-   survival attribute names (OS/PFS/DFS) in `clinical_data_derived`.
-4. **Viz fidelity vs. effort** — reuse cBioPortal's own `oncoprintjs`/`react-mutation-mapper`
-   (canonical, heavier React integration) vs. lightweight D3/Plotly. Current lean: Plotly/D3 for
-   KM + co-occurrence, the cBioPortal libs for OncoPrint/lollipop.
+3. **Data availability** — ✅ *Resolved (Phase 3):* `genomic_event_derived` has **no** protein-position
+   column; only `mutation_variant` (HGVS protein change, e.g. `p.V600E`). The lollipop parses the codon
+   position from that string (`_parse_protein_position`); changes without a parseable position (some
+   splice/large indels, "NA") are counted in `unmapped_count` but not plotted. Survival attribute names
+   (OS/PFS/DFS) were confirmed in Phase 1.
+4. **Viz fidelity vs. effort** — ✅ *Resolved:* every phase ships **custom inline SVG** (no
+   `oncoprintjs`/`react-mutation-mapper`/D3/Plotly), keeping the widgets dependency-light and
+   theme-aware. Server-side stats are pure-Python (KM + log-rank in Phase 1; Fisher exact + BH in
+   Phase 4) — no scipy/lifelines.
 5. **New build surface** — *Updated 2026-06-08:* stats stay pure standard library (no
    `lifelines`/`scipy`). The widget originally avoided Node/esbuild, but the hand-rolled host bridge
    didn't conform to the MCP Apps handshake, so we adopted the official `@modelcontextprotocol/ext-apps`
@@ -155,8 +198,12 @@ Each app is **three pieces**, mirroring existing patterns:
    self-contained `survival.html`. The built artifact is committed and shipped via `resources/`
    force-include, so the **Python runtime/wheel remains pure-Python**; only rebuilding the widget needs
    Node. `fastmcp` stays **pinned to `==3.3.1`** (its `ui://`/`_meta`/`app=` support confirmed).
-6. **Iframe external calls** — lollipop domain data means iframe → Genome Nexus; decide
-   allow-direct vs. proxy-through-a-tool (CSP).
+6. **Iframe external calls** — ✅ *Resolved (Phase 3):* allow-direct. The lollipop iframe fetches the
+   canonical transcript's protein length + Pfam domains straight from Genome Nexus
+   (`/ensembl/canonical-transcript/hgnc/{gene}` + `/pfam/domain/{id}`), permitted by the tool's
+   `AppConfig` CSP `connect_domains=[GENOME_NEXUS_ORIGIN]` (FastMCP emits it on `_meta["ui"].csp`). This
+   is the only widget that touches the network; all others stay fully self-contained. On fetch failure
+   the widget degrades to a domain-less backbone scaled to the highest observed mutation position.
 
 ## Next steps (when we return)
 
