@@ -60,6 +60,56 @@ ORDER BY patient_attribute, attr_id;
 - **patient_attribute**: true = patient attribute, false = sample attribute
 - **cancer_study_id**: links to cancer_study table (filter by study)
 
+## Attribute Semantics and Matching
+
+### Case-Insensitive Matching for Attribute Values
+
+Clinical values are free text across studies and may differ only by case. For example, a controlled-looking value such as germline mutation status may appear as `GERMLINE`, `Germline`, or another case variant.
+
+When filtering `clinical_data_derived.attribute_value`, use case-insensitive matching unless you have already profiled the exact values in the target study:
+
+```sql
+-- Correct: case-insensitive clinical value filter
+SELECT DISTINCT sample_unique_id, patient_unique_id
+FROM clinical_data_derived
+WHERE cancer_study_identifier = 'your_study_id'
+  AND attribute_name = 'MUTATION_STATUS'
+  AND upper(attribute_value) = 'GERMLINE';
+```
+
+Do not write `attribute_value = 'GERMLINE'` without first checking all distinct values for that attribute in the study.
+
+### Query the Requested Attribute, Not a Proxy
+
+Do not infer one clinical attribute from a related subtype or marker. Query the actual requested attribute when it exists.
+
+Examples:
+
+- HER2-negative breast cancer: search for `HER2_STATUS`, `HER2`, IHC, or FISH attributes. Do not infer HER2 status from Luminal A/B subtype.
+- ER/PR status: query ER/PR clinical attributes directly. Do not infer from molecular subtype alone.
+- PD-L1 status: query PD-L1 attributes directly. Do not infer from cancer type or immune subtype.
+
+Discovery pattern:
+
+```sql
+SELECT DISTINCT
+    attribute_name,
+    attribute_value
+FROM clinical_data_derived
+WHERE cancer_study_identifier = 'brca_tcga_pan_can_atlas_2018'
+  AND (
+      upper(attribute_name) LIKE '%HER2%'
+      OR upper(attribute_name) LIKE '%ER_STATUS%'
+      OR upper(attribute_name) LIKE '%PR_STATUS%'
+      OR upper(attribute_name) LIKE '%IHC%'
+      OR upper(attribute_name) LIKE '%FISH%'
+  )
+ORDER BY attribute_name, attribute_value
+LIMIT 200;
+```
+
+If the requested attribute is absent, say it is absent and offer the closest available attribute as a proxy only with an explicit caveat.
+
 ## Finding Studies by Cancer Type
 
 When searching for studies about a specific cancer type (e.g., "glioblastoma studies"), **always start with `search_oncotree()`** to resolve the correct OncoTree codes.

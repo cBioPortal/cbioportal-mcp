@@ -288,6 +288,15 @@ def _statistical_tests_guide_text() -> str:
 def _gene_expression_guide_text() -> str:
     return _load_resource("gene-expression-guide.md")
 
+def _external_resources_guide_text() -> str:
+    return _load_resource("external-resources-guide.md")
+
+def _gene_resolution_guide_text() -> str:
+    return _load_resource("gene-resolution-guide.md")
+
+def _study_resolution_guide_text() -> str:
+    return _load_resource("study-resolution-guide.md")
+
 # --- MCP resources (decorator registers them) --------------------------------
 @mcp.resource("cbioportal://mutation-frequency-guide")
 def mutation_frequency_guide() -> str:
@@ -321,6 +330,18 @@ def statistical_tests_guide() -> str:
 def gene_expression_guide() -> str:
     return _gene_expression_guide_text()
 
+@mcp.resource("cbioportal://external-resources-guide")
+def external_resources_guide() -> str:
+    return _external_resources_guide_text()
+
+@mcp.resource("cbioportal://gene-resolution-guide")
+def gene_resolution_guide() -> str:
+    return _gene_resolution_guide_text()
+
+@mcp.resource("cbioportal://study-resolution-guide")
+def study_resolution_guide() -> str:
+    return _study_resolution_guide_text()
+
 
 @mcp.tool(
     description="""
@@ -330,6 +351,9 @@ def gene_expression_guide() -> str:
     - cbioportal://mutation-frequency-guide - Gene mutation frequency calculations with proper denominators
     - cbioportal://clinical-data-guide - Patient vs sample-level clinical data queries
     - cbioportal://sample-filtering-guide - Study and sample type filtering strategies
+    - cbioportal://external-resources-guide - External linked resources such as imaging viewers
+    - cbioportal://gene-resolution-guide - Ambiguous gene symbols and aliases
+    - cbioportal://study-resolution-guide - Missing studies, external portals, and substitute cohorts
     - cbioportal://common-pitfalls - Common query mistakes and how to avoid them
 
     Returns:
@@ -505,6 +529,18 @@ def list_guides() -> list[dict]:
             "description": "Gene expression / copy-number / methylation analysis. Covers genetic_alteration_derived, profile_type discovery, and the gene_pair_coexpression view for Spearman correlation between two genes"
         },
         {
+            "uri": "cbioportal://external-resources-guide",
+            "description": "Guide for finding external linked resources such as imaging, pathology, Minerva, HTAN, or other resource_* table links before declaring data unavailable"
+        },
+        {
+            "uri": "cbioportal://gene-resolution-guide",
+            "description": "Guide for resolving ambiguous gene symbols, aliases, gene families, and shorthand such as CD3 before querying expression or alteration data"
+        },
+        {
+            "uri": "cbioportal://study-resolution-guide",
+            "description": "Guide for resolving requested studies, avoiding silent substitute cohorts, and redirecting to known external cBioPortal instances when data is not in this deployment"
+        },
+        {
             "uri": "cbioportal://study-guide/{study_id}",
             "description": "Dynamic study-specific guide - use get_study_guide(study_id) tool to generate"
         }
@@ -529,7 +565,10 @@ def read_guide(uri: str) -> str:
         "cbioportal://treatment-guide": _treatment_guide_text(),
         "cbioportal://faq-guide": _faq_guide_text(),
         "cbioportal://statistical-tests-guide": _statistical_tests_guide_text(),
-        "cbioportal://gene-expression-guide": _gene_expression_guide_text()
+        "cbioportal://gene-expression-guide": _gene_expression_guide_text(),
+        "cbioportal://external-resources-guide": _external_resources_guide_text(),
+        "cbioportal://gene-resolution-guide": _gene_resolution_guide_text(),
+        "cbioportal://study-resolution-guide": _study_resolution_guide_text()
     }
 
     if uri not in resources:
