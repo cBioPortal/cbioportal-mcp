@@ -248,6 +248,16 @@ def main():
             }
             if config.mcp_http_path:
                 run_kwargs["path"] = config.mcp_http_path
+            # Behind a TLS-terminating reverse proxy, uvicorn must trust
+            # X-Forwarded-Proto or the trailing-slash 307 on /mcp will
+            # downgrade https → http and strict clients (e.g. Claude
+            # Desktop) refuse to follow. Opt-in via env so direct
+            # deployments aren't asked to trust spoofed headers.
+            if config.mcp_forwarded_allow_ips:
+                run_kwargs["uvicorn_config"] = {
+                    "proxy_headers": True,
+                    "forwarded_allow_ips": config.mcp_forwarded_allow_ips,
+                }
             mcp.run(**run_kwargs)
         else:
             # For stdio transport, no host or port is needed
