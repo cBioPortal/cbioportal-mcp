@@ -75,6 +75,29 @@ class McpConfig:
         return value if value else None
 
     @property
+    def mcp_forwarded_allow_ips(self) -> Optional[str]:
+        """Get the set of upstream IPs whose X-Forwarded-* headers uvicorn
+        should trust. Forwarded as `forwarded_allow_ips` to `uvicorn.Config`.
+
+        Set this when the server sits behind a reverse proxy that
+        terminates TLS (e.g. Traefik with an https Ingress) — otherwise
+        uvicorn ignores `X-Forwarded-Proto: https` and builds redirect
+        Locations from its own scheme (http), which strict clients refuse
+        to follow.
+
+        Common values:
+          - "*"                  trust any upstream (fine inside a Pod
+                                 reachable only via in-cluster Services)
+          - "10.0.0.0/8,..."     scope to a CIDR (e.g. the Traefik LB
+                                 source range)
+
+        Only used when transport is "http" or "sse". When unset, uvicorn
+        defaults apply (trust only 127.0.0.1, no proxy_headers).
+        """
+        value = os.getenv("CLICKHOUSE_MCP_FORWARDED_ALLOW_IPS")
+        return value if value else None
+
+    @property
     def mcp_user(self) -> str:
         """Get the clickhouse user for which the MCP server is running for.
 
