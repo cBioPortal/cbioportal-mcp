@@ -550,8 +550,8 @@ def get_general_guide(name: str) -> str:
     Reads `resources/guides/{name}.md`. Deployments can drop additional
     `.md` files into that directory (or replace its contents) to publish
     guides that aren't appropriate for the upstream image — e.g. local
-    data governance, deployment-specific tool integrations, or
-    institutional data sources.
+    data governance, custom tool integrations, or deployment-specific
+    data sources.
 
     Call list_guides() first to see what's available in this deployment.
 
