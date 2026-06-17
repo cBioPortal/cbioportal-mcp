@@ -547,10 +547,11 @@ def read_guide(uri: str) -> str:
 def get_general_guide(name: str) -> str:
     """Get a deployment-specific general guide by name.
 
-    Reads `resources/guides/{name}.md`. Deployments overlay this directory via
-    a ConfigMap mount to publish guides that aren't appropriate for the
-    upstream image (e.g. institutional data governance, MSK-internal data
-    sources, deployment-specific tool integrations).
+    Reads `resources/guides/{name}.md`. Deployments can drop additional
+    `.md` files into that directory (or replace its contents) to publish
+    guides that aren't appropriate for the upstream image — e.g. local
+    data governance, deployment-specific tool integrations, or
+    institutional data sources.
 
     Call list_guides() first to see what's available in this deployment.
 
