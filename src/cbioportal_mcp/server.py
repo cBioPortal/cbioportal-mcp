@@ -245,6 +245,16 @@ def main():
                 "transport": transport,
                 "host": config.mcp_bind_host,
                 "port": config.mcp_bind_port,
+                # Trust X-Forwarded-* headers from any source. Behind a
+                # reverse proxy (e.g. Traefik) that terminates TLS, uvicorn
+                # otherwise builds redirect Locations from its own scheme
+                # (http) and the trailing-slash 307 on /mcp downgrades
+                # https → http — Claude Desktop and similar strict clients
+                # refuse to follow.
+                "uvicorn_config": {
+                    "proxy_headers": True,
+                    "forwarded_allow_ips": "*",
+                },
             }
             if config.mcp_http_path:
                 run_kwargs["path"] = config.mcp_http_path
