@@ -141,14 +141,41 @@ def _list_available_study_guides() -> list[str]:
         # For Path, use glob
         if hasattr(study_guides_path, 'iterdir'):
             # It's a Path-like object
-            return [f.stem for f in study_guides_path.iterdir() 
+            return [f.stem for f in study_guides_path.iterdir()
                     if f.name.endswith('.md') and not f.name.startswith('_')]
         else:
             # It's a Traversable from importlib.resources
-            return [f.name.removesuffix('.md') for f in study_guides_path.iterdir() 
+            return [f.name.removesuffix('.md') for f in study_guides_path.iterdir()
                     if f.name.endswith('.md') and not f.name.startswith('_')]
     except Exception as e:
         logger.error(f"Error listing study guides: {e}")
+        return []
+
+def _load_general_guide(name: str) -> str | None:
+    """Load a general guide from the guides/ directory if it exists."""
+    try:
+        resources_path = _get_resources_path()
+        guide_file = resources_path / "guides" / f"{name}.md"
+        return guide_file.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except Exception as e:
+        logger.error(f"Error loading general guide {name}: {e}")
+        return None
+
+def _list_available_general_guides() -> list[str]:
+    """List general guide names available in resources/guides/."""
+    try:
+        resources_path = _get_resources_path()
+        guides_path = resources_path / "guides"
+        if hasattr(guides_path, 'iterdir'):
+            return [f.stem for f in guides_path.iterdir()
+                    if f.name.endswith('.md') and not f.name.startswith('_')]
+        else:
+            return [f.name.removesuffix('.md') for f in guides_path.iterdir()
+                    if f.name.endswith('.md') and not f.name.startswith('_')]
+    except Exception as e:
+        logger.error(f"Error listing general guides: {e}")
         return []
 
 @lru_cache(maxsize=1)
@@ -429,10 +456,22 @@ def list_guides() -> list[dict]:
 
     Call this tool first to see what guides are available before answering complex queries.
 
-    Note: For study-specific guides, use the `get_study_guide(study_id)` tool instead.
-    Use `list_studies(search)` to find available studies.
+    Includes:
+      - Core guides baked into the MCP image (mutation-frequency, clinical-data, etc.)
+      - Deployment-specific general guides under resources/guides/, accessed via
+        get_general_guide(name). Use these for anything that's specific to the
+        local deployment (e.g. data-source provenance, institutional policies).
+      - Study-specific guides under resources/study-guides/, accessed via
+        get_study_guide(study_id).
     """
-    return [
+    deployment_guides = [
+        {
+            "uri": f"cbioportal://general-guide/{name}",
+            "description": f"Deployment-specific guide — call get_general_guide('{name}')"
+        }
+        for name in _list_available_general_guides()
+    ]
+    return deployment_guides + [
         {
             "uri": "cbioportal://mutation-frequency-guide",
             "description": "Comprehensive guide for calculating gene mutation frequencies with gene-specific profiling denominators"
@@ -502,6 +541,33 @@ def read_guide(uri: str) -> str:
         )
 
     return resources[uri]
+
+
+@mcp.tool()
+def get_general_guide(name: str) -> str:
+    """Get a deployment-specific general guide by name.
+
+    Reads `resources/guides/{name}.md`. Deployments can drop additional
+    `.md` files into that directory (or replace its contents) to publish
+    guides that aren't appropriate for the upstream image — e.g. local
+    data governance, custom tool integrations, or deployment-specific
+    data sources.
+
+    Call list_guides() first to see what's available in this deployment.
+
+    Args:
+        name: The guide name without the .md extension (e.g. "cdsi-info").
+    """
+    if not name or '/' in name or '\\' in name or name.startswith('.'):
+        return f"Error: invalid guide name '{name}'"
+    content = _load_general_guide(name)
+    if content is None:
+        available = _list_available_general_guides()
+        if available:
+            available_list = "\n".join(f"  - {n}" for n in available)
+            return f"General guide '{name}' not found.\nAvailable:\n{available_list}"
+        return f"General guide '{name}' not found. No deployment-specific guides are configured."
+    return content
 
 
 @mcp.tool()
