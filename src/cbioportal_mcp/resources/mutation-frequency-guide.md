@@ -19,6 +19,62 @@ If your query returns a frequency over 100%, **do not try to debug or explain th
 
 Rewrite the query using one of the canonical patterns below (either single-study or the [Cross-Cancer-Type](#cross-cancer-type-mutation-frequency) recipe). Do **not** loop on diagnostic queries trying to attribute the >100% to "data inconsistencies" — there are none.
 
+## Promoter and Non-Coding Mutation Questions
+
+When the user mentions "promoter", "non-coding", `C228T`, `C250T`, `-124C>T`, `-146C>T`, or "TERT promoter", do not treat the question as "all mutations in the gene."
+
+TERT promoter mutations are a common special case:
+
+- `C228T` corresponds to `-124C>T` in the TERT promoter.
+- `C250T` corresponds to `-146C>T` in the TERT promoter.
+- These are upstream promoter alterations, not protein-coding amino-acid substitutions.
+- They may live in promoter-specific mutation profiles or be flagged differently from coding variants depending on the study.
+
+### Required Workflow
+
+1. Inspect available molecular profiles / columns for the study before querying.
+2. Look for promoter-specific profiles or fields before falling back to `genomic_event_derived`.
+3. If using `genomic_event_derived`, filter to promoter/non-coding records explicitly. Do not report all `TERT` mutation records as promoter mutations.
+4. If the needed promoter fields/profiles are absent in the deployment, say so and do not substitute coding mutations.
+
+Schema exploration pattern:
+
+```sql
+SELECT DISTINCT
+    cancer_study_identifier,
+    genetic_profile_id,
+    genetic_alteration_type,
+    datatype,
+    name
+FROM genetic_profile
+WHERE cancer_study_identifier = 'your_study_id'
+  AND (
+      lower(genetic_profile_id) LIKE '%promoter%'
+      OR lower(name) LIKE '%promoter%'
+  )
+ORDER BY genetic_profile_id;
+```
+
+If promoter data is present, inspect exact mutation fields before counting:
+
+```sql
+SELECT *
+FROM genomic_event_derived
+WHERE cancer_study_identifier = 'your_study_id'
+  AND hugo_gene_symbol = 'TERT'
+LIMIT 20;
+```
+
+Then use only columns that actually encode promoter/non-coding status, genomic position, or the canonical promoter alleles. If no such columns exist, answer that this deployment does not expose enough promoter-specific fields for the requested count.
+
+### Answer Pattern
+
+> I treated this as a promoter-mutation question, not an all-TERT-mutation question. I only counted records from promoter-specific data/fields. Coding TERT mutations are excluded.
+
+If promoter data cannot be identified:
+
+> I found TERT mutation records, but I do not see promoter-specific fields or profiles needed to distinguish C228T/C250T promoter mutations in this deployment. I should not report all TERT mutations as promoter mutations.
+
 ## Cross-Cancer-Type Mutation Frequency
 
 When the user asks about a gene "across cancer types" or "in different cancers", look up the right cohort in **`cancer_study_query_preferences`** and group by the per-sample `CANCER_TYPE` clinical attribute. Never hand-pick study lists yourself.

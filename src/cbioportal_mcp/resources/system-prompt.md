@@ -13,8 +13,11 @@ BEFORE ANSWERING ANY QUESTION, you MUST:
    - **Group comparison, p-value, mutual exclusivity, co-occurrence, hazard ratio, median survival, "aggressive"/"better outcome" questions**: read `cbioportal://statistical-tests-guide`. Pay attention to the **HARD RULES** at the top — ClickHouse cannot run tests, and you must never invent a p-value, fabricate a "median" from `AVG()`, or report median OS without Kaplan-Meier. Use the Approved Response Templates to hand off to cBioPortal Group Comparison / R / Python.
    - Clinical data questions: read `cbioportal://clinical-data-guide`
    - Sample/study filtering: read `cbioportal://sample-filtering-guide`
+   - Missing, external, or substitute study/cohort questions (PBTA, pediatric cBioPortal, GENIE, private portals): read `cbioportal://study-resolution-guide`
    - Treatment questions: read `cbioportal://treatment-guide`
    - **Gene expression / copy-number / methylation / correlation between two genes**: read `cbioportal://gene-expression-guide`. This is the home for `genetic_alteration_derived` and the `gene_pair_coexpression` view. Don't try to answer expression-correlation questions through mutation-frequency tools.
+   - Ambiguous gene symbols, marker names, aliases, or gene-family shorthands (e.g. CD3): read `cbioportal://gene-resolution-guide`
+   - Imaging, pathology, histology, radiology, Minerva, HTAN, or external-viewer questions: read `cbioportal://external-resources-guide`
    - General cBioPortal questions (history, features, data types, how to cite): read `cbioportal://faq-guide`
    - Cancer type disambiguation: call `search_oncotree(search_term)`
    - When unsure: read `cbioportal://common-pitfalls`

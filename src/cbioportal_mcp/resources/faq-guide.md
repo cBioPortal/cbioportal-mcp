@@ -35,6 +35,65 @@ Also cite the specific study publication(s) whose data you used.
 
 Note: Synonymous mutations are not included in cBioPortal.
 
+## Data Types Usually Not Stored Directly
+
+cBioPortal generally does not store:
+
+- raw CT, MRI, pathology-slide, or histology image files
+- raw sequencing files such as BAM, CRAM, or FASTQ
+- polygenic risk scores as a standard data type
+- full external clinical-trial databases
+
+However, this deployment may contain links to external viewers or portals through `resource_*` tables. For imaging, pathology, Minerva, HTAN, or viewer questions, read `cbioportal://external-resources-guide` and check those tables before saying the data is absent.
+
+## What the MCP Agent Can and Cannot Produce
+
+The MCP agent can:
+
+- query cBioPortal data and return tables in text/JSON/Markdown
+- summarize counts, frequencies, and available attributes
+- provide cBioPortal study links and DataHub download links when applicable
+- provide SQL snippets or handoff instructions for R/Python/cBioPortal tools
+
+The MCP agent should not promise to:
+
+- render Kaplan-Meier plots or other visual figures directly
+- export large CSV files or create downloadable files
+- run external notebooks, Databricks jobs, PySpark pipelines, or web apps
+
+If the user asks for plots or downloads, provide the underlying data in a compact table when feasible and redirect them to cBioPortal's built-in visualization/download features or an appropriate external workflow.
+
+## Clinical Actionability and OncoKB
+
+cBioPortal data alone is not enough to answer clinical actionability questions such as "Are TP53 mutations clinically actionable?"
+
+Answer actionability questions only if actionability/driver annotation data is available and has been queried. Otherwise:
+
+- state that cBioPortal alone does not establish clinical actionability
+- suggest checking OncoKB or the cBioPortal web interface for curated annotations
+- do not provide therapeutic recommendations from general model knowledge
+
+## Germline Variant Studies
+
+cBioPortal can represent germline variant studies when germline variants and associated clinical data are loaded as a study. Many visualization and correlation features used for somatic variants can also be useful for germline studies, provided the data is modeled correctly.
+
+For germline-study setup questions, explain:
+
+- a study can be built around germline variants plus clinical attributes
+- clinical data can be used for stratification and plots just as in other studies
+- mutation status values may vary by study and should be matched case-insensitively in queries
+- the user should follow cBioPortal datahub/import formats for study submission
+
+## Adding Data to cBioPortal
+
+When asked how to add clinical or genomic data to cBioPortal, first ask whether the user wants to:
+
+- submit data to the public cBioPortal
+- run or populate a private cBioPortal instance
+- visualize their own data without full submission
+
+For public cBioPortal, point users to the cBioPortal data curation process and datahub formats. For private instances, explain that they need a valid study package with clinical, sample, molecular, and metadata files. For quick visualization without submission, mention cBioPortal standalone tools such as Mutation Mapper and OncoPrint when applicable.
+
 ## Reference Genome
 
 The public cBioPortal largely uses **hg19/GRCh37**. However, some studies use **hg38/GRCh38**, including datasets sourced from the GDC (Genomic Data Commons).
