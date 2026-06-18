@@ -20,31 +20,63 @@ import re
 import sys
 from functools import lru_cache
 from importlib import resources as importlib_resources
+from importlib.resources.abc import Traversable
 from pathlib import Path
-from typing import Optional
 from fastmcp import FastMCP
+from fastmcp.apps import UI_MIME_TYPE
 
 
 from cbioportal_mcp.env import get_mcp_config, TransportType
 from cbioportal_mcp.authentication.permissions import ensure_db_permissions
-from cbioportal_mcp.telemetry import configure_telemetry, TelemetryMiddleware
+from cbioportal_mcp import ui
+from cbioportal_mcp.survival_stats import kaplan_meier, logrank_test
+from cbioportal_mcp.cooccurrence_stats import (
+    benjamini_hochberg,
+    fisher_exact_two_sided,
+    log2_odds_ratio,
+)
 
 logger = logging.getLogger(__name__)
 
 # Regex pattern for valid cBioPortal study identifiers
 # Allows alphanumeric characters, underscores, and hyphens
-VALID_STUDY_ID_PATTERN = re.compile(r'^[a-zA-Z0-9_-]+$')
-VALID_TABLE_NAME_PATTERN = re.compile(r'^[a-zA-Z0-9_]+$')
+VALID_STUDY_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
+VALID_TABLE_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_]+$")
+
+VALID_GENE_SYMBOL_PATTERN = re.compile(r"^[a-zA-Z0-9._-]+$")
+VALID_ATTRIBUTE_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_]+$")
+
+ALTERATION_CONFIGS = {
+    "mutation": {
+        "event_filter": "variant_type = 'mutation' AND mutation_status != 'UNCALLED'",
+        "profiling_type": "MUTATION_EXTENDED",
+    },
+    "amplification": {
+        "event_filter": "variant_type = 'cna' AND cna_alteration = 2",
+        "profiling_type": "COPY_NUMBER_ALTERATION",
+    },
+    "deep_deletion": {
+        "event_filter": "variant_type = 'cna' AND cna_alteration = -2",
+        "profiling_type": "COPY_NUMBER_ALTERATION",
+    },
+    "structural_variant": {
+        "event_filter": "variant_type = 'structural_variant'",
+        "profiling_type": "STRUCTURAL_VARIANT",
+    },
+}
+
+MAX_ANALYSIS_GENES = 25
+
 
 def _validate_study_id(study_id: str) -> str:
     """Validate and sanitize a study ID to prevent SQL injection.
-    
+
     Args:
         study_id: The study identifier to validate
-        
+
     Returns:
         The validated study_id if valid
-        
+
     Raises:
         ValueError: If study_id contains invalid characters
     """
@@ -56,6 +88,7 @@ def _validate_study_id(study_id: str) -> str:
             "Study IDs may only contain alphanumeric characters, underscores, and hyphens."
         )
     return study_id
+
 
 def _validate_table_name(table: str) -> str:
     """Validate a table name to prevent SQL injection.
@@ -78,12 +111,13 @@ def _validate_table_name(table: str) -> str:
         )
     return table
 
+
 def _sanitize_search_term(search: str) -> str:
     """Sanitize a search term by escaping SQL special characters.
-    
+
     Args:
         search: The search term to sanitize
-        
+
     Returns:
         The sanitized search term safe for use in LIKE clauses
     """
@@ -96,8 +130,64 @@ def _sanitize_search_term(search: str) -> str:
     sanitized = sanitized.replace("_", "\\_")
     return sanitized
 
+
+def _validate_gene_symbol(gene: str) -> str:
+    """Sanitize a gene symbol by escaping SQL special characters.
+
+    Args:
+        search: The gene to sanitize
+
+    Returns:
+        The sanitized gene to use in queries
+    """
+    if not gene:
+        raise ValueError("Gene symbol cannot be empty")
+    if not VALID_GENE_SYMBOL_PATTERN.match(gene):
+        raise ValueError(
+            f"Invalid gene symbol '{gene}'. "
+            "Gene symbols may only contain alphanumeric characters, dots, underscores, and hyphens."
+        )
+    return gene
+
+
+def _validate_alteration_type(alteration_type: str) -> dict:
+    """Sanitize alteration type by escaping SQL special characters.
+
+    Args:
+        search: The alteration type to sanitize
+
+    Returns:
+        The sanitized alteration type object to use in queries
+    """
+
+    if alteration_type not in ALTERATION_CONFIGS:
+        valid = ", ".join(ALTERATION_CONFIGS.keys())
+        raise ValueError(f"Invalid alteration_type '{alteration_type}'. Valid options: {valid}")
+    return ALTERATION_CONFIGS[alteration_type]
+
+
+def _validate_attribute_name(attr: str) -> str:
+    """Sanitize a attribute name by escaping SQL special characters.
+
+    Args:
+        search: The attribute to sanitize
+
+    Returns:
+        The sanitized attribute to use in queries
+    """
+
+    if not attr:
+        raise ValueError("Attribute name cannot be empty")
+    if not VALID_ATTRIBUTE_NAME_PATTERN.match(attr):
+        raise ValueError(
+            f"Invalid attribute name '{attr}'. "
+            "Attribute names may only contain alphanumeric characters and underscores."
+        )
+    return attr
+
+
 # Resource loading using importlib.resources for proper package support
-def _get_resources_path() -> Path:
+def _get_resources_path() -> Traversable:
     """Get the resources directory path, supporting both installed packages and dev mode."""
     try:
         # Python 3.9+ approach using importlib.resources.files
@@ -105,6 +195,7 @@ def _get_resources_path() -> Path:
     except (TypeError, AttributeError):
         # Fallback for older Python or if package isn't installed
         return Path(__file__).parent / "resources"
+
 
 def _load_resource(filename: str) -> str:
     """Load a resource guide from the resources directory."""
@@ -120,6 +211,7 @@ def _load_resource(filename: str) -> str:
         logger.error(f"Error loading resource {filename}: {e}")
         return f"Error: Could not load resource: {filename}"
 
+
 def _load_study_guide(study_id: str) -> str | None:
     """Load a study guide from the study-guides directory if it exists."""
     try:
@@ -131,6 +223,7 @@ def _load_study_guide(study_id: str) -> str | None:
     except Exception as e:
         logger.error(f"Error loading study guide for {study_id}: {e}")
         return None
+
 
 def _list_available_study_guides() -> list[str]:
     """List all available pre-generated study guides."""
@@ -207,6 +300,1174 @@ def _build_hierarchy_path(code: str, entries_by_code: dict[str, dict]) -> str:
     return " > ".join(parts)
 
 
+# --- Kaplan-Meier survival app helpers ---------------------------------------
+
+# Supported survival endpoints -> human label. Each maps to clinical attributes
+# "{endpoint}_MONTHS" (follow-up time) and "{endpoint}_STATUS" (event indicator).
+SURVIVAL_ENDPOINTS = {
+    "OS": "Overall Survival",
+    "PFS": "Progression-Free Survival",
+    "DFS": "Disease-Free Survival",
+    "DSS": "Disease-Specific Survival",
+}
+
+MAX_SURVIVAL_GROUPS = 4
+
+# *_STATUS strings encode the event indicator. cBioPortal normally prefixes a
+# numeric code ("1:DECEASED"); these keyword sets are a fallback for un-coded
+# values. Censored keywords are checked first so "Progression Free" is not
+# misread as an event by the "PROGRESSED" rule.
+_SURVIVAL_CENSORED_KEYWORDS = (
+    "LIVING",
+    "ALIVE",
+    "CENSORED",
+    "DISEASEFREE",
+    "DISEASE FREE",
+    "DISEASE-FREE",
+    "NO EVENT",
+    "REMISSION",
+    "FREE",
+)
+_SURVIVAL_EVENT_KEYWORDS = (
+    "DECEASED",
+    "DEAD",
+    "PROGRESSED",
+    "PROGRESSION",
+    "RECURRED",
+    "RELAPSED",
+    "METASTA",
+    "EVENT",
+)
+
+
+def _validate_endpoint(endpoint: str) -> str:
+    """Validate a survival endpoint against the supported set.
+
+    Args:
+        endpoint: Endpoint code (e.g. "OS", "PFS"); case-insensitive.
+
+    Returns:
+        The normalized upper-case endpoint code.
+
+    Raises:
+        ValueError: If the endpoint is not supported.
+    """
+    ep = (endpoint or "").strip().upper()
+    if ep not in SURVIVAL_ENDPOINTS:
+        valid = ", ".join(SURVIVAL_ENDPOINTS)
+        raise ValueError(f"Invalid endpoint '{endpoint}'. Valid options: {valid}")
+    return ep
+
+
+def _parse_survival_status(value: str | None) -> int | None:
+    """Map a *_STATUS value to 1 (event), 0 (censored), or None (unknown).
+
+    Prefers the leading numeric code in cBioPortal's "code:label" form, then
+    falls back to keyword matching.
+    """
+    if value is None:
+        return None
+    s = str(value).strip()
+    if not s:
+        return None
+    # "code:label" form — the leading code is authoritative.
+    if ":" in s:
+        code = s.split(":", 1)[0].strip()
+        if code == "1":
+            return 1
+        if code == "0":
+            return 0
+    if s == "1":
+        return 1
+    if s == "0":
+        return 0
+    upper = s.upper()
+    if any(k in upper for k in _SURVIVAL_CENSORED_KEYWORDS):
+        return 0
+    if any(k in upper for k in _SURVIVAL_EVENT_KEYWORDS):
+        return 1
+    return None
+
+
+def _survival_time_ticks(max_time: float, n: int = 5) -> list[float]:
+    """Return ``n`` evenly spaced, rounded tick times spanning [0, max_time]."""
+    if max_time <= 0:
+        return [0.0]
+    step = max_time / (n - 1)
+    # Round the step to a "nice" value for readable axis labels.
+    if step >= 12:
+        nice = round(step / 6) * 6
+    elif step >= 1:
+        nice = round(step)
+    else:
+        nice = round(step, 1)
+    nice = nice or 1
+    ticks = [round(nice * i, 1) for i in range(n)]
+    # Ensure the axis covers the full range.
+    if ticks[-1] < max_time:
+        ticks.append(round(ticks[-1] + nice, 1))
+    return ticks
+
+
+def _fetch_survival_observations(
+    study_id: str, endpoint: str
+) -> tuple[dict[str, tuple[float, int]], int]:
+    """Fetch per-patient (time, event) observations for an endpoint.
+
+    Survival is per-patient, so this aggregates to ``patient_unique_id``.
+
+    Returns:
+        (observations keyed by patient, count of patients dropped for
+        missing/unparseable time or status).
+    """
+    rows = run_select_query(f"""
+        SELECT
+            patient_unique_id,
+            MAX(CASE WHEN attribute_name = '{endpoint}_MONTHS'
+                THEN toFloat64OrNull(attribute_value) END) AS time,
+            MAX(CASE WHEN attribute_name = '{endpoint}_STATUS'
+                THEN attribute_value END) AS status
+        FROM clinical_data_derived
+        WHERE cancer_study_identifier = '{study_id}'
+            AND attribute_name IN ('{endpoint}_MONTHS', '{endpoint}_STATUS')
+        GROUP BY patient_unique_id
+    """)
+    observations: dict[str, tuple[float, int]] = {}
+    n_dropped = 0
+    for row in rows:
+        pid = row.get("patient_unique_id")
+        if not pid:
+            continue
+        event = _parse_survival_status(row.get("status"))
+        raw_time = row.get("time")
+        if event is None or raw_time is None:
+            n_dropped += 1
+            continue
+        try:
+            t = float(raw_time)
+        except (TypeError, ValueError):
+            n_dropped += 1
+            continue
+        if t < 0:
+            n_dropped += 1
+            continue
+        observations[pid] = (t, event)
+    return observations, n_dropped
+
+
+def _altered_patients(study_id: str, gene: str, alteration_types: list[str]) -> set[str]:
+    """Return the set of patients with a qualifying alteration in ``gene``.
+
+    A patient is "altered" if any of their samples carries one of the requested
+    alteration types (alterations are per-sample; aggregated to the patient).
+    """
+    filters = []
+    for alt in alteration_types:
+        cfg = _validate_alteration_type(alt)
+        filters.append(f"({cfg['event_filter']})")
+    combined = " OR ".join(filters)
+    rows = run_select_query(f"""
+        SELECT DISTINCT patient_unique_id
+        FROM genomic_event_derived
+        WHERE cancer_study_identifier = '{study_id}'
+            AND hugo_gene_symbol = '{gene}'
+            AND ({combined})
+    """)
+    altered: set[str] = set()
+    for row in rows:
+        pid = row.get("patient_unique_id")
+        if pid:
+            altered.add(pid)
+    return altered
+
+
+def _clinical_patient_values(study_id: str, attribute: str) -> tuple[dict[str, str], int]:
+    """Map each patient to a single value of ``attribute``.
+
+    Patients with conflicting values across samples are excluded (and counted),
+    since a single grouping value cannot be assigned.
+    """
+    rows = run_select_query(f"""
+        SELECT DISTINCT patient_unique_id, attribute_value
+        FROM clinical_data_derived
+        WHERE cancer_study_identifier = '{study_id}'
+            AND attribute_name = '{attribute}'
+    """)
+    values: dict[str, str] = {}
+    ambiguous: set[str] = set()
+    for row in rows:
+        pid = row.get("patient_unique_id")
+        val = row.get("attribute_value")
+        if not pid or val in (None, ""):
+            continue
+        if pid in values and values[pid] != val:
+            ambiguous.add(pid)
+        else:
+            values[pid] = val
+    for pid in ambiguous:
+        values.pop(pid, None)
+    return values, len(ambiguous)
+
+
+def _build_survival_payload(
+    study_id: str,
+    endpoint: str,
+    group_by_gene: str | None,
+    alteration_types: list[str] | None,
+    group_by_clinical: str | None,
+) -> dict:
+    """Assemble the Kaplan-Meier data contract consumed by the survival widget.
+
+    Returns a dict with study/endpoint metadata, one entry per group (curve,
+    counts, median), the log-rank result when 2+ groups exist, and warnings.
+    """
+    endpoint = _validate_endpoint(endpoint)
+    warnings: list[str] = []
+
+    observations, n_dropped = _fetch_survival_observations(study_id, endpoint)
+    payload: dict = {
+        "study_id": study_id,
+        "endpoint": endpoint,
+        "endpoint_label": SURVIVAL_ENDPOINTS[endpoint],
+        "time_unit": "months",
+        "grouping": {"type": "none"},
+        "groups": [],
+        "time_ticks": [],
+        "stats": None,
+        "warnings": warnings,
+        "notes": (
+            "Survival is per-patient; alteration status is aggregated to the "
+            "patient (any altered sample => altered). 'Wild-type' means no "
+            "qualifying alteration among this study's patients with survival "
+            "data and is not adjusted for gene-panel coverage."
+        ),
+    }
+    if not observations:
+        payload["error"] = (
+            f"No {endpoint} survival data found for study '{study_id}'. "
+            f"Expected clinical attributes '{endpoint}_MONTHS' and '{endpoint}_STATUS'."
+        )
+        return payload
+    if n_dropped:
+        warnings.append(
+            f"{n_dropped} patient(s) excluded for missing or unparseable "
+            f"{endpoint}_MONTHS / {endpoint}_STATUS."
+        )
+
+    # Decide how to split the cohort into groups (gene alteration takes
+    # precedence over a clinical attribute; both unset => whole cohort).
+    grouped: list[tuple[str, list[tuple[float, int]]]] = []
+    if group_by_gene and group_by_clinical:
+        warnings.append("Both group_by_gene and group_by_clinical were given; grouping by gene.")
+    if group_by_gene:
+        gene = _validate_gene_symbol(group_by_gene)
+        alt_types = alteration_types or ["mutation"]
+        altered = _altered_patients(study_id, gene, alt_types)
+        altered_obs = [obs for pid, obs in observations.items() if pid in altered]
+        wt_obs = [obs for pid, obs in observations.items() if pid not in altered]
+        grouped = [
+            (f"{gene} altered", altered_obs),
+            (f"{gene} wild-type", wt_obs),
+        ]
+        payload["grouping"] = {
+            "type": "alteration",
+            "gene": gene,
+            "alteration_types": alt_types,
+        }
+    elif group_by_clinical:
+        attribute = _validate_attribute_name(group_by_clinical)
+        pat_values, n_ambiguous = _clinical_patient_values(study_id, attribute)
+        if n_ambiguous:
+            warnings.append(
+                f"{n_ambiguous} patient(s) excluded from grouping due to "
+                f"conflicting {attribute} values across samples."
+            )
+        buckets: dict[str, list[tuple[float, int]]] = {}
+        for pid, obs in observations.items():
+            val = pat_values.get(pid)
+            if val is None:
+                continue
+            buckets.setdefault(val, []).append(obs)
+        ordered = sorted(buckets.items(), key=lambda kv: len(kv[1]), reverse=True)
+        if len(ordered) > MAX_SURVIVAL_GROUPS:
+            warnings.append(
+                f"{attribute} has {len(ordered)} values; showing the "
+                f"{MAX_SURVIVAL_GROUPS} largest groups."
+            )
+            ordered = ordered[:MAX_SURVIVAL_GROUPS]
+        grouped = [(f"{attribute}: {val}", obs) for val, obs in ordered]
+        payload["grouping"] = {"type": "clinical", "attribute": attribute}
+    else:
+        grouped = [("All patients", list(observations.values()))]
+
+    # Drop empty groups; bail out if nothing is left to plot.
+    grouped = [(name, obs) for name, obs in grouped if obs]
+    if not grouped:
+        payload["error"] = "No patients remained after grouping; nothing to plot."
+        return payload
+
+    max_time = max(t for _, obs in grouped for t, _ in obs)
+    time_ticks = _survival_time_ticks(max_time)
+    payload["time_ticks"] = time_ticks
+
+    groups_out = []
+    for name, obs in grouped:
+        km = kaplan_meier(obs, time_ticks=time_ticks)
+        groups_out.append(
+            {
+                "name": name,
+                "n_patients": km["n_patients"],
+                "n_events": km["n_events"],
+                "n_censored": km["n_censored"],
+                "median_survival": (
+                    round(km["median_survival"], 2) if km["median_survival"] is not None else None
+                ),
+                "curve": [
+                    {
+                        "time": round(p["time"], 3),
+                        "survival": round(p["survival"], 5),
+                        "at_risk": p["at_risk"],
+                        "events": p["events"],
+                        "censored": p["censored"],
+                    }
+                    for p in km["curve"]
+                ],
+                "at_risk_at_ticks": km["at_risk_at_ticks"],
+            }
+        )
+    payload["groups"] = groups_out
+
+    if len(grouped) >= 2:
+        lr = logrank_test({name: obs for name, obs in grouped})
+        if lr.get("p_value") is not None:
+            lr["p_value"] = round(lr["p_value"], 6)
+            lr["chi_square"] = round(lr["chi_square"], 4)
+        payload["stats"] = lr
+
+    return payload
+
+
+# --- OncoPrint app helpers ---------------------------------------------------
+
+# Max sample columns rendered in the OncoPrint matrix. Studies can have tens of
+# thousands of samples; the widget shows altered samples first, then fills with
+# unaltered profiled samples up to this cap. Per-gene frequencies in gene_stats
+# are computed over the full profiled set, not just the shown columns.
+MAX_ONCOPRINT_SAMPLES = 200
+DEFAULT_ONCOPRINT_GENES = 20
+
+# Alteration types eligible for the matrix (subset of ALTERATION_CONFIGS keys).
+ONCOPRINT_ALTERATION_TYPES = (
+    "mutation",
+    "amplification",
+    "deep_deletion",
+    "structural_variant",
+)
+
+# MAF mutation_type values grouped into the classes used for cell coloring.
+# Anything unrecognized falls through to "other".
+_TRUNCATING_MUTATION_TYPES = {
+    "Nonsense_Mutation",
+    "Frame_Shift_Del",
+    "Frame_Shift_Ins",
+    "Splice_Site",
+    "Splice_Region",
+    "Nonstop_Mutation",
+    "Translation_Start_Site",
+}
+_INFRAME_MUTATION_TYPES = {"In_Frame_Del", "In_Frame_Ins"}
+
+# Severity order for picking a cell's representative class when a (gene, sample)
+# carries multiple mutations.
+_MUT_CLASS_PRIORITY = {"truncating": 3, "missense": 2, "inframe": 1, "other": 0}
+
+
+def _is_float(value) -> bool:
+    """True if ``value`` parses as a float (used to type clinical tracks)."""
+    try:
+        float(value)
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
+def _mutation_class(mutation_type: str | None) -> str:
+    """Classify a MAF mutation_type into missense/truncating/inframe/other."""
+    if not mutation_type:
+        return "other"
+    mt = str(mutation_type).strip()
+    if mt == "Missense_Mutation":
+        return "missense"
+    if mt in _TRUNCATING_MUTATION_TYPES:
+        return "truncating"
+    if mt in _INFRAME_MUTATION_TYPES:
+        return "inframe"
+    return "other"
+
+
+def _more_severe_mut(current: str | None, candidate: str) -> str:
+    """Keep the higher-priority mutation class for a cell with several mutations."""
+    if current is None:
+        return candidate
+    return candidate if _MUT_CLASS_PRIORITY[candidate] > _MUT_CLASS_PRIORITY[current] else current
+
+
+def _oncoprint_event_filter(alteration_types: list[str]) -> str:
+    """Build the combined SQL predicate for the requested alteration types.
+
+    Reuses the per-type ``event_filter`` strings in ``ALTERATION_CONFIGS`` so the
+    OncoPrint and the rest of the server agree on what each alteration means.
+    """
+    filters = []
+    for alt in alteration_types:
+        cfg = _validate_alteration_type(alt)
+        filters.append(f"({cfg['event_filter']})")
+    return " OR ".join(filters)
+
+
+def _resolve_oncoprint_genes(study_id: str, genes: list[str] | None) -> list[str]:
+    """Return the gene row list for the OncoPrint.
+
+    If ``genes`` is given, validate and de-duplicate (preserving order), clamped
+    to ``MAX_ANALYSIS_GENES``. Otherwise default to the study's most-altered
+    genes across all alteration types.
+    """
+    if genes:
+        resolved: list[str] = []
+        seen: set[str] = set()
+        for g in genes:
+            gene = _validate_gene_symbol(g)
+            if gene not in seen:
+                seen.add(gene)
+                resolved.append(gene)
+        return resolved[:MAX_ANALYSIS_GENES]
+
+    combined = _oncoprint_event_filter(list(ONCOPRINT_ALTERATION_TYPES))
+    rows = run_select_query(f"""
+        SELECT hugo_gene_symbol, COUNT(DISTINCT sample_unique_id) AS altered_samples
+        FROM genomic_event_derived
+        WHERE cancer_study_identifier = '{study_id}'
+            AND ({combined})
+        GROUP BY hugo_gene_symbol
+        ORDER BY altered_samples DESC, hugo_gene_symbol ASC
+        LIMIT {DEFAULT_ONCOPRINT_GENES}
+    """)
+    return [r["hugo_gene_symbol"] for r in rows if r.get("hugo_gene_symbol")]
+
+
+def _fetch_oncoprint_events(
+    study_id: str, genes: list[str], alteration_types: list[str]
+) -> tuple[dict[str, dict[str, dict]], dict[str, str]]:
+    """Fetch per-sample alterations for ``genes`` (study-wide, not just shown).
+
+    Returns ``(cells, sample_to_patient)`` where ``cells[gene][sample]`` is
+    ``{"cna": "amp"|"deepdel"|None, "mut": <class>|None, "sv": bool}`` for every
+    altered (gene, sample) pair, and ``sample_to_patient`` maps each altered
+    sample to its patient (for clinical-track grain resolution).
+    """
+    gene_list = ", ".join(f"'{g}'" for g in genes)
+    combined = _oncoprint_event_filter(alteration_types)
+    rows = run_select_query(f"""
+        SELECT sample_unique_id, patient_unique_id, hugo_gene_symbol,
+               variant_type, mutation_type, cna_alteration
+        FROM genomic_event_derived
+        WHERE cancer_study_identifier = '{study_id}'
+            AND hugo_gene_symbol IN ({gene_list})
+            AND ({combined})
+    """)
+    cells: dict[str, dict[str, dict]] = {}
+    sample_to_patient: dict[str, str] = {}
+    for row in rows:
+        sid = row.get("sample_unique_id")
+        gene = row.get("hugo_gene_symbol")
+        if not sid or not gene:
+            continue
+        pid = row.get("patient_unique_id")
+        if pid:
+            sample_to_patient[sid] = pid
+        cell = cells.setdefault(gene, {}).setdefault(sid, {"cna": None, "mut": None, "sv": False})
+        vt = row.get("variant_type")
+        if vt == "structural_variant":
+            cell["sv"] = True
+        elif vt == "cna":
+            try:
+                cna_val = int(row.get("cna_alteration"))
+            except (TypeError, ValueError):
+                cna_val = None
+            if cna_val == 2:
+                cell["cna"] = "amp"
+            elif cna_val == -2:
+                cell["cna"] = "deepdel"
+        elif vt == "mutation":
+            cell["mut"] = _more_severe_mut(cell["mut"], _mutation_class(row.get("mutation_type")))
+    return cells, sample_to_patient
+
+
+def _fetch_profiled_samples(study_id: str, genes: list[str]) -> dict[str, set[str]]:
+    """Return, per gene, the set of samples profiled for that gene.
+
+    Uses the canonical coverage views: ``mutation_panel_gene_coverage`` (panel
+    gene membership) plus ``mutation_wes_coverage`` (WES samples, profiled for
+    every gene). This is the documented way to avoid the >100% frequency trap
+    from treating WES as a named panel. Covers MUTATION_EXTENDED profiling.
+    """
+    gene_list = ", ".join(f"'{g}'" for g in genes)
+    profiled: dict[str, set[str]] = {g: set() for g in genes}
+
+    panel_rows = run_select_query(f"""
+        SELECT sample_unique_id, hugo_gene_symbol
+        FROM mutation_panel_gene_coverage
+        WHERE cancer_study_identifier = '{study_id}'
+            AND hugo_gene_symbol IN ({gene_list})
+    """)
+    for row in panel_rows:
+        sid = row.get("sample_unique_id")
+        gene = row.get("hugo_gene_symbol")
+        if sid and gene in profiled:
+            profiled[gene].add(sid)
+
+    wes_rows = run_select_query(f"""
+        SELECT sample_unique_id
+        FROM mutation_wes_coverage
+        WHERE cancer_study_identifier = '{study_id}'
+    """)
+    wes_samples = {r.get("sample_unique_id") for r in wes_rows if r.get("sample_unique_id")}
+    for gene in genes:
+        profiled[gene].update(wes_samples)
+    return profiled
+
+
+def _select_oncoprint_samples(
+    profiled_union: set[str], altered: set[str], max_samples: int
+) -> tuple[list[str], int, bool]:
+    """Choose which samples become matrix columns.
+
+    Altered samples first (the alteration landscape), then unaltered profiled
+    samples for frequency context, capped at ``max_samples``. The returned order
+    is provisional — ``_memo_sort`` reorders the final columns.
+
+    Returns ``(selected_samples, n_total, truncated)``.
+    """
+    universe = profiled_union | altered
+    n_total = len(universe)
+    selected = sorted(altered)[:max_samples]
+    if len(selected) < max_samples:
+        selected += sorted(universe - altered)[: max_samples - len(selected)]
+    return selected, n_total, n_total > len(selected)
+
+
+def _memo_sort(
+    samples: list[str],
+    genes: list[str],
+    cells: dict[str, dict[str, dict]],
+    not_profiled: dict[str, set[str]],
+) -> list[str]:
+    """Order samples MemoSort-style so alterations cluster top-left.
+
+    Per (sample, gene): score = cna(4) + mut(2) + sv(1), or -1 if the sample is
+    not profiled for that gene. Samples are compared gene-by-gene in row order
+    (descending score); the first gene that differs decides. Ties break on the
+    sample id for determinism.
+    """
+
+    def cell_score(gene: str, sid: str) -> int:
+        if sid in not_profiled.get(gene, ()):
+            return -1  # not profiled sinks below "profiled, no alteration"
+        cell = cells.get(gene, {}).get(sid)
+        if not cell:
+            return 0
+        return (
+            (4 if cell.get("cna") else 0)
+            + (2 if cell.get("mut") else 0)
+            + (1 if cell.get("sv") else 0)
+        )
+
+    return sorted(samples, key=lambda sid: (tuple(-cell_score(g, sid) for g in genes), sid))
+
+
+def _fetch_clinical_tracks(
+    study_id: str,
+    samples: list[str],
+    sample_to_patient: dict[str, str],
+    attributes: list[str],
+) -> list[dict]:
+    """Build one clinical annotation track per attribute for the shown samples.
+
+    Resolves each sample's value at the right grain using the ``type`` column:
+    sample-level rows map directly by ``sample_unique_id``; patient-level rows
+    fan out to that patient's shown samples. A track is "numeric" iff every
+    present value parses as a float.
+    """
+    if not samples or not attributes:
+        return []
+    sample_set = set(samples)
+    patient_to_samples: dict[str, list[str]] = {}
+    for sid in samples:
+        pid = sample_to_patient.get(sid)
+        if pid:
+            patient_to_samples.setdefault(pid, []).append(sid)
+
+    tracks: list[dict] = []
+    for attr in attributes:
+        try:
+            attribute = _validate_attribute_name(attr)
+        except ValueError:
+            continue
+        rows = run_select_query(f"""
+            SELECT sample_unique_id, patient_unique_id, attribute_value, type
+            FROM clinical_data_derived
+            WHERE cancer_study_identifier = '{study_id}'
+                AND attribute_name = '{attribute}'
+        """)
+        values: dict[str, str] = {}
+        patient_values: dict[str, str] = {}
+        for row in rows:
+            val = row.get("attribute_value")
+            if val in (None, ""):
+                continue
+            if row.get("type") == "patient":
+                pid = row.get("patient_unique_id")
+                if pid:
+                    patient_values.setdefault(pid, val)
+            else:  # sample-level
+                sid = row.get("sample_unique_id")
+                if sid and sid in sample_set:
+                    values[sid] = val
+        # Fall back to patient-level values for samples without a sample-level row.
+        for pid, val in patient_values.items():
+            for sid in patient_to_samples.get(pid, ()):
+                values.setdefault(sid, val)
+        if not values:
+            continue
+        tracks.append(
+            {
+                "name": attribute,
+                "label": attribute.replace("_", " ").title(),
+                "kind": "numeric" if all(_is_float(v) for v in values.values()) else "categorical",
+                "values": values,
+            }
+        )
+    return tracks
+
+
+def _oncoprint_gene_stats(
+    genes: list[str],
+    cells: dict[str, dict[str, dict]],
+    profiled: dict[str, set[str]],
+) -> list[dict]:
+    """Per-gene altered/profiled counts and frequency over the full study set."""
+    stats = []
+    for gene in genes:
+        gene_cells = cells.get(gene, {})
+        altered = len(gene_cells)
+        prof = len(profiled.get(gene, set()))
+        by_type = {"mutation": 0, "amplification": 0, "deep_deletion": 0, "structural_variant": 0}
+        for cell in gene_cells.values():
+            if cell.get("mut"):
+                by_type["mutation"] += 1
+            if cell.get("cna") == "amp":
+                by_type["amplification"] += 1
+            elif cell.get("cna") == "deepdel":
+                by_type["deep_deletion"] += 1
+            if cell.get("sv"):
+                by_type["structural_variant"] += 1
+        stats.append(
+            {
+                "gene": gene,
+                "altered": altered,
+                "profiled": prof,
+                "freq_pct": round(altered * 100.0 / prof, 1) if prof else None,
+                "by_type": by_type,
+            }
+        )
+    return stats
+
+
+def _build_oncoprint_payload(
+    study_id: str,
+    genes: list[str] | None,
+    alteration_types: list[str] | None,
+    clinical_tracks: list[str] | None,
+    max_samples: int | None,
+) -> dict:
+    """Assemble the OncoPrint data contract consumed by the widget."""
+    warnings: list[str] = []
+    alt_types = alteration_types or list(ONCOPRINT_ALTERATION_TYPES)
+    for alt in alt_types:  # validate up front (raises ValueError on bad input)
+        _validate_alteration_type(alt)
+    cap = (
+        MAX_ONCOPRINT_SAMPLES
+        if max_samples is None
+        else max(1, min(int(max_samples), MAX_ONCOPRINT_SAMPLES))
+    )
+    track_attrs = clinical_tracks if clinical_tracks is not None else ["CANCER_TYPE", "SAMPLE_TYPE"]
+
+    payload: dict = {
+        "study_id": study_id,
+        "genes": [],
+        "samples": [],
+        "alteration_types": alt_types,
+        "cells": {},
+        "not_profiled": {},
+        "gene_stats": [],
+        "clinical_tracks": [],
+        "n_samples_total": 0,
+        "n_samples_shown": 0,
+        "warnings": warnings,
+        "notes": (
+            "OncoPrint is per-sample (columns = samples). Cells show the "
+            "alteration type; a gray cell means the sample was not profiled for "
+            "that gene (gene-panel coverage). Per-gene % is computed over the "
+            "full profiled set, not just the shown columns; for cohorts larger "
+            "than the column cap, altered samples are shown first and the matrix "
+            "is truncated."
+        ),
+    }
+
+    genes_resolved = _resolve_oncoprint_genes(study_id, genes)
+    if not genes_resolved:
+        payload["error"] = (
+            f"No genes to display for study '{study_id}'. The study may have no "
+            "genomic events, or the named genes have no alterations."
+        )
+        return payload
+
+    cells, sample_to_patient = _fetch_oncoprint_events(study_id, genes_resolved, alt_types)
+    profiled = _fetch_profiled_samples(study_id, genes_resolved)
+
+    # Order rows most-altered first (the staircase); ties keep input order.
+    orig_index = {g: i for i, g in enumerate(genes_resolved)}
+    genes_resolved.sort(key=lambda g: (-len(cells.get(g, {})), orig_index[g]))
+    payload["genes"] = genes_resolved
+
+    altered_samples: set[str] = set()
+    for gene_cells in cells.values():
+        altered_samples.update(gene_cells.keys())
+    profiled_union: set[str] = set()
+    for s in profiled.values():
+        profiled_union |= s
+
+    if not altered_samples and not profiled_union:
+        payload["error"] = (
+            f"No samples found for study '{study_id}' with the selected genes and alteration types."
+        )
+        return payload
+
+    selected, n_total, truncated = _select_oncoprint_samples(profiled_union, altered_samples, cap)
+    selected_set = set(selected)
+    payload["n_samples_total"] = n_total
+    payload["n_samples_shown"] = len(selected)
+    if truncated:
+        warnings.append(
+            f"Showing {len(selected)} of {n_total} profiled samples (altered "
+            f"samples prioritized). Per-gene frequencies reflect all {n_total} samples."
+        )
+
+    # Gray "not profiled" cells: shown samples outside the gene's profiled set.
+    # Only meaningful when coverage data exists for the study.
+    not_profiled: dict[str, set[str]] = {}
+    if profiled_union:
+        for gene in genes_resolved:
+            gene_profiled = profiled.get(gene, set())
+            np = {
+                sid
+                for sid in selected
+                if sid not in gene_profiled and sid not in cells.get(gene, {})
+            }
+            if np:
+                not_profiled[gene] = np
+    else:
+        warnings.append("Gene-panel coverage data unavailable; 'not profiled' cells are not shown.")
+
+    payload["samples"] = _memo_sort(selected, genes_resolved, cells, not_profiled)
+
+    # Trim alteration cells to the shown samples (matrix render only).
+    trimmed: dict[str, dict[str, dict]] = {}
+    for gene, gene_cells in cells.items():
+        kept = {sid: c for sid, c in gene_cells.items() if sid in selected_set}
+        if kept:
+            trimmed[gene] = kept
+    payload["cells"] = trimmed
+    payload["not_profiled"] = {g: sorted(s) for g, s in not_profiled.items()}
+
+    # gene_stats uses the full (untrimmed) cells + profiled set for accurate %.
+    payload["gene_stats"] = _oncoprint_gene_stats(genes_resolved, cells, profiled)
+    payload["clinical_tracks"] = _fetch_clinical_tracks(
+        study_id, payload["samples"], sample_to_patient, track_attrs
+    )
+    return payload
+
+
+# --- Mutation lollipop app helpers -------------------------------------------
+
+# Max distinct protein-change lollipops kept in the payload (highest-recurrence
+# first). A single gene rarely exceeds this many distinct changes, but large
+# pan-cancer studies can; truncating keeps the payload and the widget readable.
+MAX_LOLLIPOP_MUTATIONS = 400
+
+# Codon-position parser for protein-change notation. HGVS protein strings in
+# mutation_variant look like p.V600E / p.R175H / p.E746_A750del / p.R213* /
+# p.K27fs; the codon number is the first run of digits in the string.
+_PROTEIN_POS_RE = re.compile(r"\d+")
+
+
+def _parse_protein_position(mutation_variant: str | None) -> int | None:
+    """Parse the 1-based codon position from a protein-change string.
+
+    Returns the first integer in the HGVS protein notation (``p.V600E`` -> 600,
+    ``p.E746_A750del`` -> 746), or ``None`` when there is no usable position
+    ("NA", blank, or notations without a codon number).
+    """
+    if not mutation_variant:
+        return None
+    m = _PROTEIN_POS_RE.search(str(mutation_variant))
+    if not m:
+        return None
+    try:
+        pos = int(m.group())
+    except ValueError:
+        return None
+    return pos if pos > 0 else None
+
+
+def _clean_protein_change(mutation_variant: str) -> str:
+    """Strip a leading ``p.`` from a protein-change label for display."""
+    s = str(mutation_variant).strip()
+    if s[:2].lower() == "p.":
+        s = s[2:]
+    return s
+
+
+def _fetch_lollipop_mutations(study_id: str, gene: str) -> list[dict]:
+    """Fetch raw per-sample mutation rows for one gene.
+
+    Uses the canonical mutation filter (``variant_type='mutation'`` excluding
+    UNCALLED, matching ``ALTERATION_CONFIGS['mutation']``). One row per stored
+    event, so the caller can count *distinct samples* per protein change exactly.
+    """
+    mut_filter = ALTERATION_CONFIGS["mutation"]["event_filter"]
+    return run_select_query(f"""
+        SELECT sample_unique_id, mutation_variant, mutation_type
+        FROM genomic_event_derived
+        WHERE cancer_study_identifier = '{study_id}'
+            AND hugo_gene_symbol = '{gene}'
+            AND ({mut_filter})
+    """)
+
+
+def _build_lollipop_payload(study_id: str, gene: str) -> dict:
+    """Assemble the mutation-lollipop data contract consumed by the widget."""
+    warnings: list[str] = []
+    payload: dict = {
+        "study_id": study_id,
+        "gene": gene,
+        "mutations": [],
+        "class_counts": {},
+        "n_samples_mutated": 0,
+        "protein_change_count": 0,
+        "unmapped_count": 0,
+        "max_position": None,
+        "warnings": warnings,
+        "notes": (
+            "Mutation lollipop for a single gene. Each lollipop is a distinct "
+            "protein change; its height/head is the number of samples carrying it "
+            "(recurrence) and its color is the mutation class. Positions are "
+            "parsed from the protein-change notation (mutation_variant). The "
+            "protein backbone length and Pfam domains are fetched live from Genome "
+            "Nexus by the widget; if unavailable, the axis is scaled to the highest "
+            "observed position and no domains are drawn. Counts are per sample "
+            "(somatic + germline, excluding UNCALLED)."
+        ),
+    }
+
+    rows = _fetch_lollipop_mutations(study_id, gene)
+    if not rows:
+        payload["error"] = (
+            f"No mutations found for {gene} in study '{study_id}'. The gene may "
+            "have no mutation events, or the study may have no mutation data."
+        )
+        return payload
+
+    # Aggregate per distinct protein change: the set of samples carrying it (for
+    # recurrence) and the most-severe mutation class + the MAF types seen for it.
+    by_change: dict[str, dict] = {}
+    all_samples: set[str] = set()
+    unmapped_samples: set[str] = set()
+    for row in rows:
+        sid = row.get("sample_unique_id")
+        if not sid:
+            continue
+        all_samples.add(sid)
+        variant = row.get("mutation_variant")
+        pos = _parse_protein_position(variant)
+        if variant is None or str(variant).strip().upper() == "NA" or pos is None:
+            unmapped_samples.add(sid)
+            continue
+        cls = _mutation_class(row.get("mutation_type"))
+        rec = by_change.get(variant)
+        if rec is None:
+            rec = {
+                "protein_change": _clean_protein_change(variant),
+                "position": pos,
+                "samples": set(),
+                "class": cls,
+                "types": set(),
+            }
+            by_change[variant] = rec
+        rec["samples"].add(sid)
+        rec["class"] = _more_severe_mut(rec["class"], cls)
+        mtype = row.get("mutation_type")
+        if mtype:
+            rec["types"].add(str(mtype))
+
+    mutations = [
+        {
+            "protein_change": rec["protein_change"],
+            "position": rec["position"],
+            "count": len(rec["samples"]),
+            "class": rec["class"],
+            "types": sorted(rec["types"]),
+        }
+        for rec in by_change.values()
+    ]
+    # Sort by recurrence (desc) then position so truncation keeps the hotspots;
+    # the widget re-sorts by position for drawing.
+    mutations.sort(key=lambda m: (-m["count"], m["position"]))
+    n_distinct = len(mutations)
+    if n_distinct > MAX_LOLLIPOP_MUTATIONS:
+        mutations = mutations[:MAX_LOLLIPOP_MUTATIONS]
+        warnings.append(
+            f"{n_distinct} distinct protein changes found; showing the "
+            f"{MAX_LOLLIPOP_MUTATIONS} most recurrent."
+        )
+
+    class_counts: dict[str, int] = {}
+    max_pos = 0
+    for m in mutations:
+        class_counts[m["class"]] = class_counts.get(m["class"], 0) + 1
+        max_pos = max(max_pos, m["position"])
+
+    payload["mutations"] = mutations
+    payload["class_counts"] = class_counts
+    payload["protein_change_count"] = n_distinct
+    payload["n_samples_mutated"] = len(all_samples)
+    payload["max_position"] = max_pos or None
+    payload["unmapped_count"] = len(unmapped_samples)
+    if not mutations:
+        payload["error"] = (
+            f"{gene} has mutation events in study '{study_id}', but none carry a "
+            "plottable protein-change position."
+        )
+        return payload
+    if unmapped_samples:
+        warnings.append(
+            f"{len(unmapped_samples)} sample(s) have mutations without a plottable "
+            "protein position (e.g. splice sites or 'NA'); they are counted but not "
+            "shown as lollipops."
+        )
+    return payload
+
+
+# --- Alteration co-occurrence app helpers ------------------------------------
+
+# Gene-count bounds for the pairwise co-occurrence analysis. The heatmap shows
+# every gene pair, so the pair count grows as G*(G-1)/2; cap the genes to keep
+# the matrix (and the all-pairs Fisher computation) bounded and readable.
+MAX_COOCCURRENCE_GENES = 12
+DEFAULT_COOCCURRENCE_GENES = 8
+
+# A pair is flagged significant when its Benjamini-Hochberg q-value is below this.
+COOCCURRENCE_Q_SIGNIFICANT = 0.05
+
+# Alteration types considered "altered" for a gene (same set as the OncoPrint).
+COOCCURRENCE_ALTERATION_TYPES = ONCOPRINT_ALTERATION_TYPES
+
+
+def _resolve_cooccurrence_genes(study_id: str, genes: list[str] | None) -> list[str]:
+    """Return the gene list for the co-occurrence analysis.
+
+    If ``genes`` is given, validate and de-duplicate (preserving order), clamped
+    to ``MAX_COOCCURRENCE_GENES``. Otherwise default to the study's most-altered
+    genes across all alteration types.
+    """
+    if genes:
+        resolved: list[str] = []
+        seen: set[str] = set()
+        for g in genes:
+            gene = _validate_gene_symbol(g)
+            if gene not in seen:
+                seen.add(gene)
+                resolved.append(gene)
+        return resolved[:MAX_COOCCURRENCE_GENES]
+
+    combined = _oncoprint_event_filter(list(COOCCURRENCE_ALTERATION_TYPES))
+    rows = run_select_query(f"""
+        SELECT hugo_gene_symbol, COUNT(DISTINCT sample_unique_id) AS altered_samples
+        FROM genomic_event_derived
+        WHERE cancer_study_identifier = '{study_id}'
+            AND ({combined})
+        GROUP BY hugo_gene_symbol
+        ORDER BY altered_samples DESC, hugo_gene_symbol ASC
+        LIMIT {DEFAULT_COOCCURRENCE_GENES}
+    """)
+    return [r["hugo_gene_symbol"] for r in rows if r.get("hugo_gene_symbol")]
+
+
+def _cooccurrence_pair(
+    gene_a: str,
+    gene_b: str,
+    altered: dict[str, set[str]],
+    profiled: dict[str, set[str]],
+) -> dict | None:
+    """Build the 2x2 contingency result for one gene pair, or None.
+
+    The sample universe is the set profiled for **both** genes (the correct
+    pairwise denominator). Returns ``None`` when that universe is empty (the two
+    genes share no profiled samples, e.g. disjoint panels), so the caller can
+    skip and warn.
+    """
+    universe = profiled[gene_a] & profiled[gene_b]
+    if not universe:
+        return None
+    alt_a = altered[gene_a] & universe
+    alt_b = altered[gene_b] & universe
+    both = alt_a & alt_b
+    a = len(both)
+    b = len(alt_a) - a
+    c = len(alt_b) - a
+    d = len(universe) - len(alt_a | alt_b)
+
+    p_value = fisher_exact_two_sided(a, b, c, d)
+    expected_both = (a + b) * (a + c) / len(universe)
+    tendency = "Co-occurrence" if a > expected_both else "Mutual exclusivity"
+    return {
+        "gene_a": gene_a,
+        "gene_b": gene_b,
+        "n_both": a,
+        "n_a_only": b,
+        "n_b_only": c,
+        "n_neither": d,
+        "n_profiled": len(universe),
+        "log2_odds_ratio": round(log2_odds_ratio(a, b, c, d), 3),
+        "p_value": p_value,
+        "tendency": tendency,
+    }
+
+
+def _build_cooccurrence_payload(
+    study_id: str,
+    genes: list[str] | None,
+    alteration_types: list[str] | None,
+) -> dict:
+    """Assemble the co-occurrence data contract consumed by the heatmap widget.
+
+    For every gene pair, builds a 2x2 alteration contingency table over the
+    samples profiled for both genes, runs a two-sided Fisher exact test, adds a
+    log2 odds ratio and tendency, then Benjamini-Hochberg-corrects the p-values
+    to q-values across all pairs.
+    """
+    warnings: list[str] = []
+    requested_types = alteration_types or list(COOCCURRENCE_ALTERATION_TYPES)
+    resolved_types: list[str] = []
+    seen_types: set[str] = set()
+    for alt in requested_types:
+        _validate_alteration_type(alt)  # raises ValueError on unknown types
+        if alt not in seen_types:
+            seen_types.add(alt)
+            resolved_types.append(alt)
+
+    payload: dict = {
+        "study_id": study_id,
+        "alteration_types": resolved_types,
+        "genes": [],
+        "gene_stats": [],
+        "pairs": [],
+        "n_significant": 0,
+        "q_threshold": COOCCURRENCE_Q_SIGNIFICANT,
+        "warnings": warnings,
+        "notes": (
+            "Pairwise alteration co-occurrence / mutual exclusivity. For each gene "
+            "pair a 2x2 table (both / either-only / neither altered) is built over "
+            "the samples profiled for both genes, scored with a two-sided Fisher "
+            "exact test and a log2 odds ratio (positive = tend to co-occur, "
+            "negative = mutually exclusive), and the p-values are Benjamini-Hochberg "
+            "corrected to q-values. Alterations are per sample; profiling uses "
+            "mutation (MUTATION_EXTENDED) coverage, so copy-number/structural events "
+            "on samples without mutation profiling are not counted."
+        ),
+    }
+
+    resolved_genes = _resolve_cooccurrence_genes(study_id, genes)
+    payload["genes"] = resolved_genes
+    if len(resolved_genes) < 2:
+        payload["error"] = (
+            "Co-occurrence analysis needs at least two genes. "
+            f"Found {len(resolved_genes)} for study '{study_id}'. Provide 2+ valid "
+            "gene symbols, or pick a study with alteration data."
+        )
+        return payload
+
+    cells, _ = _fetch_oncoprint_events(study_id, resolved_genes, resolved_types)
+    altered = {g: set(cells.get(g, {}).keys()) for g in resolved_genes}
+    profiled = _fetch_profiled_samples(study_id, resolved_genes)
+
+    payload["gene_stats"] = [
+        {
+            "gene": g,
+            "altered": len(altered[g] & profiled[g]),
+            "profiled": len(profiled[g]),
+            "freq_pct": (
+                round(len(altered[g] & profiled[g]) * 100.0 / len(profiled[g]), 1)
+                if profiled[g]
+                else None
+            ),
+        }
+        for g in resolved_genes
+    ]
+
+    pairs: list[dict] = []
+    skipped = 0
+    for i in range(len(resolved_genes)):
+        for j in range(i + 1, len(resolved_genes)):
+            pair = _cooccurrence_pair(resolved_genes[i], resolved_genes[j], altered, profiled)
+            if pair is None:
+                skipped += 1
+                continue
+            pairs.append(pair)
+
+    if not pairs:
+        payload["error"] = (
+            f"No gene pairs could be evaluated for study '{study_id}': the selected "
+            "genes share no profiled samples."
+        )
+        return payload
+
+    qvalues = benjamini_hochberg([p["p_value"] for p in pairs])
+    n_significant = 0
+    for pair, q in zip(pairs, qvalues, strict=True):
+        pair["q_value"] = q
+        pair["significant"] = q < COOCCURRENCE_Q_SIGNIFICANT
+        if pair["significant"]:
+            n_significant += 1
+
+    # Most significant first; the widget arranges the matrix by gene order.
+    pairs.sort(key=lambda p: (p["p_value"], -abs(p["log2_odds_ratio"])))
+    payload["pairs"] = pairs
+    payload["n_significant"] = n_significant
+
+    if skipped:
+        warnings.append(
+            f"{skipped} gene pair(s) skipped because the two genes share no profiled samples."
+        )
+    if any(t != "mutation" for t in resolved_types):
+        warnings.append(
+            "Copy-number/structural alterations are included, but profiling counts use "
+            "mutation coverage; pairs involving genes without copy-number/SV profiling may "
+            "be approximate."
+        )
+    return payload
+
+
 # Create FastMCP instance
 mcp = FastMCP(
     name="cBioPortal MCP Server",
@@ -274,26 +1535,34 @@ def main():
         logger.error(f"Failed to start MCP server: {e}")
         raise
 
+
 def _mutation_frequency_guide_text() -> str:
     return _load_resource("mutation-frequency-guide.md")
+
 
 def _clinical_data_guide_text() -> str:
     return _load_resource("clinical-data-guide.md")
 
+
 def _sample_filtering_guide_text() -> str:
     return _load_resource("sample-filtering-guide.md")
+
 
 def _common_pitfalls_guide_text() -> str:
     return _load_resource("common-pitfalls.md")
 
+
 def _treatment_guide_text() -> str:
     return _load_resource("treatment-guide.md")
+
 
 def _faq_guide_text() -> str:
     return _load_resource("faq-guide.md")
 
+
 def _statistical_tests_guide_text() -> str:
     return _load_resource("statistical-tests-guide.md")
+
 
 def _gene_expression_guide_text() -> str:
     return _load_resource("gene-expression-guide.md")
@@ -312,29 +1581,36 @@ def _study_resolution_guide_text() -> str:
 def mutation_frequency_guide() -> str:
     return _mutation_frequency_guide_text()
 
+
 @mcp.resource("cbioportal://clinical-data-guide")
 def clinical_data_guide() -> str:
     return _clinical_data_guide_text()
+
 
 @mcp.resource("cbioportal://sample-filtering-guide")
 def sample_filtering_guide() -> str:
     return _sample_filtering_guide_text()
 
+
 @mcp.resource("cbioportal://common-pitfalls")
 def common_pitfalls_guide() -> str:
     return _common_pitfalls_guide_text()
+
 
 @mcp.resource("cbioportal://treatment-guide")
 def treatment_guide() -> str:
     return _treatment_guide_text()
 
+
 @mcp.resource("cbioportal://faq-guide")
 def faq_guide() -> str:
     return _faq_guide_text()
 
+
 @mcp.resource("cbioportal://statistical-tests-guide")
 def statistical_tests_guide() -> str:
     return _statistical_tests_guide_text()
+
 
 @mcp.resource("cbioportal://gene-expression-guide")
 def gene_expression_guide() -> str:
@@ -397,6 +1673,7 @@ def clickhouse_list_tables() -> dict[str, list[dict] | str]:
 
     try:
         from mcp_clickhouse.mcp_server import execute_query
+
         raw = execute_query("SHOW TABLES")
         rows = raw.get("rows", [])
         result = [{"name": row[0]} for row in rows if row]
@@ -426,6 +1703,7 @@ def clickhouse_list_table_columns(table: str) -> dict[str, list[dict] | str]:
     try:
         table = _validate_table_name(table)
         from mcp_clickhouse.mcp_server import execute_query
+
         raw = execute_query(f"DESCRIBE TABLE {table}")
         columns_list = raw.get("columns", [])
         rows = raw.get("rows", [])
@@ -454,12 +1732,13 @@ def clickhouse_list_table_columns(table: str) -> dict[str, list[dict] | str]:
 def run_select_query(query: str) -> list[dict]:
     """
     Execute arbitrary ClickHouse SQL SELECT query.
-    
+
     Note: CTEs (WITH ... AS) are supported. Query validation is handled at the
     database level via read-only user permissions (see authentication/permissions.py).
 
     Returns:
-        list: A list of rows, where each row is a dictionary with column names as keys and corresponding values.
+        list: A list of rows, where each row is a dictionary with
+              column names as keys and corresponding values.
     """
     from mcp_clickhouse.mcp_server import run_select_query
 
@@ -508,35 +1787,35 @@ def list_guides() -> list[dict]:
     return deployment_guides + [
         {
             "uri": "cbioportal://mutation-frequency-guide",
-            "description": "Comprehensive guide for calculating gene mutation frequencies with gene-specific profiling denominators"
+            "description": "Comprehensive guide for calculating gene mutation frequencies with gene-specific profiling denominators",
         },
         {
             "uri": "cbioportal://clinical-data-guide",
-            "description": "Guide for querying clinical data including patient vs sample level considerations"
+            "description": "Guide for querying clinical data including patient vs sample level considerations",
         },
         {
             "uri": "cbioportal://sample-filtering-guide",
-            "description": "Guide for filtering samples and studies in cBioPortal queries"
+            "description": "Guide for filtering samples and studies in cBioPortal queries",
         },
         {
             "uri": "cbioportal://common-pitfalls",
-            "description": "Guide to avoid common mistakes when querying cBioPortal data"
+            "description": "Guide to avoid common mistakes when querying cBioPortal data",
         },
         {
             "uri": "cbioportal://treatment-guide",
-            "description": "Guide for querying treatment/clinical event data including drug agents, timelines, and linking to genomic data"
+            "description": "Guide for querying treatment/clinical event data including drug agents, timelines, and linking to genomic data",
         },
         {
             "uri": "cbioportal://faq-guide",
-            "description": "General cBioPortal FAQ: history, how to cite, data types, reference genome, abbreviations, GISTIC thresholds, API access"
+            "description": "General cBioPortal FAQ: history, how to cite, data types, reference genome, abbreviations, GISTIC thresholds, API access",
         },
         {
             "uri": "cbioportal://statistical-tests-guide",
-            "description": "Statistical test selection guide — decision matrix for choosing Fisher's exact, Wilcoxon, chi-squared, t-test, ANOVA, etc. based on data type and group count"
+            "description": "Statistical test selection guide — decision matrix for choosing Fisher's exact, Wilcoxon, chi-squared, t-test, ANOVA, etc. based on data type and group count",
         },
         {
             "uri": "cbioportal://gene-expression-guide",
-            "description": "Gene expression / copy-number / methylation analysis. Covers genetic_alteration_derived, profile_type discovery, and the gene_pair_coexpression view for Spearman correlation between two genes"
+            "description": "Gene expression / copy-number / methylation analysis. Covers genetic_alteration_derived, profile_type discovery, and the gene_pair_coexpression view for Spearman correlation between two genes",
         },
         {
             "uri": "cbioportal://external-resources-guide",
@@ -552,8 +1831,8 @@ def list_guides() -> list[dict]:
         },
         {
             "uri": "cbioportal://study-guide/{study_id}",
-            "description": "Dynamic study-specific guide - use get_study_guide(study_id) tool to generate"
-        }
+            "description": "Dynamic study-specific guide - use get_study_guide(study_id) tool to generate",
+        },
     ]
 
 
@@ -622,15 +1901,15 @@ def get_general_guide(name: str) -> str:
 @mcp.tool()
 def get_study_guide(study_id: str) -> str:
     """Get a guide for a specific cBioPortal study.
-    
+
     First checks for a pre-generated guide in resources/study-guides/{study_id}.md.
     If not found, dynamically generates one by querying the database.
-    
+
     Pre-generated guides may include curated notes and tips specific to each study.
-    
+
     Args:
         study_id: The cancer study identifier (e.g., "msk_chord_2024", "brca_tcga_pan_can_atlas_2018")
-    
+
     Returns:
         A markdown-formatted guide specific to the requested study
     """
@@ -639,58 +1918,58 @@ def get_study_guide(study_id: str) -> str:
         study_id = _validate_study_id(study_id)
     except ValueError as e:
         return f"Error: {str(e)}"
-    
+
     # First, check for a pre-generated guide file
     static_guide = _load_study_guide(study_id)
     if static_guide:
         logger.info(f"Loaded static study guide for {study_id}")
         return static_guide
-    
+
     # Fall back to dynamic generation
     logger.info(f"Generating dynamic study guide for {study_id}")
     try:
         guide_sections = []
-        
+
         # 1. Basic study info
         study_info = run_select_query(f"""
-            SELECT 
+            SELECT
                 cancer_study_identifier,
                 name,
                 description,
                 type_of_cancer_id
-            FROM cancer_study 
+            FROM cancer_study
             WHERE cancer_study_identifier = '{study_id}'
         """)
-        
+
         if not study_info:
             return f"Study '{study_id}' not found. Use clickhouse_list_tables or query cancer_study table to find valid study identifiers."
-        
+
         info = study_info[0]
-        guide_sections.append(f"""# Study Guide: {info.get('name', study_id)}
+        guide_sections.append(f"""# Study Guide: {info.get("name", study_id)}
 
 **Study ID:** `{study_id}`
-**Cancer Type:** {info.get('type_of_cancer_id', 'N/A')}
-**Description:** {info.get('description', 'N/A')}
+**Cancer Type:** {info.get("type_of_cancer_id", "N/A")}
+**Description:** {info.get("description", "N/A")}
 """)
-        
+
         # 2. Patient and sample counts
         counts = run_select_query(f"""
-            SELECT 
+            SELECT
                 COUNT(DISTINCT patient_unique_id) as patient_count,
                 COUNT(DISTINCT sample_unique_id) as sample_count
-            FROM clinical_data_derived 
+            FROM clinical_data_derived
             WHERE cancer_study_identifier = '{study_id}'
         """)
         if counts:
             c = counts[0]
             guide_sections.append(f"""## Cohort Statistics
-- **Patients:** {c.get('patient_count', 'N/A'):,}
-- **Samples:** {c.get('sample_count', 'N/A'):,}
+- **Patients:** {c.get("patient_count", "N/A"):,}
+- **Samples:** {c.get("sample_count", "N/A"):,}
 """)
-        
+
         # 3. Available data types
         profiles = run_select_query(f"""
-            SELECT DISTINCT 
+            SELECT DISTINCT
                 gp.genetic_alteration_type,
                 gp.datatype,
                 gp.name
@@ -701,9 +1980,11 @@ def get_study_guide(study_id: str) -> str:
         if profiles:
             guide_sections.append("## Available Data Types\n")
             for p in profiles:
-                guide_sections.append(f"- **{p.get('genetic_alteration_type', 'Unknown')}**: {p.get('name', 'N/A')}")
+                guide_sections.append(
+                    f"- **{p.get('genetic_alteration_type', 'Unknown')}**: {p.get('name', 'N/A')}"
+                )
             guide_sections.append("")
-        
+
         # 4. Gene panels used
         panels = run_select_query(f"""
             SELECT DISTINCT gene_panel_id, COUNT(DISTINCT sample_unique_id) as sample_count
@@ -716,14 +1997,16 @@ def get_study_guide(study_id: str) -> str:
         if panels:
             guide_sections.append("## Gene Panels\n")
             for p in panels:
-                panel_id = p.get('gene_panel_id', 'Unknown')
-                count = p.get('sample_count', 0)
-                if panel_id == 'WES':
-                    guide_sections.append(f"- **{panel_id}** (Whole Exome): {count:,} samples — all genes profiled")
+                panel_id = p.get("gene_panel_id", "Unknown")
+                count = p.get("sample_count", 0)
+                if panel_id == "WES":
+                    guide_sections.append(
+                        f"- **{panel_id}** (Whole Exome): {count:,} samples — all genes profiled"
+                    )
                 else:
                     guide_sections.append(f"- **{panel_id}**: {count:,} samples")
             guide_sections.append("")
-        
+
         # 5. Clinical attributes available
         attrs = run_select_query(f"""
             SELECT DISTINCT attribute_name, COUNT(DISTINCT sample_unique_id) as coverage
@@ -738,12 +2021,14 @@ def get_study_guide(study_id: str) -> str:
             guide_sections.append("| Attribute | Samples with Data |")
             guide_sections.append("|-----------|------------------|")
             for a in attrs:
-                guide_sections.append(f"| {a.get('attribute_name', 'Unknown')} | {a.get('coverage', 0):,} |")
+                guide_sections.append(
+                    f"| {a.get('attribute_name', 'Unknown')} | {a.get('coverage', 0):,} |"
+                )
             guide_sections.append("")
-        
+
         # 6. Top mutated genes (if mutation data exists)
         top_genes = run_select_query(f"""
-            SELECT 
+            SELECT
                 hugo_gene_symbol,
                 COUNT(DISTINCT sample_unique_id) as altered_samples
             FROM genomic_event_derived
@@ -759,9 +2044,11 @@ def get_study_guide(study_id: str) -> str:
             guide_sections.append("| Gene | Altered Samples |")
             guide_sections.append("|------|----------------|")
             for g in top_genes:
-                guide_sections.append(f"| {g.get('hugo_gene_symbol', 'Unknown')} | {g.get('altered_samples', 0):,} |")
+                guide_sections.append(
+                    f"| {g.get('hugo_gene_symbol', 'Unknown')} | {g.get('altered_samples', 0):,} |"
+                )
             guide_sections.append("")
-        
+
         # 7. Sample type distribution
         sample_types = run_select_query(f"""
             SELECT attribute_value as sample_type, COUNT(DISTINCT sample_unique_id) as count
@@ -774,9 +2061,11 @@ def get_study_guide(study_id: str) -> str:
         if sample_types:
             guide_sections.append("## Sample Types\n")
             for st in sample_types:
-                guide_sections.append(f"- **{st.get('sample_type', 'Unknown')}**: {st.get('count', 0):,} samples")
+                guide_sections.append(
+                    f"- **{st.get('sample_type', 'Unknown')}**: {st.get('count', 0):,} samples"
+                )
             guide_sections.append("")
-        
+
         # 8. Query tips for this study
         guide_sections.append(f"""## Query Tips for {study_id}
 
@@ -800,9 +2089,9 @@ WHERE cancer_study_identifier = '{study_id}'
     AND attribute_name IN ('CANCER_TYPE', 'SAMPLE_TYPE', 'OS_MONTHS');
 ```
 """)
-        
+
         return "\n".join(guide_sections)
-        
+
     except Exception as e:
         logger.error(f"get_study_guide error: {e}")
         return f"Error generating study guide for '{study_id}': {str(e)}"
@@ -811,24 +2100,27 @@ WHERE cancer_study_identifier = '{study_id}'
 # Maximum allowed limit for list queries to prevent expensive unbounded queries
 MAX_LIST_LIMIT = 100
 
+
 @mcp.tool()
-def list_studies(search: str = None, limit: int = 20) -> list[dict]:
+def list_studies(search: str | None = None, limit: int = 20) -> list[dict]:
     """List available cBioPortal studies.
 
     Studies with pre-generated guides (in resources/study-guides/) will have has_guide=True.
 
     Args:
-        search: Optional search term to filter studies by name, identifier, cancer type, or description
+        search: Optional search term to filter studies by name, identifier,
+                cancer type, or description
         limit: Maximum number of studies to return (default 20, max 100)
 
     Returns:
-        List of studies with their identifiers, names, descriptions, sample counts, and guide availability
+        List of studies with their identifiers, names, descriptions,
+        sample counts, and guide availability
     """
     available_guides = set(_list_available_study_guides())
-    
+
     # Clamp limit to safe bounds
     safe_limit = max(1, min(int(limit), MAX_LIST_LIMIT))
-    
+
     try:
         if search:
             # Sanitize search term to prevent SQL injection
@@ -864,16 +2156,16 @@ def list_studies(search: str = None, limit: int = 20) -> list[dict]:
                 ORDER BY sample_count DESC
                 LIMIT {safe_limit}
             """
-        
+
         results = run_select_query(query)
-        
+
         # Add has_guide field
         for study in results:
-            study_id = study.get('cancer_study_identifier', '')
-            study['has_guide'] = study_id in available_guides
-        
+            study_id = study.get("cancer_study_identifier", "")
+            study["has_guide"] = study_id in available_guides
+
         return results
-        
+
     except Exception as e:
         logger.error(f"list_studies error: {e}")
         return [{"error": str(e)}]
@@ -980,6 +2272,786 @@ def search_oncotree(search_term: str) -> list[dict]:
     # Sort by score desc, then by code for stability
     scored.sort(key=lambda x: (-x[0], x[1]["code"]))
     return [item for _, item in scored[:25]]
+
+
+# --- Survival / Kaplan-Meier UI app -----------------------------------------
+
+
+@mcp.resource(
+    uri=ui.SURVIVAL_UI_URI,
+    mime_type=UI_MIME_TYPE,
+    name="Kaplan-Meier Survival Widget",
+    description="Self-contained HTML widget that renders a Kaplan-Meier survival curve.",
+)
+def survival_widget() -> str:
+    return ui.load_widget("survival.html")
+
+
+@mcp.tool(
+    app=ui.survival_app_config(),
+    description="""
+    Generate an interactive Kaplan-Meier survival curve for a cBioPortal study.
+
+    Returns structured survival data AND renders an embedded KM chart in
+    supporting clients (MCP Apps / io.modelcontextprotocol/ui extension).
+
+    Survival is computed at the **patient** level.
+    Groups can be formed by gene-alteration status or a clinical attribute.
+
+    Args:
+        study_id: cBioPortal study identifier (e.g. "brca_tcga_pan_can_atlas_2018")
+        endpoint: Survival endpoint — one of OS, PFS, DFS, DSS (default: OS)
+        group_by_gene: Hugo gene symbol to split the cohort (altered vs wild-type).
+                       Requires the study to have genomic data. Optional.
+        alteration_types: Which alteration types count as "altered" when using
+                          group_by_gene. Subset of: mutation, amplification,
+                          deep_deletion, structural_variant (default: mutation).
+        group_by_clinical: Clinical attribute name to split the cohort
+                           (e.g. "SUBTYPE", "ER_STATUS"). Optional.
+                           Ignored when group_by_gene is also given.
+
+    Returns:
+        Structured JSON with per-group KM curves, medians, patient/event counts,
+        at-risk tables, and a log-rank test result when 2+ groups are present.
+""",
+)
+def survival_curve(
+    study_id: str,
+    endpoint: str = "OS",
+    group_by_gene: str | None = None,
+    alteration_types: list[str] | None = None,
+    group_by_clinical: str | None = None,
+) -> dict:
+    # Error returns keep the contract shape (endpoint + empty groups) so the
+    # widget recognizes and renders them consistently across host transports.
+    def _error(message: str) -> dict:
+        return {"error": message, "endpoint": (endpoint or "OS").upper(), "groups": []}
+
+    try:
+        study_id = _validate_study_id(study_id)
+    except ValueError as e:
+        return _error(str(e))
+
+    try:
+        return _build_survival_payload(
+            study_id=study_id,
+            endpoint=endpoint,
+            group_by_gene=group_by_gene,
+            alteration_types=alteration_types or ["mutation"],
+            group_by_clinical=group_by_clinical,
+        )
+    except ValueError as e:
+        return _error(str(e))
+    except Exception as e:
+        logger.error("survival_curve error: %s", e)
+        return _error(f"Unexpected error computing survival curve: {e}")
+
+
+# --- OncoPrint UI app --------------------------------------------------------
+
+
+@mcp.resource(
+    uri=ui.ONCOPRINT_UI_URI,
+    mime_type=UI_MIME_TYPE,
+    name="OncoPrint Widget",
+    description="Self-contained HTML widget that renders an OncoPrint alteration matrix.",
+)
+def oncoprint_widget() -> str:
+    return ui.load_widget("oncoprint.html")
+
+
+@mcp.tool(
+    app=ui.oncoprint_app_config(),
+    description="""
+    Generate an interactive OncoPrint (gene x sample alteration matrix) for a cBioPortal study.
+
+    Returns structured alteration data AND renders an embedded OncoPrint in
+    supporting clients
+
+    OncoPrint is computed at the **sample** level (columns = samples). Each cell
+    shows that sample's alteration in the gene: mutation (colored by class),
+    copy-number amplification or deep deletion, and/or structural variant. A gray
+    cell marks a sample not profiled for that gene (gene-panel coverage).
+
+    Args:
+        study_id: cBioPortal study identifier (e.g. "brca_tcga_pan_can_atlas_2018").
+        genes: Hugo gene symbols for the matrix rows. Optional; defaults to the
+               study's most-altered genes. Clamped to 25 rows.
+        alteration_types: Which alterations to include. Subset of: mutation,
+                          amplification, deep_deletion, structural_variant
+                          (default: all four).
+        clinical_tracks: Clinical attribute names shown as annotation tracks below
+                         the matrix (e.g. "CANCER_TYPE", "SAMPLE_TYPE"). Optional;
+                         pass [] for none.
+        max_samples: Max sample columns to render (default 200, hard cap 200).
+                     Altered samples are prioritized; the view is truncated for
+                     larger cohorts (per-gene % still reflects all samples).
+
+    Returns:
+        Structured JSON: gene rows, sample columns (MemoSort order), a sparse
+        alteration-cell map, not-profiled cells, per-gene frequency stats, and
+        clinical tracks.
+""",
+)
+def oncoprint(
+    study_id: str,
+    genes: list[str] | None = None,
+    alteration_types: list[str] | None = None,
+    clinical_tracks: list[str] | None = None,
+    max_samples: int | None = None,
+) -> dict:
+    # Error returns keep the contract shape (study_id + empty genes/samples) so
+    # the widget recognizes and renders them consistently across host transports.
+    def _error(message: str) -> dict:
+        return {"error": message, "study_id": study_id, "genes": [], "samples": []}
+
+    try:
+        validated_study = _validate_study_id(study_id)
+    except ValueError as e:
+        return _error(str(e))
+
+    try:
+        return _build_oncoprint_payload(
+            study_id=validated_study,
+            genes=genes,
+            alteration_types=alteration_types,
+            clinical_tracks=clinical_tracks,
+            max_samples=max_samples,
+        )
+    except ValueError as e:
+        return _error(str(e))
+    except Exception as e:
+        logger.error("oncoprint error: %s", e)
+        return _error(f"Unexpected error computing OncoPrint: {e}")
+
+
+# --- Mutation lollipop UI app ------------------------------------------------
+
+
+@mcp.resource(
+    uri=ui.LOLLIPOP_UI_URI,
+    mime_type=UI_MIME_TYPE,
+    name="Mutation Lollipop Widget",
+    description="HTML widget that renders a mutation lollipop diagram for one gene.",
+)
+def lollipop_widget() -> str:
+    return ui.load_widget("lollipop.html")
+
+
+@mcp.tool(
+    app=ui.lollipop_app_config(),
+    description="""
+    Generate an interactive mutation lollipop diagram for a single gene in a cBioPortal study.
+
+    Returns structured per-mutation data AND renders an embedded lollipop plot in
+    supporting clients.
+
+    A lollipop plot shows each distinct protein change as a "stick" at its codon
+    position along the protein; the head is sized/labeled by how many samples carry
+    it (recurrence) and colored by mutation class (missense, truncating, inframe,
+    other). The protein backbone and its Pfam domains are drawn from data the
+    widget fetches live from Genome Nexus.
+
+    Mutations are counted at the **sample** level (one count per sample carrying the
+    change; somatic + germline, excluding UNCALLED). Positions are parsed from the
+    protein-change notation; changes without a codon position (e.g. some splice
+    variants) are summarized in `unmapped_count` but not plotted.
+
+    Args:
+        study_id: cBioPortal study identifier (e.g. "brca_tcga_pan_can_atlas_2018").
+        gene: A single Hugo gene symbol (e.g. "TP53", "PIK3CA", "EGFR").
+
+    Returns:
+        Structured JSON: the gene, a list of distinct protein changes
+        (protein_change, position, count, class, types), per-class counts, the
+        number of mutated samples, the highest observed position, and the count of
+        unplottable mutations.
+""",
+)
+def mutation_diagram(study_id: str, gene: str) -> dict:
+    # Error returns keep the contract shape (study_id + gene + empty mutations) so
+    # the widget recognizes and renders them consistently across host transports.
+    def _error(message: str) -> dict:
+        return {"error": message, "study_id": study_id, "gene": gene, "mutations": []}
+
+    try:
+        validated_study = _validate_study_id(study_id)
+        validated_gene = _validate_gene_symbol(gene)
+    except ValueError as e:
+        return _error(str(e))
+
+    try:
+        return _build_lollipop_payload(validated_study, validated_gene)
+    except ValueError as e:
+        return _error(str(e))
+    except Exception as e:
+        logger.error("mutation_diagram error: %s", e)
+        return _error(f"Unexpected error computing mutation lollipop: {e}")
+
+
+# --- Alteration co-occurrence UI app -----------------------------------------
+
+
+@mcp.resource(
+    uri=ui.COOCCURRENCE_UI_URI,
+    mime_type=UI_MIME_TYPE,
+    name="Alteration Co-occurrence Widget",
+    description="HTML widget that renders a pairwise alteration co-occurrence heatmap.",
+)
+def cooccurrence_widget() -> str:
+    return ui.load_widget("cooccurrence.html")
+
+
+@mcp.tool(
+    app=ui.cooccurrence_app_config(),
+    description="""
+    Analyze pairwise alteration co-occurrence and mutual exclusivity among genes
+    in a cBioPortal study.
+
+    Returns structured per-pair statistics AND renders an embedded co-occurrence
+    heatmap in supporting clients.
+
+    For every pair of genes, a 2x2 contingency table is built over the samples
+    profiled for both genes (both altered / only one altered / neither), scored
+    with a two-sided Fisher exact test and a log2 odds ratio. A positive odds
+    ratio means the alterations tend to co-occur; negative means they tend to be
+    mutually exclusive. P-values are Benjamini-Hochberg corrected to q-values
+    across all pairs, and a pair is flagged significant at q < 0.05.
+
+    Alterations are counted per sample. Profiling uses mutation (MUTATION_EXTENDED)
+    coverage, so copy-number/structural events on samples without mutation
+    profiling are not counted (see the payload `notes`).
+
+    Args:
+        study_id: cBioPortal study identifier (e.g. "brca_tcga_pan_can_atlas_2018").
+        genes: Optional list of Hugo gene symbols (2-12). If omitted, the study's
+            most-altered genes are used.
+        alteration_types: Optional alteration types to count as "altered"
+            (any of "mutation", "amplification", "deep_deletion",
+            "structural_variant"). Defaults to all four.
+
+    Returns:
+        Structured JSON: the gene list, per-gene altered/profiled counts, and a
+        list of pairs (gene_a, gene_b, n_both, n_a_only, n_b_only, n_neither,
+        log2_odds_ratio, p_value, q_value, tendency, significant).
+""",
+)
+def alteration_cooccurrence(
+    study_id: str,
+    genes: list[str] | None = None,
+    alteration_types: list[str] | None = None,
+) -> dict:
+    # Error returns keep the contract shape (study_id + empty genes/pairs) so the
+    # widget recognizes and renders them consistently across host transports.
+    def _error(message: str) -> dict:
+        return {"error": message, "study_id": study_id, "genes": [], "pairs": []}
+
+    try:
+        validated_study = _validate_study_id(study_id)
+    except ValueError as e:
+        return _error(str(e))
+
+    try:
+        return _build_cooccurrence_payload(validated_study, genes, alteration_types)
+    except ValueError as e:
+        return _error(str(e))
+    except Exception as e:
+        logger.error("alteration_cooccurrence error: %s", e)
+        return _error(f"Unexpected error computing co-occurrence: {e}")
+
+
+# --- Generic chart UI apps (pie / bar / line) -------------------------------
+#
+# Unlike the survival/oncoprint apps, these do NOT query the database. The caller
+# (the model) supplies the data to plot directly, so the tools only validate and
+# normalize it into each widget's data contract. That makes them generic
+# visualization primitives the model can point at any data it already has (for
+# example, counts it computed from another cBioPortal tool).
+
+# Caller-supplied data is clamped so payloads and the rendered widget stay bounded.
+MAX_CHART_SLICES = 50
+MAX_CHART_CATEGORIES = 50
+MAX_CHART_SERIES = 12
+MAX_CHART_POINTS = 500
+
+# Colors accepted from callers for chart elements. Restricted to a safe subset
+# (hex, rgb()/rgba(), or a basic CSS color name) because the widget assigns them
+# to SVG fill attributes; anything else is dropped so a caller-supplied string
+# cannot inject styling or markup.
+_HEX_COLOR_RE = re.compile(r"^#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$")
+_RGB_COLOR_RE = re.compile(
+    r"^rgba?\(\s*\d{1,3}\s*,\s*\d{1,3}\s*,\s*\d{1,3}\s*(?:,\s*(?:0|1|0?\.\d+)\s*)?\)$"
+)
+_CSS_COLOR_NAMES = frozenset(
+    {
+        "black", "white", "red", "green", "blue", "yellow", "orange", "purple",
+        "pink", "brown", "gray", "grey", "cyan", "magenta", "teal", "navy",
+        "olive", "maroon", "lime", "aqua", "fuchsia", "silver", "gold", "indigo",
+        "violet", "coral", "salmon", "khaki", "crimson", "turquoise", "tomato",
+        "steelblue", "seagreen", "darkorange", "transparent",
+    }
+)
+
+
+def _coerce_number(value) -> float | None:
+    """Best-effort float coercion; returns None for non-numeric/NaN/inf/bool."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        f = float(value)
+    elif isinstance(value, str):
+        try:
+            f = float(value.strip())
+        except ValueError:
+            return None
+    else:
+        return None
+    if f != f or f == float("inf") or f == float("-inf"):  # NaN / ±inf
+        return None
+    return f
+
+
+def _label_of(value) -> str:
+    """String label for an x value; integer-valued floats render without a decimal
+    (so a numeric x forced to categorical matches the numeric axis formatting)."""
+    if isinstance(value, bool):
+        return str(value)
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)
+
+
+def _safe_color(value) -> str | None:
+    """Return a sanitized color string, or None if missing/unrecognized."""
+    if not isinstance(value, str):
+        return None
+    c = value.strip()
+    if not c:
+        return None
+    if _HEX_COLOR_RE.match(c) or _RGB_COLOR_RE.match(c):
+        return c
+    if c.lower() in _CSS_COLOR_NAMES:
+        return c.lower()
+    return None
+
+
+def _clamp_seq(seq: list, limit: int, warnings: list, noun: str) -> list:
+    """Truncate seq to limit, recording a warning when truncation happens."""
+    if len(seq) > limit:
+        warnings.append(f"Showing the first {limit} {noun} of {len(seq)}.")
+        return seq[:limit]
+    return seq
+
+
+def _opt_str(value) -> str | None:
+    """Normalize an optional text field: non-empty string or None."""
+    if value is None:
+        return None
+    s = str(value)
+    return s if s else None
+
+
+def _build_pie_payload(
+    slices: list,
+    title=None,
+    subtitle=None,
+    donut: bool = False,
+    show_values: bool = True,
+    show_percent: bool = True,
+) -> dict:
+    """Normalize caller-supplied slices into the pie widget's data contract."""
+    if not isinstance(slices, list) or not slices:
+        raise ValueError("pie_chart requires a non-empty 'slices' list.")
+
+    warnings: list = []
+    slices = _clamp_seq(slices, MAX_CHART_SLICES, warnings, "slices")
+
+    clean: list = []
+    for i, s in enumerate(slices):
+        if not isinstance(s, dict):
+            raise ValueError(f"slices[{i}] must be an object with 'label' and 'value'.")
+        label = s.get("label")
+        label = str(label) if label is not None else f"Slice {i + 1}"
+        value = _coerce_number(s.get("value"))
+        if value is None:
+            warnings.append(f"Dropped slice '{label}' (non-numeric value).")
+            continue
+        if value < 0:
+            warnings.append(f"Dropped slice '{label}' (negative value).")
+            continue
+        item = {"label": label, "value": value}
+        color = _safe_color(s.get("color"))
+        if color:
+            item["color"] = color
+        elif s.get("color") is not None:
+            warnings.append(f"Ignored unrecognized color for slice '{label}'.")
+        clean.append(item)
+
+    if not clean:
+        raise ValueError("pie_chart: no valid slices after parsing values.")
+
+    return {
+        "kind": "pie",
+        "title": _opt_str(title),
+        "subtitle": _opt_str(subtitle),
+        "donut": bool(donut),
+        "show_values": bool(show_values),
+        "show_percent": bool(show_percent),
+        "slices": clean,
+        "total": sum(item["value"] for item in clean),
+        "warnings": warnings,
+    }
+
+
+def _build_bar_payload(
+    categories: list,
+    series: list,
+    title=None,
+    subtitle=None,
+    x_label=None,
+    y_label=None,
+    orientation: str = "vertical",
+    stacked: bool = False,
+    show_values: bool = False,
+) -> dict:
+    """Normalize caller-supplied categories/series into the bar widget's contract."""
+    if not isinstance(categories, list) or not categories:
+        raise ValueError("bar_chart requires a non-empty 'categories' list.")
+    if not isinstance(series, list) or not series:
+        raise ValueError("bar_chart requires a non-empty 'series' list.")
+    orientation = (orientation or "vertical").lower()
+    if orientation not in ("vertical", "horizontal"):
+        raise ValueError("bar_chart 'orientation' must be 'vertical' or 'horizontal'.")
+
+    warnings: list = []
+    categories = [
+        str(c) for c in _clamp_seq(categories, MAX_CHART_CATEGORIES, warnings, "categories")
+    ]
+    series = _clamp_seq(series, MAX_CHART_SERIES, warnings, "series")
+    n = len(categories)
+
+    clean_series: list = []
+    for i, s in enumerate(series):
+        if not isinstance(s, dict):
+            raise ValueError(f"series[{i}] must be an object with 'name' and 'values'.")
+        name = s.get("name")
+        name = str(name) if name is not None else f"Series {i + 1}"
+        raw_values = s.get("values")
+        if not isinstance(raw_values, list):
+            raise ValueError(f"series '{name}' must have a 'values' list.")
+        coerced = [_coerce_number(v) for v in raw_values]
+        if any(v is None for v in coerced):
+            warnings.append(f"Series '{name}': some non-numeric values replaced with 0.")
+        values = [v if v is not None else 0.0 for v in coerced]
+        if len(values) < n:
+            warnings.append(f"Series '{name}' padded with zeros to {n} categories.")
+            values = values + [0.0] * (n - len(values))
+        elif len(values) > n:
+            warnings.append(f"Series '{name}' truncated to {n} categories.")
+            values = values[:n]
+        item = {"name": name, "values": values}
+        color = _safe_color(s.get("color"))
+        if color:
+            item["color"] = color
+        elif s.get("color") is not None:
+            warnings.append(f"Ignored unrecognized color for series '{name}'.")
+        clean_series.append(item)
+
+    return {
+        "kind": "bar",
+        "title": _opt_str(title),
+        "subtitle": _opt_str(subtitle),
+        "x_label": _opt_str(x_label),
+        "y_label": _opt_str(y_label),
+        "orientation": orientation,
+        "stacked": bool(stacked),
+        "show_values": bool(show_values),
+        "categories": categories,
+        "series": clean_series,
+        "warnings": warnings,
+    }
+
+
+def _build_line_payload(
+    series: list,
+    x=None,
+    title=None,
+    subtitle=None,
+    x_label=None,
+    y_label=None,
+    markers: bool = True,
+    smooth: bool = False,
+) -> dict:
+    """Normalize caller-supplied series into the line widget's data contract.
+
+    Each series carries its own x; a shared ``x`` fills in for series that omit
+    one, and point indices are the final fallback. If any x is non-numeric the
+    whole chart is treated as categorical (all x coerced to strings).
+    """
+    if not isinstance(series, list) or not series:
+        raise ValueError("line_chart requires a non-empty 'series' list.")
+
+    warnings: list = []
+    series = _clamp_seq(series, MAX_CHART_SERIES, warnings, "series")
+    shared_x = x if isinstance(x, list) else None
+
+    clean_series: list = []
+    all_numeric = True
+    for i, s in enumerate(series):
+        if not isinstance(s, dict):
+            raise ValueError(f"series[{i}] must be an object with a 'y' list.")
+        name = s.get("name")
+        name = str(name) if name is not None else f"Series {i + 1}"
+        raw_y = s.get("y")
+        if not isinstance(raw_y, list) or not raw_y:
+            raise ValueError(f"series '{name}' must have a non-empty 'y' list.")
+        coerced_y = [_coerce_number(v) for v in raw_y]
+        if any(v is None for v in coerced_y):
+            warnings.append(f"Series '{name}': some non-numeric y values replaced with 0.")
+        y = [v if v is not None else 0.0 for v in coerced_y]
+        y = _clamp_seq(y, MAX_CHART_POINTS, warnings, "points")
+
+        raw_x = s.get("x")
+        x_vals = raw_x if isinstance(raw_x, list) else shared_x
+        if isinstance(x_vals, list):
+            if len(x_vals) < len(y):
+                warnings.append(f"Series '{name}': x shorter than y; remainder filled by index.")
+                x_vals = list(x_vals) + list(range(len(x_vals), len(y)))
+            elif len(x_vals) > len(y):
+                x_vals = x_vals[: len(y)]
+            coerced_x = [_coerce_number(v) for v in x_vals]
+            if all(v is not None for v in coerced_x):
+                out_x = coerced_x
+            else:
+                out_x = [_label_of(v) for v in x_vals]
+                all_numeric = False
+        else:
+            out_x = list(range(len(y)))
+
+        item = {"name": name, "x": out_x, "y": y}
+        color = _safe_color(s.get("color"))
+        if color:
+            item["color"] = color
+        elif s.get("color") is not None:
+            warnings.append(f"Ignored unrecognized color for series '{name}'.")
+        clean_series.append(item)
+
+    if not all_numeric:
+        for item in clean_series:
+            item["x"] = [_label_of(v) for v in item["x"]]
+
+    return {
+        "kind": "line",
+        "title": _opt_str(title),
+        "subtitle": _opt_str(subtitle),
+        "x_label": _opt_str(x_label),
+        "y_label": _opt_str(y_label),
+        "markers": bool(markers),
+        "smooth": bool(smooth),
+        "x_is_numeric": all_numeric,
+        "series": clean_series,
+        "warnings": warnings,
+    }
+
+
+@mcp.resource(
+    uri=ui.PIE_UI_URI,
+    mime_type=UI_MIME_TYPE,
+    name="Pie Chart Widget",
+    description="Self-contained HTML widget that renders a pie or donut chart.",
+)
+def pie_chart_widget() -> str:
+    return ui.load_widget("charts.html")
+
+
+@mcp.resource(
+    uri=ui.BAR_UI_URI,
+    mime_type=UI_MIME_TYPE,
+    name="Bar Chart Widget",
+    description="Self-contained HTML widget that renders a bar chart.",
+)
+def bar_chart_widget() -> str:
+    return ui.load_widget("charts.html")
+
+
+@mcp.resource(
+    uri=ui.LINE_UI_URI,
+    mime_type=UI_MIME_TYPE,
+    name="Line Chart Widget",
+    description="Self-contained HTML widget that renders a line chart.",
+)
+def line_chart_widget() -> str:
+    return ui.load_widget("charts.html")
+
+
+@mcp.tool(
+    app=ui.pie_chart_app_config(),
+    description="""
+    Render a generic pie (or donut) chart from data you supply.
+
+    Generic visualization tool: it does NOT query cBioPortal. Pass the values you
+    want to plot (e.g. counts you already computed) and the host renders an
+    interactive pie chart; the same data is also returned as structured JSON.
+
+    Args:
+        slices: The wedges, as a list of objects, e.g.
+                [{"label": "Missense", "value": 42, "color": "#2e8b57"},
+                 {"label": "Truncating", "value": 18}].
+                "value" must be a non-negative number; "color" is optional (hex
+                like "#2e8b57", "rgb(...)", or a basic CSS color name).
+        title: Optional chart title.
+        subtitle: Optional secondary line under the title.
+        donut: Render as a donut (hole in the middle) instead of a full pie.
+        show_values: Show each slice's raw value in the legend (default True).
+        show_percent: Show each slice's percentage (default True).
+
+    Returns:
+        Structured JSON: {kind, title, slices:[{label,value,color?}], total, ...}.
+""",
+)
+def pie_chart(
+    slices: list,
+    title: str | None = None,
+    subtitle: str | None = None,
+    donut: bool = False,
+    show_values: bool = True,
+    show_percent: bool = True,
+) -> dict:
+    def _error(message: str) -> dict:
+        return {"error": message, "kind": "pie", "slices": []}
+
+    try:
+        return _build_pie_payload(
+            slices=slices,
+            title=title,
+            subtitle=subtitle,
+            donut=donut,
+            show_values=show_values,
+            show_percent=show_percent,
+        )
+    except ValueError as e:
+        return _error(str(e))
+    except Exception as e:
+        logger.error("pie_chart error: %s", e)
+        return _error(f"Unexpected error building pie chart: {e}")
+
+
+@mcp.tool(
+    app=ui.bar_chart_app_config(),
+    description="""
+    Render a generic bar chart from data you supply.
+
+    Generic visualization tool: it does NOT query cBioPortal. Supports one or
+    several series (grouped or stacked), vertical or horizontal bars.
+
+    Args:
+        categories: X-axis category labels, e.g. ["TP53", "KRAS", "PIK3CA"].
+        series: One or more series, as a list of objects, e.g.
+                [{"name": "Mutated %", "values": [40, 25, 18], "color": "#1f77b4"}].
+                Each "values" list lines up with "categories" (shorter/longer
+                lists are padded with zeros / truncated). "color" is optional.
+        title: Optional chart title.
+        subtitle: Optional secondary line under the title.
+        x_label: Optional x-axis label.
+        y_label: Optional y-axis label.
+        orientation: "vertical" (default) or "horizontal".
+        stacked: Stack series instead of grouping them side by side.
+        show_values: Draw the numeric value on each bar (default False).
+
+    Returns:
+        Structured JSON: {kind, categories, series:[{name,values,color?}], ...}.
+""",
+)
+def bar_chart(
+    categories: list,
+    series: list,
+    title: str | None = None,
+    subtitle: str | None = None,
+    x_label: str | None = None,
+    y_label: str | None = None,
+    orientation: str = "vertical",
+    stacked: bool = False,
+    show_values: bool = False,
+) -> dict:
+    def _error(message: str) -> dict:
+        return {"error": message, "kind": "bar", "categories": [], "series": []}
+
+    try:
+        return _build_bar_payload(
+            categories=categories,
+            series=series,
+            title=title,
+            subtitle=subtitle,
+            x_label=x_label,
+            y_label=y_label,
+            orientation=orientation,
+            stacked=stacked,
+            show_values=show_values,
+        )
+    except ValueError as e:
+        return _error(str(e))
+    except Exception as e:
+        logger.error("bar_chart error: %s", e)
+        return _error(f"Unexpected error building bar chart: {e}")
+
+
+@mcp.tool(
+    app=ui.line_chart_app_config(),
+    description="""
+    Render a generic line chart from data you supply.
+
+    Generic visualization tool: it does NOT query cBioPortal. Supports one or
+    several lines over a shared or per-series x-axis (numeric or categorical).
+
+    Args:
+        series: One or more lines, as a list of objects, e.g.
+                [{"name": "OS", "y": [100, 82, 61, 40], "x": [0, 12, 24, 36],
+                  "color": "#1f77b4"}].
+                "y" is required (numbers). "x" is optional per series; if omitted
+                the shared "x" (below) is used, else point indices 0,1,2,...
+                x values may be numbers (e.g. months) or strings (categories).
+        x: Optional shared x-axis values for series that don't supply their own,
+           e.g. [0, 12, 24, 36] or ["Q1", "Q2", "Q3"].
+        title: Optional chart title.
+        subtitle: Optional secondary line under the title.
+        x_label: Optional x-axis label.
+        y_label: Optional y-axis label.
+        markers: Draw a marker at each data point (default True).
+        smooth: Draw smoothed/curved lines instead of straight segments.
+
+    Returns:
+        Structured JSON: {kind, series:[{name,x,y,color?}], x_is_numeric, ...}.
+""",
+)
+def line_chart(
+    series: list,
+    x: list | None = None,
+    title: str | None = None,
+    subtitle: str | None = None,
+    x_label: str | None = None,
+    y_label: str | None = None,
+    markers: bool = True,
+    smooth: bool = False,
+) -> dict:
+    def _error(message: str) -> dict:
+        return {"error": message, "kind": "line", "series": []}
+
+    try:
+        return _build_line_payload(
+            series=series,
+            x=x,
+            title=title,
+            subtitle=subtitle,
+            x_label=x_label,
+            y_label=y_label,
+            markers=markers,
+            smooth=smooth,
+        )
+    except ValueError as e:
+        return _error(str(e))
+    except Exception as e:
+        logger.error("line_chart error: %s", e)
+        return _error(f"Unexpected error building line chart: {e}")
 
 
 if __name__ == "__main__":
