@@ -1,6 +1,19 @@
 #!/usr/bin/env python3
 """cBioPortal MCP Server - FastMCP implementation."""
 
+import os
+
+from ddtrace.llmobs import LLMObs
+
+_dd_api_key = os.getenv("DD_API_KEY")
+if _dd_api_key:
+    LLMObs.enable(
+        ml_app=os.getenv("DD_LLMOBS_ML_APP", "cbioportal-mcp"),
+        api_key=_dd_api_key,
+        site=os.getenv("DD_SITE", "datadoghq.com"),
+        agentless_enabled=True,
+    )
+
 import json
 import logging
 import re
@@ -217,16 +230,46 @@ def _list_available_study_guides() -> list[str]:
     try:
         resources_path = _get_resources_path()
         study_guides_path = resources_path / "study-guides"
-        # Both pathlib.Path and importlib.resources Traversable expose iterdir()/name
-        return [
-            f.name.removesuffix(".md")
-            for f in study_guides_path.iterdir()
-            if f.name.endswith(".md") and not f.name.startswith("_")
-        ]
+        # For Traversable (importlib.resources), iterate contents
+        # For Path, use glob
+        if hasattr(study_guides_path, 'iterdir'):
+            # It's a Path-like object
+            return [f.stem for f in study_guides_path.iterdir()
+                    if f.name.endswith('.md') and not f.name.startswith('_')]
+        else:
+            # It's a Traversable from importlib.resources
+            return [f.name.removesuffix('.md') for f in study_guides_path.iterdir()
+                    if f.name.endswith('.md') and not f.name.startswith('_')]
     except Exception as e:
         logger.error(f"Error listing study guides: {e}")
         return []
 
+def _load_general_guide(name: str) -> str | None:
+    """Load a general guide from the guides/ directory if it exists."""
+    try:
+        resources_path = _get_resources_path()
+        guide_file = resources_path / "guides" / f"{name}.md"
+        return guide_file.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except Exception as e:
+        logger.error(f"Error loading general guide {name}: {e}")
+        return None
+
+def _list_available_general_guides() -> list[str]:
+    """List general guide names available in resources/guides/."""
+    try:
+        resources_path = _get_resources_path()
+        guides_path = resources_path / "guides"
+        if hasattr(guides_path, 'iterdir'):
+            return [f.stem for f in guides_path.iterdir()
+                    if f.name.endswith('.md') and not f.name.startswith('_')]
+        else:
+            return [f.name.removesuffix('.md') for f in guides_path.iterdir()
+                    if f.name.endswith('.md') and not f.name.startswith('_')]
+    except Exception as e:
+        logger.error(f"Error listing general guides: {e}")
+        return []
 
 @lru_cache(maxsize=1)
 def _load_oncotree_data() -> list[dict]:
@@ -1446,6 +1489,11 @@ def main():
         logger.critical("❌ ClickHouse permission check failed: %s", e)
         sys.exit(2)
 
+    # Set up OpenTelemetry → Datadog agent (no-op if env vars not set or agent unreachable)
+    provider = configure_telemetry()
+    if provider is not None:
+        mcp.add_middleware(TelemetryMiddleware())
+
     transport = config.mcp_server_transport
 
     try:
@@ -1454,7 +1502,24 @@ def main():
         if transport in http_transports:
             # Use the configured bind host (defaults to 127.0.0.1, can be set to 0.0.0.0)
             # and bind port (defaults to 8000)
-            mcp.run(transport=transport, host=config.mcp_bind_host, port=config.mcp_bind_port)
+            run_kwargs = {
+                "transport": transport,
+                "host": config.mcp_bind_host,
+                "port": config.mcp_bind_port,
+            }
+            if config.mcp_http_path:
+                run_kwargs["path"] = config.mcp_http_path
+            # Behind a TLS-terminating reverse proxy, uvicorn must trust
+            # X-Forwarded-Proto or the trailing-slash 307 on /mcp will
+            # downgrade https → http and strict clients (e.g. Claude
+            # Desktop) refuse to follow. Opt-in via env so direct
+            # deployments aren't asked to trust spoofed headers.
+            if config.mcp_forwarded_allow_ips:
+                run_kwargs["uvicorn_config"] = {
+                    "proxy_headers": True,
+                    "forwarded_allow_ips": config.mcp_forwarded_allow_ips,
+                }
+            mcp.run(**run_kwargs)
         else:
             # For stdio transport, no host or port is needed
             mcp.run(transport=transport)
@@ -1502,6 +1567,14 @@ def _statistical_tests_guide_text() -> str:
 def _gene_expression_guide_text() -> str:
     return _load_resource("gene-expression-guide.md")
 
+def _external_resources_guide_text() -> str:
+    return _load_resource("external-resources-guide.md")
+
+def _gene_resolution_guide_text() -> str:
+    return _load_resource("gene-resolution-guide.md")
+
+def _study_resolution_guide_text() -> str:
+    return _load_resource("study-resolution-guide.md")
 
 # --- MCP resources (decorator registers them) --------------------------------
 @mcp.resource("cbioportal://mutation-frequency-guide")
@@ -1543,6 +1616,18 @@ def statistical_tests_guide() -> str:
 def gene_expression_guide() -> str:
     return _gene_expression_guide_text()
 
+@mcp.resource("cbioportal://external-resources-guide")
+def external_resources_guide() -> str:
+    return _external_resources_guide_text()
+
+@mcp.resource("cbioportal://gene-resolution-guide")
+def gene_resolution_guide() -> str:
+    return _gene_resolution_guide_text()
+
+@mcp.resource("cbioportal://study-resolution-guide")
+def study_resolution_guide() -> str:
+    return _study_resolution_guide_text()
+
 
 @mcp.tool(
     description="""
@@ -1552,6 +1637,9 @@ def gene_expression_guide() -> str:
     - cbioportal://mutation-frequency-guide - Gene mutation frequency calculations with proper denominators
     - cbioportal://clinical-data-guide - Patient vs sample-level clinical data queries
     - cbioportal://sample-filtering-guide - Study and sample type filtering strategies
+    - cbioportal://external-resources-guide - External linked resources such as imaging viewers
+    - cbioportal://gene-resolution-guide - Ambiguous gene symbols and aliases
+    - cbioportal://study-resolution-guide - Missing studies, external portals, and substitute cohorts
     - cbioportal://common-pitfalls - Common query mistakes and how to avoid them
 
     Returns:
@@ -1681,10 +1769,22 @@ def list_guides() -> list[dict]:
 
     Call this tool first to see what guides are available before answering complex queries.
 
-    Note: For study-specific guides, use the `get_study_guide(study_id)` tool instead.
-    Use `list_studies(search)` to find available studies.
+    Includes:
+      - Core guides baked into the MCP image (mutation-frequency, clinical-data, etc.)
+      - Deployment-specific general guides under resources/guides/, accessed via
+        get_general_guide(name). Use these for anything that's specific to the
+        local deployment (e.g. data-source provenance, institutional policies).
+      - Study-specific guides under resources/study-guides/, accessed via
+        get_study_guide(study_id).
     """
-    return [
+    deployment_guides = [
+        {
+            "uri": f"cbioportal://general-guide/{name}",
+            "description": f"Deployment-specific guide — call get_general_guide('{name}')"
+        }
+        for name in _list_available_general_guides()
+    ]
+    return deployment_guides + [
         {
             "uri": "cbioportal://mutation-frequency-guide",
             "description": "Comprehensive guide for calculating gene mutation frequencies with gene-specific profiling denominators",
@@ -1718,6 +1818,18 @@ def list_guides() -> list[dict]:
             "description": "Gene expression / copy-number / methylation analysis. Covers genetic_alteration_derived, profile_type discovery, and the gene_pair_coexpression view for Spearman correlation between two genes",
         },
         {
+            "uri": "cbioportal://external-resources-guide",
+            "description": "Guide for finding external linked resources such as imaging, pathology, Minerva, HTAN, or other resource_* table links before declaring data unavailable"
+        },
+        {
+            "uri": "cbioportal://gene-resolution-guide",
+            "description": "Guide for resolving ambiguous gene symbols, aliases, gene families, and shorthand such as CD3 before querying expression or alteration data"
+        },
+        {
+            "uri": "cbioportal://study-resolution-guide",
+            "description": "Guide for resolving requested studies, avoiding silent substitute cohorts, and redirecting to known external cBioPortal instances when data is not in this deployment"
+        },
+        {
             "uri": "cbioportal://study-guide/{study_id}",
             "description": "Dynamic study-specific guide - use get_study_guide(study_id) tool to generate",
         },
@@ -1743,6 +1855,9 @@ def read_guide(uri: str) -> str:
         "cbioportal://faq-guide": _faq_guide_text(),
         "cbioportal://statistical-tests-guide": _statistical_tests_guide_text(),
         "cbioportal://gene-expression-guide": _gene_expression_guide_text(),
+        "cbioportal://external-resources-guide": _external_resources_guide_text(),
+        "cbioportal://gene-resolution-guide": _gene_resolution_guide_text(),
+        "cbioportal://study-resolution-guide": _study_resolution_guide_text()
     }
 
     if uri not in resources:
@@ -1754,6 +1869,33 @@ def read_guide(uri: str) -> str:
         )
 
     return resources[uri]
+
+
+@mcp.tool()
+def get_general_guide(name: str) -> str:
+    """Get a deployment-specific general guide by name.
+
+    Reads `resources/guides/{name}.md`. Deployments can drop additional
+    `.md` files into that directory (or replace its contents) to publish
+    guides that aren't appropriate for the upstream image — e.g. local
+    data governance, custom tool integrations, or deployment-specific
+    data sources.
+
+    Call list_guides() first to see what's available in this deployment.
+
+    Args:
+        name: The guide name without the .md extension (e.g. "cdsi-info").
+    """
+    if not name or '/' in name or '\\' in name or name.startswith('.'):
+        return f"Error: invalid guide name '{name}'"
+    content = _load_general_guide(name)
+    if content is None:
+        available = _list_available_general_guides()
+        if available:
+            available_list = "\n".join(f"  - {n}" for n in available)
+            return f"General guide '{name}' not found.\nAvailable:\n{available_list}"
+        return f"General guide '{name}' not found. No deployment-specific guides are configured."
+    return content
 
 
 @mcp.tool()

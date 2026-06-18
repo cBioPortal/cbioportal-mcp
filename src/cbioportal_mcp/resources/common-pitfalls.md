@@ -494,6 +494,106 @@ WHERE attribute_name = 'TUMOR_GRADE' AND cancer_study_identifier = 'brca_tcga';
 
 **Key rule:** Never assume a table or column exists. Always check with `clickhouse_list_tables` and `clickhouse_list_table_columns` first.
 
+### 16. 🚨 SILENT QUERY SUBSTITUTION ("did you mean...")
+
+When the user's wording differs from canonical terminology (e.g. "V600V" looks like "V600E" with a typo, or "point mutation" sounds like "missense"), it is forbidden to silently rewrite the question and answer the rewritten version. Doing so produces an answer that looks confident but is for a different question — the user cannot tell what was changed.
+
+#### ❌ Wrong: silently substitute
+
+> User: *"Find patients in colorectal cancer with the V600V alteration in BRAF"*
+> Agent: *(internally treats this as V600E)* "I found 412 samples with BRAF V600E in colorectal studies..."
+
+> User: *"What is the most prevalent TP53 mutation in uterine cancer that is not a point mutation?"*
+> Agent: *(internally treats "point mutation" = "missense", silently excludes only missense)* "The most prevalent non-missense TP53 mutation is..."
+
+#### ✅ Correct: answer the literal question, flag any normalization
+
+For an unusual-looking variant the user may have typed deliberately:
+- Query for what was asked, literally.
+- If 0 rows come back, **explain *why* zero is the expected answer** before suggesting a likely-intended alternative. For synonymous variants (e.g. BRAF V600V, TP53 R175R), the explanation is: *cBioPortal's mutation tables filter out synonymous (silent) variants in most studies, so 0 hits means "filtered upstream", not "no such variant exists in any patient"*. Then ask: *"Did you mean V600E (the canonical activating variant)? Or would you like me to look for V600V in the studies that do retain synonymous calls?"*
+- If the wording is ambiguous (e.g. "point mutation"), ask the user which definition they meant before querying — do not pick one silently.
+
+#### Mutation-type terminology mapping (use this to disambiguate)
+
+| User says | Canonical definition | `mutation_type` filter |
+|---|---|---|
+| "point mutation" | Any SNV (single-nucleotide variant) — includes missense, nonsense, synonymous, splice-site SNVs | `mutation_type IN ('Missense_Mutation','Nonsense_Mutation','Silent','Splice_Site')` — **but ask the user to confirm scope first** |
+| "missense" | Single amino-acid substitution that changes the protein | `mutation_type = 'Missense_Mutation'` |
+| "nonsense" / "stop-gain" | Premature stop codon | `mutation_type = 'Nonsense_Mutation'` |
+| "synonymous" / "silent" | Nucleotide change with no amino-acid change | `mutation_type = 'Silent'` (**often filtered out of public datasets** — see below) |
+| "splice site" | Mutation in canonical splice acceptor/donor | `mutation_type = 'Splice_Site'` |
+| "frameshift" | Indel changing reading frame | `mutation_type IN ('Frame_Shift_Ins','Frame_Shift_Del')` |
+| "indel" / "in-frame" | In-frame insertion or deletion | `mutation_type IN ('In_Frame_Ins','In_Frame_Del')` |
+| "truncating" | Anything that disrupts the protein early | `mutation_type IN ('Nonsense_Mutation','Frame_Shift_Ins','Frame_Shift_Del','Splice_Site','Nonstop_Mutation')` |
+
+**Synonymous-variant filter.** Most cBioPortal studies drop `Silent` calls during the MAF/import pipeline because they're not biologically interesting and not annotated. A literal query for a synonymous variant (e.g. BRAF V600V) will return 0 rows from almost every study — the correct answer is *"filtered out of the dataset"*, not *"does not exist"*.
+
+**Promoter mutations.** TERT promoter variants (C228T, C250T) are *not* missense — they sit upstream of the coding sequence. Don't search for them with a missense filter, and don't count all `TERT` mutations as promoter mutations. First inspect the study's promoter profiles and available columns. See `mutation-frequency-guide.md` for the canonical pattern.
+
+### 17. 🚨 FLAWED PREMISE OR NONEXISTENT DATA FIELD
+
+If the user's question relies on a premise that conflicts with cBioPortal data or schema, surface that problem before running adjacent analyses.
+
+#### ❌ Wrong: plow forward with adjacent data
+
+> User: *"List expression values for tumors with the heavily discussed MAP2K1 codon 105 driver alteration that changes mRNA stability."*
+> Agent: runs broad MAP2K1 mutation and expression queries, then stitches together a story.
+
+#### ✅ Correct: validate the premise first
+
+> I need to validate the premise first. cBioPortal stores mutations, copy number, expression, methylation, clinical data, and some annotations, but I do not see an mRNA-stability field. I also should not assume a MAP2K1 codon-105 driver alteration exists without confirming it in the mutation data. I can check whether MAP2K1 codon 105 appears in this deployment, then separately retrieve expression values if it does.
+
+Use this pattern when:
+
+- the requested data field is not stored in cBioPortal
+- a named alteration/gene/study is not found
+- the user asserts biology that is not represented in the database
+- the query would require literature knowledge rather than cBioPortal data
+
+Do not query unrelated genes or "helpful" substitutes unless you state why and the user accepts the substitution.
+
+### 18. 🚨 OUT-OF-SCOPE DRIFT AFTER USER PUSHBACK
+
+If you decline a request because it is outside cBioPortal scope, hold that boundary when the user rephrases or pushes gently.
+
+Out of scope:
+
+- interpreting or critiquing external papers
+- creating presentation slides or methods-slide outlines
+- debugging Databricks, PySpark, Bokeh, lifelines, or external application code
+- giving treatment recommendations or drug-safety advice
+
+Correct response shape:
+
+> I can't analyze or critique the paper itself from cBioPortal data. If the paper's cohort is represented in cBioPortal, I can help query that study's mutations, clinical attributes, or treatment records.
+
+For external code failures:
+
+> That error is in an external Databricks/PySpark workflow, not in cBioPortal MCP. I can't debug that pipeline here, but I can help retrieve the cBioPortal data inputs you would need for your analysis.
+
+### 19. 🚨 MISLEADING OUTPUT PROMISES
+
+Do not promise outputs the MCP server cannot produce.
+
+- Kaplan-Meier plot: provide survival rows or summary data and hand off to cBioPortal Survival / R / Python.
+- CSV export: provide a compact table or query; do not claim to create a downloadable file.
+- Large patient-level dumps: summarize and offer a bounded query with `LIMIT`, or point to cBioPortal/DataHub download workflows.
+
+### 20. 🚨 MALFORMED TABLES AND UNCLEAR QUERY ERRORS
+
+When a query returns tabular data, keep columns aligned with values. Prefer JSON or a compact Markdown table generated directly from query column names.
+
+When a complex query fails:
+
+1. Identify the failing part if visible from the error message.
+2. Say which table, join, field, or filter could not be executed.
+3. Offer a smaller stepwise query.
+4. If possible, return partial results and name what is missing.
+
+Example:
+
+> The mutation filter can be run, but the expression-profile join failed because I could not identify a MYC expression profile for this study. I can first list available expression profiles, then intersect mutation-positive samples with expression values.
+
 ## Best Practices Summary
 
 1. **Always use gene-specific denominators** for mutation frequencies
@@ -513,7 +613,10 @@ WHERE attribute_name = 'TUMOR_GRADE' AND cancer_study_identifier = 'brca_tcga';
 15. **Check resource tables before saying "out of scope"** — `resource_sample`, `resource_patient`, `resource_study`, `resource_definition` may have external links
 16. **Always verify schema** — never assume tables or columns exist without checking first
 17. **Never fabricate OncoKB/driver annotations** — check for driver columns first
-18. **Check resource tables before saying "out of scope"** — `resource_sample`, `resource_patient`, `resource_study`, `resource_definition` may have external links
+18. **Never silently rewrite the user's query** — if "point mutation" or "V600V" is ambiguous or unusual, surface the normalization or ask, don't substitute. See pitfall #16.
+19. **Validate flawed premises early** — if the gene, alteration, study, or data field is absent, say so before running adjacent analyses.
+20. **Hold scope boundaries after refusal** — do not provide paper critiques, slide outlines, external pipeline code, or medical advice after user pushback.
+21. **Do not promise unavailable outputs** — provide data/handoffs instead of claiming to create plots, CSV files, or external apps.
 
 ## Validation Checklist
 
@@ -531,3 +634,7 @@ Before trusting your results, ask:
 - [ ] Did I avoid fabricating OncoKB/driver annotations without checking driver columns first?
 - [ ] Before saying "out of scope", did I check `resource_sample`, `resource_patient`, `resource_study`, and `resource_definition` for external links?
 - [ ] Did I verify all tables and columns exist before querying them?
+- [ ] Did I answer the literal question, or did I silently rewrite it? If I normalized a term ("point mutation" → SNV set, "V600V" → V600E), did I surface that to the user?
+- [ ] Did I validate the user's premise before querying adjacent data?
+- [ ] Did I keep scope boundaries after any refusal?
+- [ ] Did I avoid promising plots, downloads, or external-code debugging that this MCP server cannot perform?

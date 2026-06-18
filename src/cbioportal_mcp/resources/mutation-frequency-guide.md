@@ -6,7 +6,30 @@
 - When reporting across multiple studies, show **ranges** (e.g., "TP53 is mutated in 30–60% of samples") rather than a single average
 - **NEVER** sum mutation events across studies to compute an aggregate frequency — this can exceed 100% due to double-counting
 - Warn users that samples may overlap across cohorts (e.g., MSK studies may share patients)
+- **Choose and state the counting unit**: use patient-level frequencies for prevalence/rate questions unless the user explicitly asks for samples; use sample-level frequencies when the user asks about samples.
 - **For "across cancer types" questions**, jump to the [Cross-Cancer-Type Mutation Frequency](#cross-cancer-type-mutation-frequency) section below — there is one correct recipe and several common wrong ones.
+
+## Counting Unit: Samples vs Patients
+
+Before answering any mutation count or frequency question, decide whether the unit is samples or patients and state that choice in the answer.
+
+| User wording | Counting unit |
+|--------------|---------------|
+| "prevalence", "rate", "fraction of patients", "patients with", "how common is" | Patient-level: `COUNT(DISTINCT patient_unique_id)` |
+| "samples", "specimens", "biopsies", sample-level cohort composition | Sample-level: `COUNT(DISTINCT sample_unique_id)` |
+| Ambiguous | Ask, or default to patient-level for prevalence/rate language and say so |
+
+### Cross-study sample-count caveat
+
+When an answer touches more than one study and reports a sample count, prepend a one-line caveat:
+
+> Sample IDs are unique within cBioPortal study prefixes, not guaranteed biological-sample identifiers across studies; overlapping cohorts can count the same patient/sample more than once.
+
+Prefer one of these safer approaches:
+
+- Use a shipped `cancer_study_query_preferences` cohort such as `pan_cancer_tcga` or `all_studies_non_redundant`.
+- Restrict to one named study.
+- Aggregate by `patient_unique_id` when the biological question is patient prevalence.
 
 ## STOP rule: a frequency above 100% means your query is wrong
 
@@ -18,6 +41,62 @@ If your query returns a frequency over 100%, **do not try to debug or explain th
 - **Joining the profiled CTE through `gene_panel` / `gene_panel_list` without a WES branch.** `gene_panel_id = 'WES'` is *not* a row in `gene_panel`, so any inner JOIN through that table silently drops WES-sequenced samples from the denominator while the numerator (from `genomic_event_derived`) still counts their mutations. Always union with `mutation_wes_coverage` (or include WES samples some other way) — see the Cross-Cancer-Type recipe below.
 
 Rewrite the query using one of the canonical patterns below (either single-study or the [Cross-Cancer-Type](#cross-cancer-type-mutation-frequency) recipe). Do **not** loop on diagnostic queries trying to attribute the >100% to "data inconsistencies" — there are none.
+
+## Promoter and Non-Coding Mutation Questions
+
+When the user mentions "promoter", "non-coding", `C228T`, `C250T`, `-124C>T`, `-146C>T`, or "TERT promoter", do not treat the question as "all mutations in the gene."
+
+TERT promoter mutations are a common special case:
+
+- `C228T` corresponds to `-124C>T` in the TERT promoter.
+- `C250T` corresponds to `-146C>T` in the TERT promoter.
+- These are upstream promoter alterations, not protein-coding amino-acid substitutions.
+- They may live in promoter-specific mutation profiles or be flagged differently from coding variants depending on the study.
+
+### Required Workflow
+
+1. Inspect available molecular profiles / columns for the study before querying.
+2. Look for promoter-specific profiles or fields before falling back to `genomic_event_derived`.
+3. If using `genomic_event_derived`, filter to promoter/non-coding records explicitly. Do not report all `TERT` mutation records as promoter mutations.
+4. If the needed promoter fields/profiles are absent in the deployment, say so and do not substitute coding mutations.
+
+Schema exploration pattern:
+
+```sql
+SELECT DISTINCT
+    cancer_study_identifier,
+    genetic_profile_id,
+    genetic_alteration_type,
+    datatype,
+    name
+FROM genetic_profile
+WHERE cancer_study_identifier = 'your_study_id'
+  AND (
+      lower(genetic_profile_id) LIKE '%promoter%'
+      OR lower(name) LIKE '%promoter%'
+  )
+ORDER BY genetic_profile_id;
+```
+
+If promoter data is present, inspect exact mutation fields before counting:
+
+```sql
+SELECT *
+FROM genomic_event_derived
+WHERE cancer_study_identifier = 'your_study_id'
+  AND hugo_gene_symbol = 'TERT'
+LIMIT 20;
+```
+
+Then use only columns that actually encode promoter/non-coding status, genomic position, or the canonical promoter alleles. If no such columns exist, answer that this deployment does not expose enough promoter-specific fields for the requested count.
+
+### Answer Pattern
+
+> I treated this as a promoter-mutation question, not an all-TERT-mutation question. I only counted records from promoter-specific data/fields. Coding TERT mutations are excluded.
+
+If promoter data cannot be identified:
+
+> I found TERT mutation records, but I do not see promoter-specific fields or profiles needed to distinguish C228T/C250T promoter mutations in this deployment. I should not report all TERT mutations as promoter mutations.
 
 ## Cross-Cancer-Type Mutation Frequency
 
@@ -239,9 +318,10 @@ For accurate gene mutation frequency calculations, you must use gene-specific pr
 
 ### Key Rules:
 - **DO NOT use genomic_event_derived for total sample counts** - this gives study-wide counts, not gene-specific
-- Report **sample frequencies only** for accurate, memory-efficient analysis
+- Report **the requested counting unit**: patient-level for prevalence/rate questions, sample-level only when the user asks for samples or specimens
 - **Each gene has different profiling coverage** - denominators vary by gene
 - Sample frequency: numberOfAlteredSamplesOnPanel / gene_specific_profiled_samples
+- Patient frequency: altered patients with at least one profiled altered sample / patients with at least one sample profiled for the gene
 - **CRITICAL: Each gene will have different profiling coverage** (e.g., TP53 might be profiled in 25,040 samples, MUC16 in 23,000)
 
 ## Recommended Query Pattern
@@ -370,7 +450,7 @@ ORDER BY sample_frequency_percent DESC;
 - **Off-panel filtering**: Use `off_panel = 0` to exclude mutations not covered by the gene panel
 - **Mutation status filtering**: Exclude `UNCALLED` mutations for accurate counts
 - **Study-specific analysis**: Always filter by specific cancer study for consistent results
-- **Memory efficiency**: Sample-level analysis is more memory-efficient than patient-level for large datasets
+- **Counting unit**: Patient-level prevalence is usually more clinically meaningful than sample-level prevalence because patients can have multiple samples
 - **Be efficient**: Minimize database calls where possible
 
 ## Copy Number Alteration (CNA) Queries
