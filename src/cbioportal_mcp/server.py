@@ -96,6 +96,30 @@ def _sanitize_search_term(search: str) -> str:
     sanitized = sanitized.replace("_", "\\_")
     return sanitized
 
+def _sanitize_sql_literal(value: str) -> str:
+    """Escape a string for use inside a single-quoted SQL literal."""
+    return value.replace("'", "''")
+
+def _split_search_terms(search: str, defaults: list[str] | None = None) -> list[str]:
+    """Split a user search string into bounded SQL LIKE terms."""
+    if not search:
+        return defaults or []
+    terms = [term.strip() for term in re.split(r"[,;]", search) if term.strip()]
+    if len(terms) == 1:
+        terms = [term for term in re.split(r"\s+", search) if term.strip()]
+    return terms[:10]
+
+def _like_any_expression(columns: list[str], terms: list[str]) -> str:
+    """Build a case-insensitive LIKE-any expression for already-trusted column names."""
+    if not terms:
+        return "1 = 1"
+    predicates = []
+    for term in terms:
+        safe_term = _sanitize_sql_literal(term.lower())
+        for column in columns:
+            predicates.append(f"lower({column}) LIKE '%{safe_term}%'")
+    return "(" + " OR ".join(predicates) + ")"
+
 # Resource loading using importlib.resources for proper package support
 def _get_resources_path() -> Path:
     """Get the resources directory path, supporting both installed packages and dev mode."""
@@ -481,6 +505,227 @@ def zip_select_query_result(ch_query_result) -> list[dict]:
     for row in rows:
         result.append({k: v for k, v in zip(columns, row) if v not in ("", None)})
     return result
+
+
+def _resolve_gene_symbol_impl(term: str, limit: int = 25) -> dict:
+    """Resolve a user-provided gene term to exact, prefix, and contains matches."""
+    query_term = term.strip()
+    if not query_term:
+        return {"error": "term cannot be empty"}
+
+    safe_limit = max(1, min(int(limit), MAX_LIST_LIMIT))
+    safe_term = _sanitize_sql_literal(query_term.upper())
+    exact_query = f"""
+        SELECT DISTINCT
+            hugo_gene_symbol,
+            entrez_gene_id
+        FROM gene
+        WHERE upper(hugo_gene_symbol) = '{safe_term}'
+        ORDER BY hugo_gene_symbol
+        LIMIT {safe_limit}
+    """
+    prefix_query = f"""
+        SELECT DISTINCT
+            hugo_gene_symbol,
+            entrez_gene_id
+        FROM gene
+        WHERE upper(hugo_gene_symbol) LIKE '{safe_term}%'
+          AND upper(hugo_gene_symbol) != '{safe_term}'
+        ORDER BY hugo_gene_symbol
+        LIMIT {safe_limit}
+    """
+    contains_query = f"""
+        SELECT DISTINCT
+            hugo_gene_symbol,
+            entrez_gene_id
+        FROM gene
+        WHERE upper(hugo_gene_symbol) LIKE '%{safe_term}%'
+          AND upper(hugo_gene_symbol) NOT LIKE '{safe_term}%'
+        ORDER BY hugo_gene_symbol
+        LIMIT {safe_limit}
+    """
+
+    exact_matches = run_select_query(exact_query)
+    prefix_matches = run_select_query(prefix_query)
+    contains_matches = run_select_query(contains_query)
+
+    is_ambiguous = len(exact_matches) != 1 or bool(prefix_matches)
+    if exact_matches and not prefix_matches:
+        recommendation = (
+            f"Use {exact_matches[0].get('hugo_gene_symbol')} as the resolved HUGO symbol."
+        )
+    elif exact_matches and prefix_matches:
+        recommendation = (
+            "The term is an exact HUGO symbol but also prefixes other genes; ask whether the "
+            "user means the exact gene or a gene family/signature."
+        )
+    elif prefix_matches:
+        recommendation = (
+            "No exact HUGO symbol matched. Ask the user to choose from the prefix matches, "
+            "or analyze each listed gene separately if they asked for a family."
+        )
+    elif contains_matches:
+        recommendation = (
+            "No exact or prefix HUGO symbol matched. Treat contains matches as suggestions, "
+            "not as validated substitutions."
+        )
+    else:
+        recommendation = "No HUGO symbol matches were found in the gene table."
+
+    return {
+        "query_term": query_term,
+        "is_ambiguous": is_ambiguous,
+        "exact_matches": exact_matches,
+        "prefix_matches": prefix_matches,
+        "contains_matches": contains_matches,
+        "recommendation": recommendation,
+    }
+
+
+def _run_external_resource_query(scope: str, query: str) -> dict:
+    try:
+        return {"scope": scope, "rows": run_select_query(query)}
+    except Exception as e:
+        logger.info("find_external_resources %s query failed: %s", scope, e)
+        return {"scope": scope, "error_message": str(e), "rows": []}
+
+
+def _find_external_resources_impl(
+    search: str = "imaging Minerva pathology histology radiology",
+    study_search: str | None = None,
+    limit: int = 25,
+) -> dict:
+    """Find external resources linked from study/sample/patient resource tables."""
+    terms = _split_search_terms(
+        search,
+        defaults=["imaging", "minerva", "pathology", "histology", "radiology"],
+    )
+    safe_limit = max(1, min(int(limit), MAX_LIST_LIMIT))
+    resource_filter = _like_any_expression(
+        ["rd.display_name", "rd.description", "rd.resource_type"],
+        terms,
+    )
+    study_filter = ""
+    if study_search:
+        study_terms = _split_search_terms(study_search)
+        study_filter = " AND " + _like_any_expression(
+            ["cs.cancer_study_identifier", "cs.name", "cs.description"],
+            study_terms,
+        )
+
+    study_query = f"""
+        SELECT
+            'study' AS scope,
+            rd.resource_id,
+            rd.display_name,
+            rd.description,
+            rd.resource_type,
+            cs.cancer_study_identifier,
+            cs.name AS study_name,
+            rs.url
+        FROM resource_study rs
+        JOIN resource_definition rd ON rs.resource_id = rd.resource_id
+        JOIN cancer_study cs ON rs.internal_id = cs.cancer_study_id
+        WHERE {resource_filter}
+        {study_filter}
+        ORDER BY cs.cancer_study_identifier, rd.display_name
+        LIMIT {safe_limit}
+    """
+    sample_query = f"""
+        SELECT
+            'sample' AS scope,
+            rd.resource_id,
+            rd.display_name,
+            rd.description,
+            rd.resource_type,
+            cs.cancer_study_identifier,
+            cs.name AS study_name,
+            s.stable_id AS sample_id,
+            rs.url
+        FROM resource_sample rs
+        JOIN resource_definition rd ON rs.resource_id = rd.resource_id
+        JOIN sample s ON rs.internal_id = s.internal_id
+        JOIN patient p ON s.patient_id = p.internal_id
+        JOIN cancer_study cs ON p.cancer_study_id = cs.cancer_study_id
+        WHERE {resource_filter}
+        {study_filter}
+        ORDER BY cs.cancer_study_identifier, rd.display_name, s.stable_id
+        LIMIT {safe_limit}
+    """
+    patient_query = f"""
+        SELECT
+            'patient' AS scope,
+            rd.resource_id,
+            rd.display_name,
+            rd.description,
+            rd.resource_type,
+            cs.cancer_study_identifier,
+            cs.name AS study_name,
+            p.stable_id AS patient_id,
+            rp.url
+        FROM resource_patient rp
+        JOIN resource_definition rd ON rp.resource_id = rd.resource_id
+        JOIN patient p ON rp.internal_id = p.internal_id
+        JOIN cancer_study cs ON p.cancer_study_id = cs.cancer_study_id
+        WHERE {resource_filter}
+        {study_filter}
+        ORDER BY cs.cancer_study_identifier, rd.display_name, p.stable_id
+        LIMIT {safe_limit}
+    """
+
+    sections = [
+        _run_external_resource_query("study", study_query),
+        _run_external_resource_query("sample", sample_query),
+        _run_external_resource_query("patient", patient_query),
+    ]
+    total_rows = sum(len(section.get("rows", [])) for section in sections)
+    return {
+        "search_terms": terms,
+        "study_search": study_search,
+        "total_rows": total_rows,
+        "sections": sections,
+        "note": (
+            "Rows are external links stored by cBioPortal; they do not mean raw image "
+            "or external files are stored directly in cBioPortal tables."
+        ),
+    }
+
+
+@mcp.tool()
+def resolve_gene_symbol(term: str, limit: int = 25) -> dict:
+    """Resolve a gene symbol, alias-like term, marker, or family shorthand.
+
+    Use before querying expression/alteration data when a user-provided term may
+    match multiple HUGO symbols, such as CD3, HLA, KRT, MUC, IGH, or any marker
+    name that may represent a gene family.
+    """
+    try:
+        return _resolve_gene_symbol_impl(term=term, limit=limit)
+    except Exception as e:
+        logger.error("resolve_gene_symbol error: %s", e)
+        return {"error": str(e)}
+
+
+@mcp.tool()
+def find_external_resources(
+    search: str = "imaging Minerva pathology histology radiology",
+    study_search: str = None,
+    limit: int = 25,
+) -> dict:
+    """Find external links stored in cBioPortal resource tables.
+
+    Use before saying cBioPortal has no imaging, pathology, histology, HTAN,
+    Minerva, viewer, or other externally linked resources.
+    """
+    try:
+        return _find_external_resources_impl(
+            search=search,
+            study_search=study_search,
+            limit=limit,
+        )
+    except Exception as e:
+        logger.error("find_external_resources error: %s", e)
+        return {"error": str(e)}
 
 
 # Resource Access Tools for AI Agents

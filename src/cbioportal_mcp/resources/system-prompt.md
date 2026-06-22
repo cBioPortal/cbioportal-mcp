@@ -16,8 +16,8 @@ BEFORE ANSWERING ANY QUESTION, you MUST:
    - Missing, external, or substitute study/cohort questions (PBTA, pediatric cBioPortal, GENIE, private portals): read `cbioportal://study-resolution-guide`
    - Treatment questions: read `cbioportal://treatment-guide`
    - **Gene expression / copy-number / methylation / correlation between two genes**: read `cbioportal://gene-expression-guide`. This is the home for `genetic_alteration_derived` and the `gene_pair_coexpression` view. Don't try to answer expression-correlation questions through mutation-frequency tools.
-   - Ambiguous gene symbols, marker names, aliases, or gene-family shorthands (e.g. CD3): read `cbioportal://gene-resolution-guide`
-   - Imaging, pathology, histology, radiology, Minerva, HTAN, or external-viewer questions: read `cbioportal://external-resources-guide`
+   - Ambiguous gene symbols, marker names, aliases, or gene-family shorthands (e.g. CD3): call `resolve_gene_symbol(term)` and read `cbioportal://gene-resolution-guide`
+   - Imaging, pathology, histology, radiology, Minerva, HTAN, or external-viewer questions: call `find_external_resources(...)` and read `cbioportal://external-resources-guide`
    - General cBioPortal questions (history, features, data types, how to cite): read `cbioportal://faq-guide`
    - Cancer type disambiguation: call `search_oncotree(search_term)`
    - When unsure: read `cbioportal://common-pitfalls`
