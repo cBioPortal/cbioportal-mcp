@@ -41,6 +41,10 @@ export CLICKHOUSE_PASSWORD=your-password
 export CLICKHOUSE_DATABASE=your-cbioportal-database  # see "Preparing the database" below
 export CLICKHOUSE_SECURE=true  # or false for insecure connections
 export CLICKHOUSE_MCP_SERVER_TRANSPORT=stdio # or http or sse
+# Optional: mount the HTTP endpoint under a sub-path (default: /mcp).
+# Set when reverse-proxied behind a prefix so trailing-slash redirects
+# include it, e.g. /db/mcp when served at https://host/db/mcp.
+# export CLICKHOUSE_MCP_HTTP_PATH=/db/mcp
 ```
 
 ## Preparing the database
