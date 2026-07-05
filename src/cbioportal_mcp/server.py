@@ -653,7 +653,7 @@ def _build_survival_payload(
 # thousands of samples; the widget shows altered samples first, then fills with
 # unaltered profiled samples up to this cap. Per-gene frequencies in gene_stats
 # are computed over the full profiled set, not just the shown columns.
-MAX_ONCOPRINT_SAMPLES = 200
+MAX_ONCOPRINT_SAMPLES = 500
 DEFAULT_ONCOPRINT_GENES = 20
 
 # Alteration types eligible for the matrix (subset of ALTERATION_CONFIGS keys).
@@ -2584,11 +2584,41 @@ _RGB_COLOR_RE = re.compile(
 )
 _CSS_COLOR_NAMES = frozenset(
     {
-        "black", "white", "red", "green", "blue", "yellow", "orange", "purple",
-        "pink", "brown", "gray", "grey", "cyan", "magenta", "teal", "navy",
-        "olive", "maroon", "lime", "aqua", "fuchsia", "silver", "gold", "indigo",
-        "violet", "coral", "salmon", "khaki", "crimson", "turquoise", "tomato",
-        "steelblue", "seagreen", "darkorange", "transparent",
+        "black",
+        "white",
+        "red",
+        "green",
+        "blue",
+        "yellow",
+        "orange",
+        "purple",
+        "pink",
+        "brown",
+        "gray",
+        "grey",
+        "cyan",
+        "magenta",
+        "teal",
+        "navy",
+        "olive",
+        "maroon",
+        "lime",
+        "aqua",
+        "fuchsia",
+        "silver",
+        "gold",
+        "indigo",
+        "violet",
+        "coral",
+        "salmon",
+        "khaki",
+        "crimson",
+        "turquoise",
+        "tomato",
+        "steelblue",
+        "seagreen",
+        "darkorange",
+        "transparent",
     }
 )
 
