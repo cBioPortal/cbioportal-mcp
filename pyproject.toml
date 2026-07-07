@@ -14,6 +14,12 @@ dependencies = [
   "fastmcp==3.3.1",
   "mcp-clickhouse==0.1.11",
   "clickhouse-driver>=0.2.0",
+  # Telemetry, imported unconditionally so hard deps as wired today:
+  # ddtrace LLMObs (server.py) + OpenTelemetry tracing → Datadog (telemetry.py).
+  "ddtrace>=2.10",
+  "opentelemetry-api>=1.42.1",
+  "opentelemetry-sdk>=1.42.1",
+  "opentelemetry-exporter-otlp-proto-http>=1.42.1",
 ]
 
 [project.optional-dependencies]
