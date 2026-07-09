@@ -79,26 +79,6 @@ def shutdown_telemetry() -> None:
             _tracer_provider = None
 
 
-def _extract_user_identity() -> tuple[str | None, str | None]:
-    """Read x-user-id and x-user-email headers injected by LibreChat.
-
-    LibreChat populates these via {{user.id}} / {{user.email}} placeholders in
-    the mcpServers.headers config. Returns (user_id, user_email), either may be None.
-    """
-    try:
-        from fastmcp.server.dependencies import get_http_headers
-
-        headers = get_http_headers(include_all=True)
-        user_id = headers.get("x-user-id") or None
-        user_email = headers.get("x-user-email") or None
-        # LibreChat base64-encodes non-ASCII values with a "b64:" prefix
-        if user_email and user_email.startswith("b64:"):
-            import base64
-            user_email = base64.b64decode(user_email[4:]).decode("utf-8", errors="replace")
-        return user_id, user_email
-    except Exception:
-        return None, None
-
 
 def _extract_client_ip() -> str | None:
     """Extract the original client IP from the active HTTP request.
@@ -128,29 +108,18 @@ def _extract_client_ip() -> str | None:
     return None
 
 
-def _llmobs_tool_span(tool_name: str, arguments: dict, user_id: str | None, user_email: str | None):
+def _llmobs_tool_span(tool_name: str, arguments: dict):
     """Start a Datadog LLMObs tool span for an MCP tool call.
 
     Returns None if LLMObs is not initialized (e.g. no DD_API_KEY).
-    Annotates the span with tool arguments and user identity so the
-    Datadog LLM Observability → Users view populates correctly.
     """
     try:
         from ddtrace.llmobs import LLMObs
 
         span = LLMObs.start_span(span_kind="tool", name=f"mcp.tool.{tool_name}")
-
-        metadata: dict = {}
-        if user_id:
-            metadata["user_id"] = user_id
-            span.set_tag("usr.id", user_id)
-        if user_email:
-            metadata["user_email"] = user_email
-
         LLMObs.annotate(
             span=span,
             input_data=json.dumps(arguments, default=str),
-            metadata=metadata if metadata else None,
         )
         return span
     except Exception:
@@ -214,15 +183,11 @@ class TelemetryMiddleware(Middleware):
     ) -> mt.CallToolResult:
         tool_name = getattr(context.message, "name", None) or "unknown"
         arguments = getattr(context.message, "arguments", {}) or {}
-        user_id, user_email = _extract_user_identity()
 
-        llmobs_span = _llmobs_tool_span(tool_name, arguments, user_id, user_email)
+        llmobs_span = _llmobs_tool_span(tool_name, arguments)
 
         with self._tracer.start_as_current_span(f"mcp.tool/{tool_name}") as span:
             span.set_attribute("mcp.tool.name", tool_name)
-
-            if user_id:
-                span.set_attribute("enduser.id", user_id)
 
             client_ip = _extract_client_ip()
             if client_ip:
