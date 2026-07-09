@@ -12,6 +12,7 @@ if _dd_api_key:
         api_key=_dd_api_key,
         site=os.getenv("DD_SITE", "datadoghq.com"),
         agentless_enabled=True,
+        integrations_enabled=True,
     )
 
 import json
