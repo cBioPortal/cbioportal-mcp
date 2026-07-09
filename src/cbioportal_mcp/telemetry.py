@@ -79,6 +79,21 @@ def shutdown_telemetry() -> None:
             _tracer_provider = None
 
 
+def _extract_user_id() -> str | None:
+    """Read the x-user-id header injected by LibreChat.
+
+    LibreChat populates this via the {{user.id}} placeholder in mcpServers.headers.
+    The value is a MongoDB ObjectID — opaque, non-identifying.
+    Returns None when no HTTP request context is active or header is absent.
+    """
+    try:
+        from fastmcp.server.dependencies import get_http_headers
+
+        headers = get_http_headers(include_all=True)
+        return headers.get("x-user-id") or None
+    except Exception:
+        return None
+
 
 def _extract_client_ip() -> str | None:
     """Extract the original client IP from the active HTTP request.
@@ -108,7 +123,7 @@ def _extract_client_ip() -> str | None:
     return None
 
 
-def _llmobs_tool_span(tool_name: str, arguments: dict):
+def _llmobs_tool_span(tool_name: str, arguments: dict, user_id: str | None):
     """Start a Datadog LLMObs tool span for an MCP tool call.
 
     Returns None if LLMObs is not initialized (e.g. no DD_API_KEY).
@@ -117,6 +132,8 @@ def _llmobs_tool_span(tool_name: str, arguments: dict):
         from ddtrace.llmobs import LLMObs
 
         span = LLMObs.start_span(span_kind="tool", name=f"mcp.tool.{tool_name}")
+        if user_id:
+            span.set_tag("usr.id", user_id)
         LLMObs.annotate(
             span=span,
             input_data=json.dumps(arguments, default=str),
@@ -183,11 +200,14 @@ class TelemetryMiddleware(Middleware):
     ) -> mt.CallToolResult:
         tool_name = getattr(context.message, "name", None) or "unknown"
         arguments = getattr(context.message, "arguments", {}) or {}
+        user_id = _extract_user_id()
 
-        llmobs_span = _llmobs_tool_span(tool_name, arguments)
+        llmobs_span = _llmobs_tool_span(tool_name, arguments, user_id)
 
         with self._tracer.start_as_current_span(f"mcp.tool/{tool_name}") as span:
             span.set_attribute("mcp.tool.name", tool_name)
+            if user_id:
+                span.set_attribute("enduser.id", user_id)
 
             client_ip = _extract_client_ip()
             if client_ip:
