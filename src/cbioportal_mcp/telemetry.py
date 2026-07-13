@@ -1,8 +1,9 @@
-"""OpenTelemetry configuration and FastMCP middleware for Datadog monitoring."""
+"""OpenTelemetry + Datadog LLM Observability middleware for cBioPortal MCP."""
 
 from __future__ import annotations
 
 import atexit
+import json
 import logging
 import os
 from typing import Any
@@ -78,6 +79,27 @@ def shutdown_telemetry() -> None:
             _tracer_provider = None
 
 
+def _extract_user_identity() -> tuple[str | None, str | None]:
+    """Read x-user-id and x-user-email headers injected by LibreChat.
+
+    LibreChat populates these via {{user.id}} / {{user.email}} placeholders in
+    mcpServers.headers. Returns (user_id, user_email), either may be None.
+    LibreChat base64-encodes non-ASCII values with a "b64:" prefix.
+    """
+    try:
+        from fastmcp.server.dependencies import get_http_headers
+
+        headers = get_http_headers(include_all=True)
+        user_id = headers.get("x-user-id") or None
+        user_email = headers.get("x-user-email") or None
+        if user_email and user_email.startswith("b64:"):
+            import base64
+            user_email = base64.b64decode(user_email[4:]).decode("utf-8", errors="replace")
+        return user_id, user_email
+    except Exception:
+        return None, None
+
+
 def _extract_client_ip() -> str | None:
     """Extract the original client IP from the active HTTP request.
 
@@ -106,15 +128,77 @@ def _extract_client_ip() -> str | None:
     return None
 
 
-class TelemetryMiddleware(Middleware):
-    """FastMCP middleware that emits an OTel span for every MCP tool call.
+def _llmobs_tool_span(tool_name: str, arguments: dict, user_id: str | None, user_email: str | None):
+    """Start a Datadog LLMObs tool span for an MCP tool call.
 
-    Span name : ``mcp.tool/<tool_name>``
-    Attributes:
+    Returns None if LLMObs is not initialized (e.g. no DD_API_KEY).
+    """
+    try:
+        from ddtrace.llmobs import LLMObs
+
+        span = LLMObs.start_span(span_kind="tool", name=f"mcp.tool.{tool_name}")
+        if user_id:
+            span.set_tag("usr.id", user_id)
+
+        metadata: dict = {}
+        if user_email:
+            metadata["user_email"] = user_email
+
+        LLMObs.annotate(
+            span=span,
+            input_data=json.dumps(arguments, default=str),
+            metadata=metadata if metadata else None,
+        )
+        return span
+    except Exception:
+        return None
+
+
+def _llmobs_finish(span, result, *, error: bool) -> None:
+    """Annotate and finish a LLMObs span returned by _llmobs_tool_span."""
+    if span is None:
+        return
+    try:
+        from ddtrace.llmobs import LLMObs
+
+        output: str
+        if error:
+            output = "error"
+        else:
+            # Serialize the MCP result content to a compact string for the output field.
+            try:
+                if hasattr(result, "content"):
+                    output = json.dumps(
+                        [c.model_dump() if hasattr(c, "model_dump") else str(c) for c in result.content],
+                        default=str,
+                    )
+                else:
+                    output = str(result)
+            except Exception:
+                output = str(result)
+
+        LLMObs.annotate(span=span, output_data=output)
+        span.finish()
+    except Exception:
+        try:
+            span.finish()
+        except Exception:
+            pass
+
+
+class TelemetryMiddleware(Middleware):
+    """FastMCP middleware that emits both an OTel span and a Datadog LLMObs tool span
+    for every MCP tool call.
+
+    OTel span name : ``mcp.tool/<tool_name>``
+    OTel attributes:
       mcp.tool.name       Tool name
       network.client.ip   Original client IP from X-Forwarded-For (HTTP only)
       mcp.tool.success    True on success, False when an exception propagates
       error.type          Exception class name on failure
+
+    The LLMObs tool span populates the Datadog LLM Observability dashboard widgets
+    (Trace Success Rate, Total Number of Traces, Estimated Total Cost).
     """
 
     def __init__(self) -> None:
@@ -126,9 +210,15 @@ class TelemetryMiddleware(Middleware):
         call_next: CallNext[mt.CallToolRequestParams, mt.CallToolResult],
     ) -> mt.CallToolResult:
         tool_name = getattr(context.message, "name", None) or "unknown"
+        arguments = getattr(context.message, "arguments", {}) or {}
+        user_id, user_email = _extract_user_identity()
+
+        llmobs_span = _llmobs_tool_span(tool_name, arguments, user_id, user_email)
 
         with self._tracer.start_as_current_span(f"mcp.tool/{tool_name}") as span:
             span.set_attribute("mcp.tool.name", tool_name)
+            if user_id:
+                span.set_attribute("enduser.id", user_id)
 
             client_ip = _extract_client_ip()
             if client_ip:
@@ -137,9 +227,11 @@ class TelemetryMiddleware(Middleware):
             try:
                 result = await call_next(context)
                 span.set_attribute("mcp.tool.success", True)
+                _llmobs_finish(llmobs_span, result, error=False)
                 return result
             except Exception as exc:
                 span.set_attribute("mcp.tool.success", False)
                 span.set_attribute("error.type", type(exc).__name__)
                 span.record_exception(exc)
+                _llmobs_finish(llmobs_span, None, error=True)
                 raise
