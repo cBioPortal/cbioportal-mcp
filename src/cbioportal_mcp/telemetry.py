@@ -82,21 +82,26 @@ def shutdown_telemetry() -> None:
 def _extract_user_identity() -> tuple[str | None, str | None]:
     """Read x-user-id and x-user-email headers injected by LibreChat.
 
-    LibreChat populates these via {{user.id}} / {{user.email}} placeholders in
-    mcpServers.headers. Returns (user_id, user_email), either may be None.
-    LibreChat base64-encodes non-ASCII values with a "b64:" prefix.
+    LibreChat populates these via {{LIBRECHAT_USER_ID}} / {{LIBRECHAT_USER_EMAIL}}
+    placeholders in mcpServers.headers. Returns (user_id, user_email), either may
+    be None. LibreChat base64-encodes non-ASCII values with a "b64:" prefix.
     """
     try:
         from fastmcp.server.dependencies import get_http_headers
 
         headers = get_http_headers(include_all=True)
-        user_id = headers.get("x-user-id") or None
-        user_email = headers.get("x-user-email") or None
+        raw_id = headers.get("x-user-id", "")
+        raw_email = headers.get("x-user-email", "")
+        logger.debug("_extract_user_identity: x-user-id=%r x-user-email=%r", raw_id, raw_email)
+
+        user_id = raw_id or None
+        user_email = raw_email or None
         if user_email and user_email.startswith("b64:"):
             import base64
             user_email = base64.b64decode(user_email[4:]).decode("utf-8", errors="replace")
         return user_id, user_email
-    except Exception:
+    except Exception as exc:
+        logger.debug("_extract_user_identity failed: %s", exc)
         return None, None
 
 
@@ -217,6 +222,7 @@ class TelemetryMiddleware(Middleware):
 
         with self._tracer.start_as_current_span(f"mcp.tool/{tool_name}") as span:
             span.set_attribute("mcp.tool.name", tool_name)
+            span.set_attribute("mcp.user_id.present", user_id is not None)
             if user_id:
                 span.set_attribute("enduser.id", user_id)
 
