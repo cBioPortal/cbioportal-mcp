@@ -1,0 +1,9 @@
+{
+  "users": {},
+  "groups": {
+    "/research/alpha": ["study_alpha"],
+    "/research/beta": ["study_beta"],
+    "/cbioportal/admins": ["*"]
+  },
+  "default": []
+}

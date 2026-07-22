@@ -32,6 +32,7 @@ dev = [
 
 [project.scripts]
 cbioportal-mcp = "cbioportal_mcp.server:main"
+cbioportal-mcp-local-keycloak-proxy = "cbioportal_mcp.local_keycloak_proxy:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/cbioportal_mcp"]

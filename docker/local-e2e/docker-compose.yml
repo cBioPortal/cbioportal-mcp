@@ -1,0 +1,82 @@
+services:
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.12
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    volumes:
+      - ./clickhouse-init.sql:/docker-entrypoint-initdb.d/00-init.sql:ro
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:8123/ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0
+    command: ["start-dev", "--import-realm"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+    ports:
+      - "18080:8080"
+    volumes:
+      - ./keycloak-realm.json:/opt/keycloak/data/import/cbioportal-mcp-local-realm.json:ro
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "exec 3<>/dev/tcp/127.0.0.1/8080; echo -e 'GET /realms/cbioportal-mcp-local/.well-known/openid-configuration HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3; grep -q '200 OK' <&3",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 60
+
+  mcp:
+    build:
+      context: ../..
+      dockerfile: docker/Dockerfile
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    environment:
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_PORT: "8123"
+      CLICKHOUSE_USER: mcp_authz
+      CLICKHOUSE_PASSWORD: mcp_authz_pw
+      CLICKHOUSE_DATABASE: cbioportal_authz_e2e
+      CLICKHOUSE_SECURE: "false"
+      CLICKHOUSE_VERIFY: "false"
+      CLICKHOUSE_MCP_SERVER_TRANSPORT: http
+      CLICKHOUSE_MCP_BIND_HOST: 0.0.0.0
+      CLICKHOUSE_MCP_BIND_PORT: "8000"
+      CBIOPORTAL_MCP_STUDY_ACCESS_MODE: restricted
+      CBIOPORTAL_MCP_AUTH_REQUIRED: "true"
+      CBIOPORTAL_MCP_STUDY_ACL_FILE: /app/docker/local-e2e/study-acl.json
+      CBIOPORTAL_MCP_AUTH_PROXY_SECRET: local-proxy-secret
+    ports:
+      - "8000:8000"
+
+  auth-proxy:
+    build:
+      context: ../..
+      dockerfile: docker/Dockerfile
+    command: ["uv", "run", "cbioportal-mcp-local-keycloak-proxy"]
+    depends_on:
+      keycloak:
+        condition: service_healthy
+      mcp:
+        condition: service_started
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      LOCAL_AUTH_PROXY_BIND_HOST: 0.0.0.0
+      LOCAL_AUTH_PROXY_BIND_PORT: "8001"
+      LOCAL_AUTH_PROXY_UPSTREAM_MCP_URL: http://mcp:8000/mcp/
+      LOCAL_AUTH_PROXY_KEYCLOAK_INTROSPECTION_URL: http://host.docker.internal:18080/realms/cbioportal-mcp-local/protocol/openid-connect/token/introspect
+      LOCAL_AUTH_PROXY_KEYCLOAK_HOST_HEADER: 127.0.0.1:18080
+      LOCAL_AUTH_PROXY_KEYCLOAK_CLIENT_ID: mcp-local-proxy
+      LOCAL_AUTH_PROXY_KEYCLOAK_CLIENT_SECRET: mcp-local-proxy-secret
+      LOCAL_AUTH_PROXY_SECRET: local-proxy-secret
+    ports:
+      - "8001:8001"

@@ -28,6 +28,13 @@ from fastmcp import FastMCP
 
 from cbioportal_mcp.env import get_mcp_config, TransportType
 from cbioportal_mcp.authentication.permissions import ensure_db_permissions
+from cbioportal_mcp.authentication.study_access import (
+    AuthorizationError,
+    authorize_study,
+    get_current_study_access as resolve_current_study_access,
+    guard_query_study_access,
+    study_access_condition,
+)
 from cbioportal_mcp.telemetry import configure_telemetry, TelemetryMiddleware
 
 logger = logging.getLogger(__name__)
@@ -452,7 +459,7 @@ def clickhouse_list_table_columns(table: str) -> dict[str, list[dict] | str]:
         return {"error_message": error_message}
 
 
-def run_select_query(query: str) -> list[dict]:
+def run_select_query(query: str, *, enforce_study_access: bool = True) -> list[dict]:
     """
     Execute arbitrary ClickHouse SQL SELECT query.
     
@@ -463,6 +470,9 @@ def run_select_query(query: str) -> list[dict]:
         list: A list of rows, where each row is a dictionary with column names as keys and corresponding values.
     """
     from mcp_clickhouse.mcp_server import run_select_query
+
+    if enforce_study_access:
+        guard_query_study_access(query)
 
     # DB-level read-only permissions (enforced on startup) prevent non-SELECT queries,
     # so we don't need application-level query filtering. This allows CTEs (WITH ... AS).
@@ -638,7 +648,10 @@ def get_study_guide(study_id: str) -> str:
     # Validate study_id to prevent SQL injection
     try:
         study_id = _validate_study_id(study_id)
+        authorize_study(study_id)
     except ValueError as e:
+        return f"Error: {str(e)}"
+    except AuthorizationError as e:
         return f"Error: {str(e)}"
     
     # First, check for a pre-generated guide file
@@ -831,6 +844,7 @@ def list_studies(search: str = None, limit: int = 20) -> list[dict]:
     safe_limit = max(1, min(int(limit), MAX_LIST_LIMIT))
     
     try:
+        access_condition = study_access_condition("cs")
         if search:
             # Sanitize search term to prevent SQL injection
             safe_search = _sanitize_search_term(search)
@@ -843,10 +857,13 @@ def list_studies(search: str = None, limit: int = 20) -> list[dict]:
                     COUNT(DISTINCT cd.sample_unique_id) as sample_count
                 FROM cancer_study cs
                 LEFT JOIN clinical_data_derived cd ON cs.cancer_study_identifier = cd.cancer_study_identifier
-                WHERE cs.cancer_study_identifier ILIKE '%{safe_search}%'
+                WHERE (
+                    cs.cancer_study_identifier ILIKE '%{safe_search}%'
                     OR cs.name ILIKE '%{safe_search}%'
                     OR cs.type_of_cancer_id ILIKE '%{safe_search}%'
                     OR cs.description ILIKE '%{safe_search}%'
+                )
+                    AND {access_condition}
                 GROUP BY cs.cancer_study_identifier, cs.name, cs.description, cs.type_of_cancer_id
                 ORDER BY sample_count DESC
                 LIMIT {safe_limit}
@@ -861,12 +878,13 @@ def list_studies(search: str = None, limit: int = 20) -> list[dict]:
                     COUNT(DISTINCT cd.sample_unique_id) as sample_count
                 FROM cancer_study cs
                 LEFT JOIN clinical_data_derived cd ON cs.cancer_study_identifier = cd.cancer_study_identifier
+                WHERE {access_condition}
                 GROUP BY cs.cancer_study_identifier, cs.name, cs.description, cs.type_of_cancer_id
                 ORDER BY sample_count DESC
                 LIMIT {safe_limit}
             """
         
-        results = run_select_query(query)
+        results = run_select_query(query, enforce_study_access=False)
         
         # Add has_guide field
         for study in results:
@@ -887,7 +905,30 @@ def list_study_guides() -> list[str]:
     Returns:
         List of study identifiers that have curated guides in resources/study-guides/
     """
-    return _list_available_study_guides()
+    guides = _list_available_study_guides()
+    try:
+        access = resolve_current_study_access()
+    except AuthorizationError as e:
+        return [f"Error: {str(e)}"]
+    if access.all_studies:
+        return guides
+    return [study_id for study_id in guides if study_id in access.studies]
+
+
+@mcp.tool()
+def get_current_study_access() -> dict[str, object]:
+    """Return the authenticated caller and the studies visible to this request."""
+    try:
+        access = resolve_current_study_access()
+        return {
+            "user_id": access.identity.user_id,
+            "user_email": access.identity.user_email,
+            "groups": sorted(access.identity.groups),
+            "all_studies": access.all_studies,
+            "studies": sorted(access.studies),
+        }
+    except AuthorizationError as e:
+        return {"error_message": str(e)}
 
 
 @mcp.tool()
