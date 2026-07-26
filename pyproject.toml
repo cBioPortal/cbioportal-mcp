@@ -13,7 +13,10 @@ authors = [
     { name = "cBioPortal MCP Contributors" }
 ]
 dependencies = [
-    "fastmcp",
+    # mcp-clickhouse 0.1.11 passes dependencies= to FastMCP(), removed in fastmcp 2.14.
+    # Without the upper bound a fresh install resolves fastmcp 3.x and every import of
+    # cbioportal_mcp.server fails. Lift this together with the mcp-clickhouse pin below.
+    "fastmcp>=2.10,<2.14",
     # 0.3.0 renamed run_select_query → run_query (breaking change)
     "mcp-clickhouse==0.1.11",
     "clickhouse-driver>=0.2.0",
