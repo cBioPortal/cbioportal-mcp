@@ -79,30 +79,36 @@ def shutdown_telemetry() -> None:
             _tracer_provider = None
 
 
-def _extract_user_identity() -> tuple[str | None, str | None]:
+def _extract_user_identity() -> tuple[str | None, str | None, str]:
     """Read x-user-id and x-user-email headers injected by LibreChat.
 
     LibreChat populates these via {{LIBRECHAT_USER_ID}} / {{LIBRECHAT_USER_EMAIL}}
-    placeholders in mcpServers.headers. Returns (user_id, user_email), either may
-    be None. LibreChat base64-encodes non-ASCII values with a "b64:" prefix.
+    placeholders in mcpServers.headers. Returns (user_id, user_email, client) where
+    client is "librechat" when the x-user-id header is present (regardless of value)
+    or "direct" when the header is absent. LibreChat base64-encodes non-ASCII values
+    with a "b64:" prefix.
     """
     try:
         from fastmcp.server.dependencies import get_http_headers
 
         headers = get_http_headers(include_all=True)
+        logger.debug("_extract_user_identity: received headers: %s", sorted(headers.keys()))
+
         raw_id = headers.get("x-user-id", "")
         raw_email = headers.get("x-user-email", "")
-        logger.debug("_extract_user_identity: x-user-id=%r x-user-email=%r", raw_id, raw_email)
+        # Presence of x-user-id header (set in librechat-config.yaml mcpServers.headers)
+        # distinguishes LibreChat traffic from direct MCP callers regardless of value.
+        client = "librechat" if "x-user-id" in headers else "direct"
 
         user_id = raw_id or None
         user_email = raw_email or None
         if user_email and user_email.startswith("b64:"):
             import base64
             user_email = base64.b64decode(user_email[4:]).decode("utf-8", errors="replace")
-        return user_id, user_email
+        return user_id, user_email, client
     except Exception as exc:
         logger.debug("_extract_user_identity failed: %s", exc)
-        return None, None
+        return None, None, "unknown"
 
 
 def _extract_client_ip() -> str | None:
@@ -216,13 +222,13 @@ class TelemetryMiddleware(Middleware):
     ) -> mt.CallToolResult:
         tool_name = getattr(context.message, "name", None) or "unknown"
         arguments = getattr(context.message, "arguments", {}) or {}
-        user_id, user_email = _extract_user_identity()
+        user_id, user_email, client = _extract_user_identity()
 
         llmobs_span = _llmobs_tool_span(tool_name, arguments, user_id, user_email)
 
         with self._tracer.start_as_current_span(f"mcp.tool/{tool_name}") as span:
             span.set_attribute("mcp.tool.name", tool_name)
-            span.set_attribute("mcp.user_id.present", user_id is not None)
+            span.set_attribute("mcp.client", client)
             if user_id:
                 span.set_attribute("enduser.id", user_id)
 
