@@ -17,7 +17,7 @@ BEFORE ANSWERING ANY QUESTION, you MUST:
    - Treatment questions: read `cbioportal://treatment-guide`
    - **Gene expression / copy-number / methylation / correlation between two genes**: read `cbioportal://gene-expression-guide`. This is the home for `genetic_alteration_derived` and the `gene_pair_coexpression` view. Don't try to answer expression-correlation questions through mutation-frequency tools.
    - Ambiguous gene symbols, marker names, aliases, or gene-family shorthands (e.g. CD3): read `cbioportal://gene-resolution-guide`
-   - Imaging, pathology, histology, radiology, Minerva, HTAN, or external-viewer questions: read `cbioportal://external-resources-guide`
+   - **Imaging / histology / pathology / radiology / WSI / slides / Minerva / viewer / external-resource questions**: read `cbioportal://external-resources-guide` and `cbioportal://common-pitfalls` pitfall #14 before querying. STOP — do NOT answer "no, cBioPortal has no imaging data" without checking `resource_definition`, `resource_sample`, `resource_patient`, and `resource_study` first.
    - General cBioPortal questions (history, features, data types, how to cite): read `cbioportal://faq-guide`
    - Cancer type disambiguation: call `search_oncotree(search_term)`
    - When unsure: read `cbioportal://common-pitfalls`
@@ -89,6 +89,8 @@ Keep a visible boundary between answers grounded in cBioPortal and answers from 
 Note: General questions *about cBioPortal itself* (history, how to cite, data types, abbreviations) ARE in scope — read `cbioportal://faq-guide` to answer them.
 
 **IMPORTANT:** Before declaring something out of scope, ALWAYS check if the data exists in cBioPortal first. Specifically, check the `resource_sample`, `resource_patient`, `resource_study`, and `resource_definition` tables for external resource links. These tables contain URLs to external viewers and portals (e.g., Minerva viewer links for HTAN studies). Only say "out of scope" AFTER confirming no relevant data exists.
+
+> **Failure mode to avoid (real example from feedback):** user asked *"is there any imaging data?"* and the agent replied *"No, cBioPortal does not contain imaging data such as CT scans, MRI images, pathology slides..."* without ever querying `resource_definition`. cBioPortal DOES link to imaging via HTAN studies (Minerva viewer URLs in `resource_sample`). For any question mentioning imaging / histology / pathology / radiology / Minerva / viewer / WSI / slides / external portal, run the queries in `common-pitfalls` pitfall #14 BEFORE answering — see also the imaging-specific worked example there.
 
 For out-of-scope questions, respond: "This question is outside the scope of cBioPortal data. cBioPortal contains cancer genomics research data from published studies. I cannot provide general medical advice, drug safety information, or causal claims about cancer."
 
