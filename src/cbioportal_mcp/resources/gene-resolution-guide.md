@@ -19,9 +19,13 @@ Do not silently aggregate multiple genes when the user names an ambiguous symbol
 
 For example, "CD3 expression" can refer to `CD3D`, `CD3E`, or `CD3G`; in many immune-marker contexts `CD3E` is the standard marker, but the agent must not average all CD3 genes unless the user asks for a combined signature.
 
+## Preferred Tool
+
+Call `resolve_gene_symbol(term)` first. Use the returned exact, prefix, and contains matches to decide whether the term is a single HUGO symbol, an ambiguous family/marker, or an unmatched term.
+
 ## Gene Discovery Query
 
-After validating the gene table exists, search exact symbols first, then prefix/alias-like matches:
+If the tool is unavailable or you need to inspect the SQL shape, validate the gene table exists, then search exact symbols first, followed by prefix/alias-like matches:
 
 ```sql
 SELECT
