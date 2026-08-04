@@ -122,19 +122,33 @@ def _load_resource(filename: str) -> str:
         return f"Error: Could not load resource: {filename}"
 
 def _load_study_guide(study_id: str) -> str | None:
-    """Load a study guide from the study-guides directory if it exists."""
-    try:
-        resources_path = _get_resources_path()
-        study_file = resources_path / "study-guides" / f"{study_id}.md"
-        return study_file.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return None
-    except Exception as e:
-        logger.error(f"Error loading study guide for {study_id}: {e}")
-        return None
+    """Load a study guide from the study-guides directory if it exists.
 
+    Study identifiers are lowercase by convention, but users and agents type them in
+    any case. Resolving to the canonical on-disk name first lets us cleanly separate
+    "no such guide" (None) from "guide exists but couldn't be read" (raises), rather
+    than collapsing both into a silent None.
+    """
+    canonical = _resolve_study_guide_name(study_id)
+    if canonical is None:
+        return None
+    resources_path = _get_resources_path()
+    return (resources_path / "study-guides" / f"{canonical}.md").read_text(encoding="utf-8")
+
+def _resolve_study_guide_name(study_id: str) -> str | None:
+    """Return the on-disk guide name matching study_id ignoring case, if any."""
+    wanted = study_id.lower()
+    for name in _list_available_study_guides():
+        if name.lower() == wanted:
+            return name
+    return None
+
+@lru_cache(maxsize=1)
 def _list_available_study_guides() -> list[str]:
-    """List all available pre-generated study guides."""
+    """List all available pre-generated study guides.
+
+    Cached — guides are baked into the image and don't change at runtime.
+    """
     try:
         resources_path = _get_resources_path()
         study_guides_path = resources_path / "study-guides"
@@ -164,8 +178,12 @@ def _load_general_guide(name: str) -> str | None:
         logger.error(f"Error loading general guide {name}: {e}")
         return None
 
+@lru_cache(maxsize=1)
 def _list_available_general_guides() -> list[str]:
-    """List general guide names available in resources/guides/."""
+    """List general guide names available in resources/guides/.
+
+    Cached — guides are baked into the image and don't change at runtime.
+    """
     try:
         resources_path = _get_resources_path()
         guides_path = resources_path / "guides"
@@ -620,6 +638,67 @@ def get_general_guide(name: str) -> str:
     return content
 
 
+def _similar_study_identifiers(study_id: str, limit: int = 10) -> list[dict]:
+    """Find studies whose identifier shares a token with study_id.
+
+    Used only to help the agent recover from a near-miss identifier. Tokens come from
+    an already-validated study_id, so they are safe to interpolate.
+    """
+    tokens = [t for t in re.split(r"[_-]+", study_id.lower()) if len(t) >= 3]
+    if not tokens:
+        return []
+    clauses = " OR ".join(f"lower(cancer_study_identifier) LIKE '%{t}%'" for t in tokens)
+    try:
+        return run_select_query(f"""
+            SELECT cancer_study_identifier, name
+            FROM cancer_study
+            WHERE {clauses}
+            LIMIT {int(limit)}
+        """) or []
+    except Exception as e:
+        logger.error(f"Error looking up studies similar to {study_id}: {e}")
+        return []
+
+
+def _study_not_in_deployment_message(study_id: str) -> str:
+    """Explain a study-lookup miss without asserting the study does not exist.
+
+    The previous wording ("Study 'X' not found") was relayed to users as "this study
+    does not exist in cBioPortal", which was wrong for studies that are live on
+    cbioportal.org, restricted by permissions, or simply spelled differently.
+    """
+    lines = [
+        f"Identifier '{study_id}' did not match any study in the database this "
+        f"deployment is connected to.",
+        "",
+        "This is NOT proof the study does not exist. Before you tell the user it is "
+        "unavailable, rule out all three of these:",
+        "",
+        f"1. **Different identifier.** Search rather than guess: "
+        f"`SELECT cancer_study_identifier, name FROM cancer_study "
+        f"WHERE lower(name) LIKE '%<disease>%'`.",
+        "2. **Another cBioPortal instance.** Public cbioportal.org, pedcbioportal, and "
+        "GENIE hold different study sets — read `cbioportal://study-resolution-guide`.",
+        "3. **Access restriction.** A study the current credentials cannot read is "
+        "absent from these results, which is a permissions outcome, not a missing study.",
+    ]
+
+    candidates = _similar_study_identifiers(study_id)
+    if candidates:
+        lines += ["", "Studies in this deployment with a similar identifier:", ""]
+        for row in candidates:
+            ident = row.get("cancer_study_identifier", "?")
+            name = row.get("name", "")
+            lines.append(f"- `{ident}`" + (f" — {name}" if name else ""))
+
+    lines += [
+        "",
+        f"Do not tell the user that '{study_id}' does not exist. Say it is not in this "
+        f"deployment, and offer the candidates above or the other instances.",
+    ]
+    return "\n".join(lines)
+
+
 @mcp.tool()
 def get_study_guide(study_id: str) -> str:
     """Get a guide for a specific cBioPortal study.
@@ -641,32 +720,44 @@ def get_study_guide(study_id: str) -> str:
     except ValueError as e:
         return f"Error: {str(e)}"
     
-    # First, check for a pre-generated guide file
-    static_guide = _load_study_guide(study_id)
+    # First, check for a pre-generated guide file. `_load_study_guide` returns
+    # None when no guide file exists (fall through to dynamic); it raises when
+    # a guide was resolved but couldn't be read — that's a real problem and
+    # we surface it rather than silently degrading.
+    try:
+        static_guide = _load_study_guide(study_id)
+    except Exception as e:
+        logger.error(f"Error reading resolved static guide for {study_id}: {e}")
+        return f"Error: A study guide was found for '{study_id}' but could not be read: {e}"
     if static_guide:
         logger.info(f"Loaded static study guide for {study_id}")
         return static_guide
-    
+
     # Fall back to dynamic generation
     logger.info(f"Generating dynamic study guide for {study_id}")
     try:
         guide_sections = []
         
         # 1. Basic study info
+        # Match case-insensitively: identifiers are lowercase by convention, but a
+        # user who types 'NBL_MSK_2023' must not be told the study is missing.
         study_info = run_select_query(f"""
-            SELECT 
+            SELECT
                 cancer_study_identifier,
                 name,
                 description,
                 type_of_cancer_id
-            FROM cancer_study 
-            WHERE cancer_study_identifier = '{study_id}'
+            FROM cancer_study
+            WHERE lower(cancer_study_identifier) = lower('{study_id}')
         """)
-        
+
         if not study_info:
-            return f"Study '{study_id}' not found. Use clickhouse_list_tables or query cancer_study table to find valid study identifiers."
-        
+            return _study_not_in_deployment_message(study_id)
+
         info = study_info[0]
+        # Adopt the identifier exactly as the database spells it, so every section
+        # below queries the real study rather than the user's casing.
+        study_id = info.get("cancer_study_identifier") or study_id
         guide_sections.append(f"""# Study Guide: {info.get('name', study_id)}
 
 **Study ID:** `{study_id}`
