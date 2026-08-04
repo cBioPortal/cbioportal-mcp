@@ -125,39 +125,30 @@ def _load_study_guide(study_id: str) -> str | None:
     """Load a study guide from the study-guides directory if it exists.
 
     Study identifiers are lowercase by convention, but users and agents type them in
-    any case. Falling back to a case-insensitive match stops 'BRCA_TCGA_Pan_Can_Atlas_2018'
-    from silently missing a guide that is present on disk.
+    any case. Resolving to the canonical on-disk name first lets us cleanly separate
+    "no such guide" (None) from "guide exists but couldn't be read" (raises), rather
+    than collapsing both into a silent None.
     """
-    try:
-        resources_path = _get_resources_path()
-        study_file = resources_path / "study-guides" / f"{study_id}.md"
-        return study_file.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        pass
-    except Exception as e:
-        logger.error(f"Error loading study guide for {study_id}: {e}")
-        return None
-
     canonical = _resolve_study_guide_name(study_id)
     if canonical is None:
         return None
-    try:
-        resources_path = _get_resources_path()
-        return (resources_path / "study-guides" / f"{canonical}.md").read_text(encoding="utf-8")
-    except Exception as e:
-        logger.error(f"Error loading study guide for {canonical}: {e}")
-        return None
+    resources_path = _get_resources_path()
+    return (resources_path / "study-guides" / f"{canonical}.md").read_text(encoding="utf-8")
 
 def _resolve_study_guide_name(study_id: str) -> str | None:
     """Return the on-disk guide name matching study_id ignoring case, if any."""
     wanted = study_id.lower()
     for name in _list_available_study_guides():
-        if name.lower() == wanted and name != study_id:
+        if name.lower() == wanted:
             return name
     return None
 
+@lru_cache(maxsize=1)
 def _list_available_study_guides() -> list[str]:
-    """List all available pre-generated study guides."""
+    """List all available pre-generated study guides.
+
+    Cached — guides are baked into the image and don't change at runtime.
+    """
     try:
         resources_path = _get_resources_path()
         study_guides_path = resources_path / "study-guides"
@@ -187,8 +178,12 @@ def _load_general_guide(name: str) -> str | None:
         logger.error(f"Error loading general guide {name}: {e}")
         return None
 
+@lru_cache(maxsize=1)
 def _list_available_general_guides() -> list[str]:
-    """List general guide names available in resources/guides/."""
+    """List general guide names available in resources/guides/.
+
+    Cached — guides are baked into the image and don't change at runtime.
+    """
     try:
         resources_path = _get_resources_path()
         guides_path = resources_path / "guides"
@@ -725,12 +720,19 @@ def get_study_guide(study_id: str) -> str:
     except ValueError as e:
         return f"Error: {str(e)}"
     
-    # First, check for a pre-generated guide file
-    static_guide = _load_study_guide(study_id)
+    # First, check for a pre-generated guide file. `_load_study_guide` returns
+    # None when no guide file exists (fall through to dynamic); it raises when
+    # a guide was resolved but couldn't be read — that's a real problem and
+    # we surface it rather than silently degrading.
+    try:
+        static_guide = _load_study_guide(study_id)
+    except Exception as e:
+        logger.error(f"Error reading resolved static guide for {study_id}: {e}")
+        return f"Error: A study guide was found for '{study_id}' but could not be read: {e}"
     if static_guide:
         logger.info(f"Loaded static study guide for {study_id}")
         return static_guide
-    
+
     # Fall back to dynamic generation
     logger.info(f"Generating dynamic study guide for {study_id}")
     try:
