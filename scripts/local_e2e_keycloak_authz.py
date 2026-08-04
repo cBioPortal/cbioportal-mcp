@@ -120,6 +120,25 @@ async def run(keycloak_url: str, proxy_url: str) -> None:
     )
     assert "study_beta" in denied_query["error_message"], denied_query
 
+    indirect_mutations = await _call_with_token(
+        proxy_url,
+        alice_token,
+        "clickhouse_run_select_query",
+        {
+            "query": (
+                "SELECT mutation_event_id, hugo_gene_symbol, mutation_variant "
+                "FROM mutation ORDER BY mutation_event_id"
+            )
+        },
+    )
+    assert indirect_mutations["rows"] == [
+        {
+            "mutation_event_id": 101,
+            "hugo_gene_symbol": "TP53",
+            "mutation_variant": "p.R175H",
+        }
+    ], indirect_mutations
+
     print("Local Keycloak authz e2e passed.")
     print("Alice access:", alice_access)
     print("Bob access:", bob_access)

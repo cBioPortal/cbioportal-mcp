@@ -101,6 +101,54 @@ def test_restricted_query_requires_literal_study_filter(monkeypatch):
         guard_query_study_access("SELECT * FROM clinical_data_derived", McpConfig())
 
 
+def test_clickhouse_row_policy_mode_allows_indirect_protected_queries(monkeypatch):
+    monkeypatch.setenv("CBIOPORTAL_MCP_STUDY_ACCESS_MODE", "restricted")
+    monkeypatch.setenv("CBIOPORTAL_MCP_AUTH_REQUIRED", "true")
+    monkeypatch.setenv("CBIOPORTAL_MCP_CLICKHOUSE_ROW_POLICY_ENABLED", "true")
+
+    with _headers(
+        {
+            "x-user-id": "user-1",
+            "x-cbioportal-allowed-studies": "study_a",
+        }
+    ):
+        guard_query_study_access("SELECT * FROM mutation ORDER BY mutation_event_id", McpConfig())
+
+
+def test_clickhouse_row_policy_mode_still_rejects_explicit_denied_study(monkeypatch):
+    monkeypatch.setenv("CBIOPORTAL_MCP_STUDY_ACCESS_MODE", "restricted")
+    monkeypatch.setenv("CBIOPORTAL_MCP_AUTH_REQUIRED", "true")
+    monkeypatch.setenv("CBIOPORTAL_MCP_CLICKHOUSE_ROW_POLICY_ENABLED", "true")
+
+    with _headers(
+        {
+            "x-user-id": "user-1",
+            "x-cbioportal-allowed-studies": "study_a",
+        }
+    ), pytest.raises(AuthorizationError, match="study_b"):
+        guard_query_study_access(
+            "SELECT * FROM clinical_data_derived WHERE cancer_study_identifier = 'study_b'",
+            McpConfig(),
+        )
+
+
+def test_clickhouse_row_policy_mode_rejects_setting_override(monkeypatch):
+    monkeypatch.setenv("CBIOPORTAL_MCP_STUDY_ACCESS_MODE", "restricted")
+    monkeypatch.setenv("CBIOPORTAL_MCP_AUTH_REQUIRED", "true")
+    monkeypatch.setenv("CBIOPORTAL_MCP_CLICKHOUSE_ROW_POLICY_ENABLED", "true")
+
+    with _headers(
+        {
+            "x-user-id": "user-1",
+            "x-cbioportal-allowed-studies": "study_a",
+        }
+    ), pytest.raises(AuthorizationError, match="internal ClickHouse study allowlist"):
+        guard_query_study_access(
+            "SELECT * FROM mutation SETTINGS SQL_cbiomcp_allowed_studies = 'study_b'",
+            McpConfig(),
+        )
+
+
 def test_restricted_query_rejects_boolean_bypass_shape(monkeypatch):
     monkeypatch.setenv("CBIOPORTAL_MCP_STUDY_ACCESS_MODE", "restricted")
     monkeypatch.setenv("CBIOPORTAL_MCP_AUTH_REQUIRED", "true")

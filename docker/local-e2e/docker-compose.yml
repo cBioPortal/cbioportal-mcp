@@ -6,6 +6,7 @@ services:
       - "9000:9000"
     volumes:
       - ./clickhouse-init.sql:/docker-entrypoint-initdb.d/00-init.sql:ro
+      - ./clickhouse-config.xml:/etc/clickhouse-server/config.d/cbioportal-mcp-custom-settings.xml:ro
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:8123/ping"]
       interval: 5s
@@ -54,6 +55,7 @@ services:
       CBIOPORTAL_MCP_AUTH_REQUIRED: "true"
       CBIOPORTAL_MCP_STUDY_ACL_FILE: /app/docker/local-e2e/study-acl.json
       CBIOPORTAL_MCP_AUTH_PROXY_SECRET: local-proxy-secret
+      CBIOPORTAL_MCP_CLICKHOUSE_ROW_POLICY_ENABLED: "true"
     ports:
       - "8000:8000"
 

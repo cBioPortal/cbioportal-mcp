@@ -197,6 +197,24 @@ class McpConfig:
             "x-cbioportal-mcp-proxy-secret",
         ).lower()
 
+    @property
+    def clickhouse_row_policy_enabled(self) -> bool:
+        """Whether ClickHouse row policies enforce per-request study access.
+
+        When enabled, the MCP server passes the resolved study allowlist to
+        ClickHouse as a query setting. Row policies can then filter rows even
+        for tables that do not carry a direct cancer_study_identifier column.
+        """
+        return _parse_bool_env("CBIOPORTAL_MCP_CLICKHOUSE_ROW_POLICY_ENABLED", False)
+
+    @property
+    def clickhouse_allowed_studies_setting(self) -> str:
+        """ClickHouse custom setting name containing the request study allowlist."""
+        return os.getenv(
+            "CBIOPORTAL_MCP_CLICKHOUSE_ALLOWED_STUDIES_SETTING",
+            "SQL_cbiomcp_allowed_studies",
+        )
+
 
 # Global instance placeholders for the singleton pattern
 _MCP_CONFIG_INSTANCE = None

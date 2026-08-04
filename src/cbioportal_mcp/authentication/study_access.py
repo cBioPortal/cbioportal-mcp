@@ -280,6 +280,32 @@ def quote_sql_string(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
+def _clickhouse_study_setting_name(config: McpConfig) -> str:
+    setting_name = config.clickhouse_allowed_studies_setting
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", setting_name):
+        raise AuthorizationError(
+            "Invalid ClickHouse study allowlist setting name: " + repr(setting_name)
+        )
+    return setting_name
+
+
+def clickhouse_study_access_settings(config: McpConfig | None = None) -> dict[str, str]:
+    """Return ClickHouse query settings that carry the current study ACL.
+
+    ClickHouse custom settings are strings, so the allowlist is encoded as a
+    comma-separated list of already-validated study IDs. Row policies should
+    treat ``*`` as unrestricted and an empty string as no study access.
+    """
+    config = config or get_mcp_config()
+    if not config.clickhouse_row_policy_enabled:
+        return {}
+
+    access = get_current_study_access(config)
+    setting_name = _clickhouse_study_setting_name(config)
+    value = "*" if access.all_studies else ",".join(sorted(access.studies))
+    return {setting_name: value}
+
+
 def study_access_condition(alias: str | None = None, config: McpConfig | None = None) -> str:
     """Return a SQL condition limiting rows to currently visible studies."""
     access = get_current_study_access(config)
@@ -375,14 +401,30 @@ def has_restricted_sql_bypass_shape(query: str) -> bool:
     return any(re.search(pattern, normalized) for pattern in blocked_patterns)
 
 
+def _references_clickhouse_study_setting(query: str, config: McpConfig) -> bool:
+    setting_name = _clickhouse_study_setting_name(config)
+    normalized = _strip_sql_literals(_strip_sql_comments(query))
+    return re.search(rf"\b{re.escape(setting_name)}\b", normalized, flags=re.IGNORECASE) is not None
+
+
 def guard_query_study_access(query: str, config: McpConfig | None = None) -> None:
     """Authorize an arbitrary SQL query against the current request's study ACL."""
+    config = config or get_mcp_config()
     access = get_current_study_access(config)
     if access.all_studies:
         return
 
+    if config.clickhouse_row_policy_enabled and _references_clickhouse_study_setting(query, config):
+        raise AuthorizationError(
+            "Queries may not set or reference the internal ClickHouse study allowlist setting."
+        )
+
     protected_query = references_protected_study_data(query)
-    if protected_query and has_restricted_sql_bypass_shape(query):
+    if (
+        protected_query
+        and not config.clickhouse_row_policy_enabled
+        and has_restricted_sql_bypass_shape(query)
+    ):
         raise AuthorizationError(
             "Restricted deployments only allow simple study-scoped SELECT queries. "
             "Avoid OR, UNION, WITH, and nested subqueries in arbitrary SQL; use "
@@ -391,17 +433,19 @@ def guard_query_study_access(query: str, config: McpConfig | None = None) -> Non
 
     study_ids, ambiguous = extract_study_filters(query)
     if ambiguous:
-        raise AuthorizationError(
-            "Restricted deployments require literal cancer_study_identifier filters "
-            "or study/studies parameters so study access can be checked."
-        )
+        if not config.clickhouse_row_policy_enabled:
+            raise AuthorizationError(
+                "Restricted deployments require literal cancer_study_identifier filters "
+                "or study/studies parameters so study access can be checked."
+            )
 
     if not study_ids:
         if protected_query:
-            raise AuthorizationError(
-                "Restricted deployments require every study-scoped query to include "
-                "an explicit literal cancer_study_identifier filter."
-            )
+            if not config.clickhouse_row_policy_enabled:
+                raise AuthorizationError(
+                    "Restricted deployments require every study-scoped query to include "
+                    "an explicit literal cancer_study_identifier filter."
+                )
         return
 
     validated = validate_study_ids(study_ids)

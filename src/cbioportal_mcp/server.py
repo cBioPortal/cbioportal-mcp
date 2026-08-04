@@ -22,6 +22,7 @@ import sys
 from functools import lru_cache
 from importlib import resources as importlib_resources
 from pathlib import Path
+from threading import Lock
 from typing import Optional
 from fastmcp import FastMCP
 
@@ -31,6 +32,7 @@ from cbioportal_mcp.authentication.permissions import ensure_db_permissions
 from cbioportal_mcp.authentication.study_access import (
     AuthorizationError,
     authorize_study,
+    clickhouse_study_access_settings,
     get_current_study_access as resolve_current_study_access,
     guard_query_study_access,
     study_access_condition,
@@ -38,6 +40,7 @@ from cbioportal_mcp.authentication.study_access import (
 from cbioportal_mcp.telemetry import configure_telemetry, TelemetryMiddleware
 
 logger = logging.getLogger(__name__)
+_CLICKHOUSE_CUSTOM_SETTINGS_LOCK = Lock()
 
 # Regex pattern for valid cBioPortal study identifiers
 # Allows alphanumeric characters, underscores, and hyphens
@@ -459,6 +462,30 @@ def clickhouse_list_table_columns(table: str) -> dict[str, list[dict] | str]:
         return {"error_message": error_message}
 
 
+def _run_select_query_with_clickhouse_settings(query: str) -> dict:
+    """Execute a query while passing per-request ClickHouse settings."""
+    from clickhouse_connect import common as clickhouse_connect_common
+    from mcp_clickhouse.mcp_server import create_clickhouse_client, get_readonly_setting
+
+    client = create_clickhouse_client()
+    read_only = get_readonly_setting(client)
+    settings = {"readonly": read_only}
+    settings.update(clickhouse_study_access_settings())
+    with _CLICKHOUSE_CUSTOM_SETTINGS_LOCK:
+        previous_invalid_setting_action = clickhouse_connect_common.get_setting(
+            "invalid_setting_action"
+        )
+        clickhouse_connect_common.set_setting("invalid_setting_action", "send")
+        try:
+            result = client.query(query, settings=settings)
+        finally:
+            clickhouse_connect_common.set_setting(
+                "invalid_setting_action",
+                previous_invalid_setting_action,
+            )
+    return {"columns": result.column_names, "rows": result.result_rows}
+
+
 def run_select_query(query: str, *, enforce_study_access: bool = True) -> list[dict]:
     """
     Execute arbitrary ClickHouse SQL SELECT query.
@@ -469,15 +496,19 @@ def run_select_query(query: str, *, enforce_study_access: bool = True) -> list[d
     Returns:
         list: A list of rows, where each row is a dictionary with column names as keys and corresponding values.
     """
-    from mcp_clickhouse.mcp_server import run_select_query
-
     if enforce_study_access:
         guard_query_study_access(query)
 
     # DB-level read-only permissions (enforced on startup) prevent non-SELECT queries,
     # so we don't need application-level query filtering. This allows CTEs (WITH ... AS).
-    logger.debug("run_select_query: delegate the query to run_select_query tool of ClickHouse MCP")
-    ch_query_result = run_select_query(query)
+    logger.debug("run_select_query: delegate the query to ClickHouse")
+    config = get_mcp_config()
+    if config.clickhouse_row_policy_enabled:
+        ch_query_result = _run_select_query_with_clickhouse_settings(query)
+    else:
+        from mcp_clickhouse.mcp_server import run_select_query as mcp_clickhouse_run_select_query
+
+        ch_query_result = mcp_clickhouse_run_select_query(query)
     result = zip_select_query_result(ch_query_result)
     return result
 

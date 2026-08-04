@@ -110,6 +110,22 @@ intentionally conservative: study-scoped queries must include literal
 `study='...'` / `studies=['...']`, so the server can verify the requested study
 IDs before ClickHouse executes the query.
 
+For stronger isolation, enable ClickHouse row-policy enforcement:
+
+```bash
+export CBIOPORTAL_MCP_CLICKHOUSE_ROW_POLICY_ENABLED=true
+# optional; ClickHouse custom settings generally need an allowed prefix.
+export CBIOPORTAL_MCP_CLICKHOUSE_ALLOWED_STUDIES_SETTING=SQL_cbiomcp_allowed_studies
+```
+
+In this mode, the MCP server passes the resolved study allowlist to ClickHouse
+as a query setting on every SELECT. Row policies should then filter each
+study-scoped table, including indirect tables such as raw `mutation` rows where
+the study is derived through `sample_id`, `genetic_profile_id`, or another
+provenance path. This is the recommended defense-in-depth mode for restricted
+deployments; the app-level guard still rejects explicit requests for denied
+study IDs and blocks attempts to set the internal allowlist setting in user SQL.
+
 For a runnable local Keycloak + ClickHouse + MCP authz stack, see
 [`docker/local-e2e/`](docker/local-e2e/).
 
