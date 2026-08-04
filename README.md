@@ -47,6 +47,88 @@ export CLICKHOUSE_MCP_SERVER_TRANSPORT=stdio # or http or sse
 # export CLICKHOUSE_MCP_HTTP_PATH=/db/mcp
 ```
 
+### Study-Level Access Control
+
+Public deployments default to unrestricted study access:
+
+```bash
+export CBIOPORTAL_MCP_STUDY_ACCESS_MODE=public
+```
+
+Internal deployments can enable per-request study authorization:
+
+```bash
+export CBIOPORTAL_MCP_STUDY_ACCESS_MODE=restricted
+export CBIOPORTAL_MCP_AUTH_REQUIRED=true
+```
+
+The MCP server expects authentication to be handled by a trusted reverse proxy
+or gateway backed by Keycloak. The proxy should validate the user session or
+token, strip spoofable inbound identity headers, and inject trusted headers such
+as:
+
+```text
+x-user-id: <keycloak-sub-or-username>
+x-user-email: <email>
+x-forwarded-groups: /group/a,/group/b
+x-cbioportal-allowed-studies: study_a,study_b
+```
+
+If your proxy can inject allowed studies directly, no ACL file is required. If
+you prefer to manage access in the MCP deployment, configure a JSON ACL:
+
+```bash
+export CBIOPORTAL_MCP_STUDY_ACL_FILE=/etc/cbioportal-mcp/study-acl.json
+```
+
+```json
+{
+  "users": {
+    "alice@example.org": ["brca_msk_2024"],
+    "keycloak-subject-id": ["study_a", "study_b"]
+  },
+  "groups": {
+    "/cbioportal/admins": ["*"],
+    "/research/brca": ["brca_msk_2024"]
+  },
+  "default": []
+}
+```
+
+Optional hardening for header-based auth:
+
+```bash
+export CBIOPORTAL_MCP_AUTH_PROXY_SECRET=shared-secret-known-only-to-the-proxy
+# optional; default is x-cbioportal-mcp-proxy-secret
+export CBIOPORTAL_MCP_AUTH_PROXY_SECRET_HEADER=x-cbioportal-mcp-proxy-secret
+```
+
+In restricted mode, `list_studies`, study guide access, and arbitrary ClickHouse
+queries are checked against the current user's allowed studies. Arbitrary SQL is
+intentionally conservative: study-scoped queries must include literal
+`cancer_study_identifier` filters, or parameterized view arguments such as
+`study='...'` / `studies=['...']`, so the server can verify the requested study
+IDs before ClickHouse executes the query.
+
+For stronger isolation, enable ClickHouse row-policy enforcement:
+
+```bash
+export CBIOPORTAL_MCP_CLICKHOUSE_ROW_POLICY_ENABLED=true
+# optional; ClickHouse custom settings generally need an allowed prefix.
+export CBIOPORTAL_MCP_CLICKHOUSE_ALLOWED_STUDIES_SETTING=SQL_cbiomcp_allowed_studies
+```
+
+In this mode, the MCP server passes the resolved study allowlist to ClickHouse
+as a query setting on every SELECT. Row policies should then filter each
+study-scoped table, including indirect tables such as raw `mutation` rows where
+the study is derived through `sample_id`, `genetic_profile_id`, or another
+provenance path. This is the recommended defense-in-depth mode for restricted
+deployments; the app-level guard still rejects explicit requests for denied
+study IDs and blocks attempts to set the internal allowlist setting in user SQL.
+
+For a runnable local Keycloak + ClickHouse + MCP authz stack, see
+[`docker/local-e2e/`](docker/local-e2e/).
+
 ## Preparing the database
 
 **We strongly recommend pointing the MCP at a *separate* ClickHouse database, not your production cBioPortal database directly.** Two reasons:
