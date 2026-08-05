@@ -111,6 +111,63 @@ def _extract_user_identity() -> tuple[str | None, str | None, str]:
         return None, None, "unknown"
 
 
+def _extract_mcp_client_info(
+    context: MiddlewareContext[mt.CallToolRequestParams],
+) -> tuple[str | None, str | None]:
+    """Read the MCP client's self-reported identity from the initialize handshake.
+
+    ``mcp.client`` (see ``_extract_user_identity`` above) only answers "is this
+    LibreChat or not" via the x-user-id header convention. Every non-LibreChat
+    connector — Claude Code, Codex, Claude Desktop, or anything else plugged
+    straight into the MCP endpoint — currently collapses into the same
+    "direct" bucket with no further distinction.
+
+    Every MCP client sends a ``clientInfo`` block (``name``/``version``) as
+    part of ``initialize`` regardless of which surface it is, so this is the
+    signal that actually distinguishes *which* direct connector is calling.
+
+    Returns (client_name, client_version), either may be None.
+    """
+    try:
+        fastmcp_context = context.fastmcp_context
+        if fastmcp_context is None:
+            return None, None
+        client_params = fastmcp_context.session.client_params
+        if client_params is None:
+            return None, None
+        client_info = client_params.clientInfo
+        return client_info.name or None, client_info.version or None
+    except Exception as exc:
+        logger.debug("_extract_mcp_client_info failed: %s", exc)
+        return None, None
+
+
+def _extract_session_id(
+    context: MiddlewareContext[mt.CallToolRequestParams],
+) -> str | None:
+    """Read the MCP transport session ID (Streamable HTTP / SSE) for this call.
+
+    Stable for the lifetime of one client connection, then a fresh session ID
+    is issued on reconnect. Unlike network.client.ip (shared behind NAT/VPN,
+    unstable on dynamic IPs) or enduser.id (only present when LibreChat sends
+    x-user-id), this gives a reliable count of distinct *connections* even for
+    anonymous direct-connector traffic — e.g. "how many separate Claude Code
+    sessions hit the server today" — independent of whether any user identity
+    was ever attached. It is not a persistent user identity: the same human
+    reconnecting gets a new ID.
+
+    Returns None for stdio/in-memory transports, which have no session ID.
+    """
+    try:
+        fastmcp_context = context.fastmcp_context
+        if fastmcp_context is None:
+            return None
+        return fastmcp_context.session_id
+    except Exception as exc:
+        logger.debug("_extract_session_id failed: %s", exc)
+        return None
+
+
 def _extract_client_ip() -> str | None:
     """Extract the original client IP from the active HTTP request.
 
@@ -139,7 +196,16 @@ def _extract_client_ip() -> str | None:
     return None
 
 
-def _llmobs_tool_span(tool_name: str, arguments: dict, user_id: str | None, user_email: str | None):
+def _llmobs_tool_span(
+    tool_name: str,
+    arguments: dict,
+    user_id: str | None,
+    user_email: str | None,
+    client: str,
+    client_name: str | None,
+    client_version: str | None,
+    session_id: str | None,
+):
     """Start a Datadog LLMObs tool span for an MCP tool call.
 
     Returns None if LLMObs is not initialized (e.g. no DD_API_KEY).
@@ -150,10 +216,21 @@ def _llmobs_tool_span(tool_name: str, arguments: dict, user_id: str | None, user
         span = LLMObs.start_span(span_kind="tool", name=f"mcp.tool.{tool_name}")
         if user_id:
             span.set_tag("usr.id", user_id)
+        span.set_tag("mcp.client", client)
+        if client_name:
+            span.set_tag("mcp.client.name", client_name)
+        if session_id:
+            span.set_tag("mcp.session.id", session_id)
 
         metadata: dict = {}
         if user_email:
             metadata["user_email"] = user_email
+        if client_name:
+            metadata["mcp_client_name"] = client_name
+        if client_version:
+            metadata["mcp_client_version"] = client_version
+        if session_id:
+            metadata["mcp_session_id"] = session_id
 
         LLMObs.annotate(
             span=span,
@@ -203,10 +280,21 @@ class TelemetryMiddleware(Middleware):
 
     OTel span name : ``mcp.tool/<tool_name>``
     OTel attributes:
-      mcp.tool.name       Tool name
-      network.client.ip   Original client IP from X-Forwarded-For (HTTP only)
-      mcp.tool.success    True on success, False when an exception propagates
-      error.type          Exception class name on failure
+      mcp.tool.name        Tool name
+      network.client.ip    Original client IP from X-Forwarded-For (HTTP only)
+      mcp.tool.success     True on success, False when an exception propagates
+      error.type           Exception class name on failure
+      mcp.client            "librechat" | "direct" | "unknown", from the
+                            x-user-id header convention (see _extract_user_identity).
+      mcp.client.name       Client app name from the MCP initialize handshake's
+                            clientInfo (e.g. "claude-code", "codex") — the
+                            signal that distinguishes *which* direct connector
+                            is calling, since mcp.client alone only says
+                            "not librechat" for all of them.
+      mcp.client.version    Client app version from the same handshake.
+      mcp.session.id        MCP transport session ID (HTTP/SSE only) — a stable
+                            per-connection ID usable to count distinct sessions
+                            even when no user identity is attached.
 
     The LLMObs tool span populates the Datadog LLM Observability dashboard widgets
     (Trace Success Rate, Total Number of Traces, Estimated Total Cost).
@@ -223,14 +311,31 @@ class TelemetryMiddleware(Middleware):
         tool_name = getattr(context.message, "name", None) or "unknown"
         arguments = getattr(context.message, "arguments", {}) or {}
         user_id, user_email, client = _extract_user_identity()
+        client_name, client_version = _extract_mcp_client_info(context)
+        session_id = _extract_session_id(context)
 
-        llmobs_span = _llmobs_tool_span(tool_name, arguments, user_id, user_email)
+        llmobs_span = _llmobs_tool_span(
+            tool_name,
+            arguments,
+            user_id,
+            user_email,
+            client,
+            client_name,
+            client_version,
+            session_id,
+        )
 
         with self._tracer.start_as_current_span(f"mcp.tool/{tool_name}") as span:
             span.set_attribute("mcp.tool.name", tool_name)
             span.set_attribute("mcp.client", client)
             if user_id:
                 span.set_attribute("enduser.id", user_id)
+            if client_name:
+                span.set_attribute("mcp.client.name", client_name)
+            if client_version:
+                span.set_attribute("mcp.client.version", client_version)
+            if session_id:
+                span.set_attribute("mcp.session.id", session_id)
 
             client_ip = _extract_client_ip()
             if client_ip:

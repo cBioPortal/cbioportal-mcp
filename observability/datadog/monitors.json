@@ -1,0 +1,41 @@
+{
+  "_comment": "Datadog monitor definitions built on the mcp.client.name / mcp.client / mcp.tool.success span tags emitted by TelemetryMiddleware (src/cbioportal_mcp/telemetry.py). Apply via the Datadog UI (Monitors > New Monitor > import) or `POST /api/v1/monitor` for each object in `monitors`. Adjust the `env` search fragment and thresholds to your deployment before enabling.",
+  "monitors": [
+    {
+      "name": "[cBioPortal MCP] No requests received (heartbeat)",
+      "type": "trace-analytics alert",
+      "query": "spans(\"service:cbioportal-mcp\").rollup(\"count\").last(\"15m\") < 1",
+      "message": "cBioPortal MCP has received zero tool-call requests in the last 15 minutes across all client surfaces (LibreChat, Claude Code, Codex, etc.). This usually means either genuinely no traffic, or the telemetry pipeline / server itself is down.\n\nCheck:\n- Is the MCP server process healthy?\n- Is the OTel collector / Datadog agent reachable (see telemetry.py configure_telemetry logs)?\n\n{{#is_alert}}@pagerduty-cbioportal-mcp{{/is_alert}}",
+      "tags": ["service:cbioportal-mcp", "team:cbioportal-mcp"],
+      "options": {
+        "notify_no_data": false,
+        "renotify_interval": 0,
+        "thresholds": { "critical": 1 }
+      }
+    },
+    {
+      "name": "[cBioPortal MCP] Elevated tool error rate by client surface",
+      "type": "trace-analytics alert",
+      "query": "spans(\"service:cbioportal-mcp mcp.tool.success:false\").rollup(\"count\").by(\"mcp.client.name\").last(\"10m\") > 20",
+      "message": "One MCP client surface (mcp.client.name: {{mcp.client.name.name}}) has produced more than 20 failed tool calls in the last 10 minutes.\n\nBecause errors are broken out by client surface, this points at whether the problem is surface-specific (e.g. LibreChat sending malformed headers, a Claude Code/Codex connector version mismatch) or systemic (ClickHouse/backend issue affecting everyone).\n\n{{#is_warning}}@slack-cbioportal-mcp-alerts{{/is_warning}}\n{{#is_alert}}@pagerduty-cbioportal-mcp{{/is_alert}}",
+      "tags": ["service:cbioportal-mcp", "team:cbioportal-mcp"],
+      "options": {
+        "notify_no_data": false,
+        "renotify_interval": 60,
+        "thresholds": { "critical": 20, "warning": 10 }
+      }
+    },
+    {
+      "name": "[cBioPortal MCP] Requests missing MCP client identity",
+      "type": "trace-analytics alert",
+      "query": "spans(\"service:cbioportal-mcp -mcp.client.name:*\").rollup(\"count\").last(\"30m\") > 50",
+      "message": "More than 50 tool-call requests in the last 30 minutes carried no mcp.client.name tag — meaning TelemetryMiddleware could not read a clientInfo block from the MCP initialize handshake for these calls.\n\nThis directly guards the instrumentation added for request-origin tracking: a spike here means some client population (old SDK version, a proxy stripping the handshake, a bug in `_extract_mcp_client_info`) has gone dark for surface attribution, even though the requests themselves are succeeding. Traffic in this state still executes normally — it just can't be attributed to LibreChat vs a direct connector on the dashboard.\n\n@slack-cbioportal-mcp-alerts",
+      "tags": ["service:cbioportal-mcp", "team:cbioportal-mcp"],
+      "options": {
+        "notify_no_data": false,
+        "renotify_interval": 0,
+        "thresholds": { "critical": 50, "warning": 20 }
+      }
+    }
+  ]
+}

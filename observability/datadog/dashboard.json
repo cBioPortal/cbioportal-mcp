@@ -1,0 +1,284 @@
+{
+  "title": "cBioPortal MCP — Request Origin & User Activity",
+  "description": "Who is calling the cBioPortal MCP server, from where, and through which surface (LibreChat vs a directly-plugged-in connector like Claude Code or Codex). Built on the mcp.client / mcp.client.name / mcp.session.id / enduser.id / network.client.ip span tags emitted by TelemetryMiddleware (src/cbioportal_mcp/telemetry.py).",
+  "layout_type": "ordered",
+  "reflow_type": "fixed",
+  "template_variables": [
+    {
+      "name": "env",
+      "prefix": "env",
+      "default": "*"
+    }
+  ],
+  "widgets": [
+    {
+      "definition": {
+        "type": "note",
+        "content": "**How to read this dashboard**\n\n- `mcp.client` = `librechat` when the x-user-id header LibreChat injects is present, `direct` otherwise (any other MCP client, or a direct connector with no header at all). `unknown` on extraction failure.\n- `mcp.client.name` / `mcp.client.version` = the calling app's self-reported identity from the MCP `initialize` handshake (`claude-code`, `codex`, ...). `mcp.client` alone only says \"not librechat\" for every one of these — this is what actually tells them apart.\n- `enduser.id` = a real user identity, populated from LibreChat's x-user-id header. Direct connectors have none today (no auth-proxy identity layer exists upstream yet).\n- `mcp.session.id` = a stable per-connection ID, present even for anonymous traffic — use it to count distinct *sessions*, not distinct people.\n\nTreat \"distinct users\" as `enduser.id` cardinality for LibreChat traffic, and \"distinct sessions\" (`mcp.session.id`) as the closest available proxy for anonymous direct-connector traffic.",
+        "background_color": "gray",
+        "font_size": "14",
+        "text_align": "left",
+        "show_tick": false
+      },
+      "layout": { "x": 0, "y": 0, "width": 12, "height": 3 }
+    },
+    {
+      "definition": {
+        "type": "group",
+        "title": "Traffic Overview",
+        "layout_type": "ordered",
+        "widgets": [
+          {
+            "definition": {
+              "title": "Total Requests",
+              "type": "query_value",
+              "requests": [
+                {
+                  "formulas": [{ "formula": "query1" }],
+                  "queries": [
+                    {
+                      "data_source": "spans",
+                      "name": "query1",
+                      "search": { "query": "service:cbioportal-mcp $env" },
+                      "compute": { "aggregation": "count" }
+                    }
+                  ],
+                  "response_format": "scalar"
+                }
+              ],
+              "autoscale": true,
+              "precision": 0
+            },
+            "layout": { "x": 0, "y": 0, "width": 3, "height": 3 }
+          },
+          {
+            "definition": {
+              "title": "Distinct Known Users (enduser.id)",
+              "type": "query_value",
+              "requests": [
+                {
+                  "formulas": [{ "formula": "query1" }],
+                  "queries": [
+                    {
+                      "data_source": "spans",
+                      "name": "query1",
+                      "search": { "query": "service:cbioportal-mcp $env @enduser.id:*" },
+                      "compute": { "aggregation": "cardinality", "metric": "@enduser.id" }
+                    }
+                  ],
+                  "response_format": "scalar"
+                }
+              ],
+              "autoscale": true,
+              "precision": 0
+            },
+            "layout": { "x": 3, "y": 0, "width": 3, "height": 3 }
+          },
+          {
+            "definition": {
+              "title": "Distinct Sessions (mcp.session.id)",
+              "type": "query_value",
+              "requests": [
+                {
+                  "formulas": [{ "formula": "query1" }],
+                  "queries": [
+                    {
+                      "data_source": "spans",
+                      "name": "query1",
+                      "search": { "query": "service:cbioportal-mcp $env" },
+                      "compute": { "aggregation": "cardinality", "metric": "@mcp.session.id" }
+                    }
+                  ],
+                  "response_format": "scalar"
+                }
+              ],
+              "autoscale": true,
+              "precision": 0
+            },
+            "layout": { "x": 6, "y": 0, "width": 3, "height": 3 }
+          },
+          {
+            "definition": {
+              "title": "Distinct Client IPs",
+              "type": "query_value",
+              "requests": [
+                {
+                  "formulas": [{ "formula": "query1" }],
+                  "queries": [
+                    {
+                      "data_source": "spans",
+                      "name": "query1",
+                      "search": { "query": "service:cbioportal-mcp $env" },
+                      "compute": { "aggregation": "cardinality", "metric": "@network.client.ip" }
+                    }
+                  ],
+                  "response_format": "scalar"
+                }
+              ],
+              "autoscale": true,
+              "precision": 0
+            },
+            "layout": { "x": 9, "y": 0, "width": 3, "height": 3 }
+          }
+        ]
+      },
+      "layout": { "x": 0, "y": 3, "width": 12, "height": 4 }
+    },
+    {
+      "definition": {
+        "title": "Requests Over Time by Client Surface",
+        "type": "timeseries",
+        "requests": [
+          {
+            "formulas": [{ "formula": "query1" }],
+            "queries": [
+              {
+                "data_source": "spans",
+                "name": "query1",
+                "search": { "query": "service:cbioportal-mcp $env" },
+                "group_by": [
+                  {
+                    "facet": "@mcp.client.name",
+                    "limit": 10,
+                    "sort": { "order": "desc", "aggregation": "count" }
+                  }
+                ],
+                "compute": { "aggregation": "count" }
+              }
+            ],
+            "response_format": "timeseries",
+            "style": { "palette": "dog_classic" },
+            "display_type": "bars"
+          }
+        ]
+      },
+      "layout": { "x": 0, "y": 7, "width": 12, "height": 4 }
+    },
+    {
+      "definition": {
+        "title": "Requests Over Time: LibreChat vs Direct Connector",
+        "type": "timeseries",
+        "requests": [
+          {
+            "formulas": [{ "formula": "query1" }],
+            "queries": [
+              {
+                "data_source": "spans",
+                "name": "query1",
+                "search": { "query": "service:cbioportal-mcp $env" },
+                "group_by": [
+                  {
+                    "facet": "@mcp.client",
+                    "limit": 5,
+                    "sort": { "order": "desc", "aggregation": "count" }
+                  }
+                ],
+                "compute": { "aggregation": "count" }
+              }
+            ],
+            "response_format": "timeseries",
+            "style": { "palette": "cool" },
+            "display_type": "line"
+          }
+        ]
+      },
+      "layout": { "x": 0, "y": 11, "width": 12, "height": 4 }
+    },
+    {
+      "definition": {
+        "title": "Top 10 Users by Request Count",
+        "type": "toplist",
+        "requests": [
+          {
+            "formulas": [{ "formula": "query1", "limit": { "count": 10, "order": "desc" } }],
+            "queries": [
+              {
+                "data_source": "spans",
+                "name": "query1",
+                "search": { "query": "service:cbioportal-mcp $env @enduser.id:*" },
+                "group_by": [{ "facet": "@enduser.id", "limit": 10, "sort": { "order": "desc", "aggregation": "count" } }],
+                "compute": { "aggregation": "count" }
+              }
+            ],
+            "response_format": "scalar"
+          }
+        ]
+      },
+      "layout": { "x": 0, "y": 15, "width": 6, "height": 4 }
+    },
+    {
+      "definition": {
+        "title": "Top 10 Client IPs by Request Count",
+        "type": "toplist",
+        "requests": [
+          {
+            "formulas": [{ "formula": "query1", "limit": { "count": 10, "order": "desc" } }],
+            "queries": [
+              {
+                "data_source": "spans",
+                "name": "query1",
+                "search": { "query": "service:cbioportal-mcp $env" },
+                "group_by": [{ "facet": "@network.client.ip", "limit": 10, "sort": { "order": "desc", "aggregation": "count" } }],
+                "compute": { "aggregation": "count" }
+              }
+            ],
+            "response_format": "scalar"
+          }
+        ]
+      },
+      "layout": { "x": 6, "y": 15, "width": 6, "height": 4 }
+    },
+    {
+      "definition": {
+        "title": "Requests by Client Name × mcp.client × Tool",
+        "type": "table",
+        "requests": [
+          {
+            "formulas": [{ "formula": "query1" }],
+            "queries": [
+              {
+                "data_source": "spans",
+                "name": "query1",
+                "search": { "query": "service:cbioportal-mcp $env" },
+                "group_by": [
+                  { "facet": "@mcp.client.name", "limit": 10, "sort": { "order": "desc", "aggregation": "count" } },
+                  { "facet": "@mcp.client", "limit": 5, "sort": { "order": "desc", "aggregation": "count" } },
+                  { "facet": "@mcp.tool.name", "limit": 15, "sort": { "order": "desc", "aggregation": "count" } }
+                ],
+                "compute": { "aggregation": "count" }
+              }
+            ],
+            "response_format": "scalar"
+          }
+        ]
+      },
+      "layout": { "x": 0, "y": 19, "width": 12, "height": 5 }
+    },
+    {
+      "definition": {
+        "title": "Tool Errors Over Time by Client Surface",
+        "type": "timeseries",
+        "requests": [
+          {
+            "formulas": [{ "formula": "query1" }],
+            "queries": [
+              {
+                "data_source": "spans",
+                "name": "query1",
+                "search": { "query": "service:cbioportal-mcp $env mcp.tool.success:false" },
+                "group_by": [
+                  { "facet": "@mcp.client.name", "limit": 10, "sort": { "order": "desc", "aggregation": "count" } }
+                ],
+                "compute": { "aggregation": "count" }
+              }
+            ],
+            "response_format": "timeseries",
+            "style": { "palette": "warm" },
+            "display_type": "bars"
+          }
+        ]
+      },
+      "layout": { "x": 0, "y": 24, "width": 12, "height": 4 }
+    }
+  ]
+}
