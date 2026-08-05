@@ -2,7 +2,7 @@
 
 These definitions consume the span tags emitted by `TelemetryMiddleware`
 (`src/cbioportal_mcp/telemetry.py`): `mcp.client.name`, `mcp.client.version`,
-`mcp.client`, `mcp.session.id`, `enduser.id`, `network.client.ip`,
+`mcp.client_kind`, `mcp.session.id`, `enduser.id`, `network.client.ip`,
 `mcp.tool.name`, `mcp.tool.success`.
 
 They were written and JSON-validated locally but **not applied against a live
