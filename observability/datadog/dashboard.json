@@ -1,6 +1,6 @@
 {
   "title": "cBioPortal MCP — Request Origin & User Activity",
-  "description": "Who is calling the cBioPortal MCP server, from where, and through which surface (LibreChat vs a directly-plugged-in connector like Claude Code or Codex). Built on the mcp.client / mcp.client.name / mcp.session.id / enduser.id / network.client.ip span tags emitted by TelemetryMiddleware (src/cbioportal_mcp/telemetry.py).",
+  "description": "Who is calling the cBioPortal MCP server, from where, and through which surface (LibreChat vs a directly-plugged-in connector like Claude Code or Codex). Built on the mcp.client_kind / mcp.client.name / mcp.session.id / enduser.id / network.client.ip span tags emitted by TelemetryMiddleware (src/cbioportal_mcp/telemetry.py).",
   "layout_type": "ordered",
   "reflow_type": "fixed",
   "template_variables": [
@@ -14,7 +14,7 @@
     {
       "definition": {
         "type": "note",
-        "content": "**How to read this dashboard**\n\n- `mcp.client` = `librechat` when the x-user-id header LibreChat injects is present, `direct` otherwise (any other MCP client, or a direct connector with no header at all). `unknown` on extraction failure.\n- `mcp.client.name` / `mcp.client.version` = the calling app's self-reported identity from the MCP `initialize` handshake (`claude-code`, `codex`, ...). `mcp.client` alone only says \"not librechat\" for every one of these — this is what actually tells them apart.\n- `enduser.id` = a real user identity, populated from LibreChat's x-user-id header. Direct connectors have none today (no auth-proxy identity layer exists upstream yet).\n- `mcp.session.id` = a stable per-connection ID, present even for anonymous traffic — use it to count distinct *sessions*, not distinct people.\n\nTreat \"distinct users\" as `enduser.id` cardinality for LibreChat traffic, and \"distinct sessions\" (`mcp.session.id`) as the closest available proxy for anonymous direct-connector traffic.",
+        "content": "**How to read this dashboard**\n\n- `mcp.client_kind` = `librechat` when the x-user-id header LibreChat injects is present, `direct` otherwise (any other MCP client, or a direct connector with no header at all). `unknown` on extraction failure.\n- `mcp.client.name` / `mcp.client.version` = the calling app's self-reported identity from the MCP `initialize` handshake (`claude-code`, `codex`, ...). `mcp.client_kind` alone only says \"not librechat\" for every one of these — this is what actually tells them apart.\n- `enduser.id` = a real user identity, populated from LibreChat's x-user-id header. Direct connectors have none today (no auth-proxy identity layer exists upstream yet).\n- `mcp.session.id` = a stable per-connection ID, present even for anonymous traffic — use it to count distinct *sessions*, not distinct people.\n\nTreat \"distinct users\" as `enduser.id` cardinality for LibreChat traffic, and \"distinct sessions\" (`mcp.session.id`) as the closest available proxy for anonymous direct-connector traffic.",
         "background_color": "gray",
         "font_size": "14",
         "text_align": "left",
@@ -168,7 +168,7 @@
                 "search": { "query": "service:cbioportal-mcp $env" },
                 "group_by": [
                   {
-                    "facet": "@mcp.client",
+                    "facet": "@mcp.client_kind",
                     "limit": 5,
                     "sort": { "order": "desc", "aggregation": "count" }
                   }
@@ -230,7 +230,7 @@
     },
     {
       "definition": {
-        "title": "Requests by Client Name × mcp.client × Tool",
+        "title": "Requests by Client Name × mcp.client_kind × Tool",
         "type": "table",
         "requests": [
           {
@@ -242,7 +242,7 @@
                 "search": { "query": "service:cbioportal-mcp $env" },
                 "group_by": [
                   { "facet": "@mcp.client.name", "limit": 10, "sort": { "order": "desc", "aggregation": "count" } },
-                  { "facet": "@mcp.client", "limit": 5, "sort": { "order": "desc", "aggregation": "count" } },
+                  { "facet": "@mcp.client_kind", "limit": 5, "sort": { "order": "desc", "aggregation": "count" } },
                   { "facet": "@mcp.tool.name", "limit": 15, "sort": { "order": "desc", "aggregation": "count" } }
                 ],
                 "compute": { "aggregation": "count" }

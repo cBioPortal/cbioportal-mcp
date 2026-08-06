@@ -189,8 +189,9 @@ def _run_with_span_capture(call, *, stateless: bool = True):
 
 def test_mcp_client_tag_is_librechat_when_x_user_id_present():
     """
-    The mcp.client OTel span attribute must be 'librechat' when x-user-id is present,
-    regardless of the header value (even empty string counts as LibreChat traffic).
+    The mcp.client_kind OTel span attribute must be 'librechat' when x-user-id is
+    present, regardless of the header value (even empty string counts as LibreChat
+    traffic).
     """
     spans = _run_with_span_capture(
         lambda client: _mcp_call(client, "ping", headers={"x-user-id": "any-value"})
@@ -198,23 +199,23 @@ def test_mcp_client_tag_is_librechat_when_x_user_id_present():
 
     tool_spans = [s for s in spans if s.name == "mcp.tool/ping"]
     assert tool_spans, "Expected an mcp.tool/ping span"
-    assert tool_spans[0].attributes["mcp.client"] == "librechat"
+    assert tool_spans[0].attributes["mcp.client_kind"] == "librechat"
 
 
 def test_mcp_client_tag_is_direct_when_no_x_user_id_header():
-    """The mcp.client OTel span attribute must be 'direct' with no x-user-id header."""
+    """The mcp.client_kind OTel span attribute must be 'direct' with no x-user-id header."""
     spans = _run_with_span_capture(
         lambda client: _mcp_call(client, "ping", headers={})
     )
 
     tool_spans = [s for s in spans if s.name == "mcp.tool/ping"]
     assert tool_spans, "Expected an mcp.tool/ping span"
-    assert tool_spans[0].attributes["mcp.client"] == "direct"
+    assert tool_spans[0].attributes["mcp.client_kind"] == "direct"
 
 
 def test_mcp_client_name_distinguishes_direct_connectors():
     """
-    mcp.client alone only says "not librechat" for every direct connector. The
+    mcp.client_kind alone only says "not librechat" for every direct connector. The
     clientInfo sent during initialize (mcp.client.name/version) is what actually
     distinguishes, e.g., Claude Code from Codex among that "direct" traffic.
     """
@@ -228,7 +229,7 @@ def test_mcp_client_name_distinguishes_direct_connectors():
     tool_spans = [s for s in spans if s.name == "mcp.tool/ping"]
     assert tool_spans, "Expected an mcp.tool/ping span"
     attrs = tool_spans[0].attributes
-    assert attrs["mcp.client"] == "direct"
+    assert attrs["mcp.client_kind"] == "direct"
     assert attrs["mcp.client.name"] == "claude-code"
     assert attrs["mcp.client.version"] == "1.2.3"
 

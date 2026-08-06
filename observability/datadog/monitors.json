@@ -1,5 +1,5 @@
 {
-  "_comment": "Datadog monitor definitions built on the mcp.client.name / mcp.client / mcp.tool.success span tags emitted by TelemetryMiddleware (src/cbioportal_mcp/telemetry.py). Apply via the Datadog UI (Monitors > New Monitor > import) or `POST /api/v1/monitor` for each object in `monitors`. Adjust the `env` search fragment and thresholds to your deployment before enabling.",
+  "_comment": "Datadog monitor definitions built on the mcp.client.name / mcp.client_kind / mcp.tool.success span tags emitted by TelemetryMiddleware (src/cbioportal_mcp/telemetry.py). Apply via the Datadog UI (Monitors > New Monitor > import) or `POST /api/v1/monitor` for each object in `monitors`. Adjust the `env` search fragment and thresholds to your deployment before enabling.",
   "monitors": [
     {
       "name": "[cBioPortal MCP] No requests received (heartbeat)",

@@ -116,11 +116,11 @@ def _extract_mcp_client_info(
 ) -> tuple[str | None, str | None]:
     """Read the MCP client's self-reported identity from the initialize handshake.
 
-    ``mcp.client`` (see ``_extract_user_identity`` above) only answers "is this
-    LibreChat or not" via the x-user-id header convention. Every non-LibreChat
-    connector — Claude Code, Codex, Claude Desktop, or anything else plugged
-    straight into the MCP endpoint — currently collapses into the same
-    "direct" bucket with no further distinction.
+    ``mcp.client_kind`` (see ``_extract_user_identity`` above) only answers "is
+    this LibreChat or not" via the x-user-id header convention. Every
+    non-LibreChat connector — Claude Code, Codex, Claude Desktop, or anything
+    else plugged straight into the MCP endpoint — currently collapses into the
+    same "direct" bucket with no further distinction.
 
     Every MCP client sends a ``clientInfo`` block (``name``/``version``) as
     part of ``initialize`` regardless of which surface it is, so this is the
@@ -216,7 +216,7 @@ def _llmobs_tool_span(
         span = LLMObs.start_span(span_kind="tool", name=f"mcp.tool.{tool_name}")
         if user_id:
             span.set_tag("usr.id", user_id)
-        span.set_tag("mcp.client", client)
+        span.set_tag("mcp.client_kind", client)
         if client_name:
             span.set_tag("mcp.client.name", client_name)
         if session_id:
@@ -284,12 +284,16 @@ class TelemetryMiddleware(Middleware):
       network.client.ip    Original client IP from X-Forwarded-For (HTTP only)
       mcp.tool.success     True on success, False when an exception propagates
       error.type           Exception class name on failure
-      mcp.client            "librechat" | "direct" | "unknown", from the
+      mcp.client_kind       "librechat" | "direct" | "unknown", from the
                             x-user-id header convention (see _extract_user_identity).
+                            Named to avoid colliding with mcp.client.name/version
+                            below — Datadog treats dotted attribute names as a
+                            hierarchy, so a bare "mcp.client" tag alongside
+                            "mcp.client.name" silently shadows one or the other.
       mcp.client.name       Client app name from the MCP initialize handshake's
                             clientInfo (e.g. "claude-code", "codex") — the
                             signal that distinguishes *which* direct connector
-                            is calling, since mcp.client alone only says
+                            is calling, since mcp.client_kind alone only says
                             "not librechat" for all of them.
       mcp.client.version    Client app version from the same handshake.
       mcp.session.id        MCP transport session ID (HTTP/SSE only) — a stable
@@ -327,7 +331,7 @@ class TelemetryMiddleware(Middleware):
 
         with self._tracer.start_as_current_span(f"mcp.tool/{tool_name}") as span:
             span.set_attribute("mcp.tool.name", tool_name)
-            span.set_attribute("mcp.client", client)
+            span.set_attribute("mcp.client_kind", client)
             if user_id:
                 span.set_attribute("enduser.id", user_id)
             if client_name:
