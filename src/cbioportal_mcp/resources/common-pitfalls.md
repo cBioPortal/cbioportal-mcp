@@ -618,6 +618,41 @@ Example:
 20. **Hold scope boundaries after refusal** — do not provide paper critiques, slide outlines, external pipeline code, or medical advice after user pushback.
 21. **Do not promise unavailable outputs** — provide data/handoffs instead of claiming to create plots, CSV files, or external apps.
 
+### 21. 🚨 ENUMERATION / CATALOG QUESTIONS TRIGGER SCHEMA EXPLORATION
+
+Questions that ask *"what X is available"* or *"what kind of Y are there"* are catalog/enumeration questions. A first-class list tool answers them in ONE call. Do not schema-explore.
+
+#### ❌ WRONG: exploring the schema before answering an enumeration question
+
+User: *"What kind of cancer are there in the database?"*
+
+- `clickhouse_list_tables()` — 60+ tables returned
+- `clickhouse_list_table_columns("cancer_study")` — schema dump
+- `SELECT DISTINCT type_of_cancer_id FROM cancer_study` — plausible but only after two probing calls
+- One more `clickhouse_list_table_columns("type_of_cancer")` "just to check"
+- Final aggregation query
+- **5+ tool calls for what was a 1-call answer.** The user's feedback: *"it took too many queries to the database to answer this simple question"* (issue #97).
+
+#### ✅ CORRECT: one call, one answer
+
+| User asks | Call this once | Then answer |
+|---|---|---|
+| "What cancer types are in the database?" | `list_studies(limit=100)` | GROUP BY `type_of_cancer_id` in the returned rows |
+| "What studies do you have?" | `list_studies(limit=100)` (or with a `search`) | list them |
+| "What guides do you have?" | `list_guides()` | list them |
+| "What study-specific guides are available?" | `list_study_guides()` | list them |
+| "Is there a guide for study X?" | `list_study_guides()` → check | say yes/no |
+| "Search cancer type X" | `search_oncotree("X")` | show matches |
+
+#### Rule
+
+- Enumeration questions map to a **first-class list tool**. Use it and stop.
+- Schema exploration (`clickhouse_list_tables`, `clickhouse_list_table_columns`) is for building custom SELECTs against tables you have NOT already covered with a list tool.
+- If `list_studies(limit=100)` returns fewer rows than the deployment actually has, raise the limit (up to `MAX_LIST_LIMIT` = 100) or, for a pure count, run a single `SELECT COUNT(*) FROM cancer_study`.
+- Do not `clickhouse_list_tables` "just to double-check" — the list tools already know the schema they query.
+
+---
+
 ## Validation Checklist
 
 Before trusting your results, ask:
@@ -638,3 +673,4 @@ Before trusting your results, ask:
 - [ ] Did I validate the user's premise before querying adjacent data?
 - [ ] Did I keep scope boundaries after any refusal?
 - [ ] Did I avoid promising plots, downloads, or external-code debugging that this MCP server cannot perform?
+- [ ] For enumeration/catalog questions ("what cancer types", "what studies", "what guides"), did I use a first-class list tool once instead of exploring the schema?
