@@ -20,8 +20,13 @@ import re
 import sys
 from functools import lru_cache
 from importlib import resources as importlib_resources
-from importlib.resources.abc import Traversable
 from pathlib import Path
+
+try:  # importlib.resources became a package (gaining .abc) only in 3.11
+    from importlib.resources.abc import Traversable
+except ImportError:  # Python 3.10; deprecated from 3.12, hence the order
+    from importlib.abc import Traversable
+
 from fastmcp import FastMCP
 from fastmcp.apps import UI_MIME_TYPE
 
