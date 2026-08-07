@@ -35,6 +35,7 @@ from cbioportal_mcp.cooccurrence_stats import (
     fisher_exact_two_sided,
     log2_odds_ratio,
 )
+from cbioportal_mcp.telemetry import configure_telemetry, TelemetryMiddleware
 
 logger = logging.getLogger(__name__)
 
@@ -1536,97 +1537,47 @@ def main():
         raise
 
 
-def _mutation_frequency_guide_text() -> str:
-    return _load_resource("mutation-frequency-guide.md")
+# Core query guides shipped in the image. Each is served both as a
+# cbioportal://<name> MCP resource and via the read_guide/list_guides tools. The
+# URI suffix is the markdown filename (cbioportal://<name> -> <name>.md), so this
+# one table drives the resource registration, read_guide, and list_guides below.
+GUIDES: list[tuple[str, str]] = [
+    ("cbioportal://mutation-frequency-guide", "Comprehensive guide for calculating gene mutation frequencies with gene-specific profiling denominators"),
+    ("cbioportal://clinical-data-guide", "Guide for querying clinical data including patient vs sample level considerations"),
+    ("cbioportal://sample-filtering-guide", "Guide for filtering samples and studies in cBioPortal queries"),
+    ("cbioportal://common-pitfalls", "Guide to avoid common mistakes when querying cBioPortal data"),
+    ("cbioportal://treatment-guide", "Guide for querying treatment/clinical event data including drug agents, timelines, and linking to genomic data"),
+    ("cbioportal://faq-guide", "General cBioPortal FAQ: history, how to cite, data types, reference genome, abbreviations, GISTIC thresholds, API access"),
+    ("cbioportal://statistical-tests-guide", "Statistical test selection guide — decision matrix for choosing Fisher's exact, Wilcoxon, chi-squared, t-test, ANOVA, etc. based on data type and group count"),
+    ("cbioportal://gene-expression-guide", "Gene expression / copy-number / methylation analysis. Covers genetic_alteration_derived, profile_type discovery, and the gene_pair_coexpression view for Spearman correlation between two genes"),
+    ("cbioportal://external-resources-guide", "Guide for finding external linked resources such as imaging, pathology, Minerva, HTAN, or other resource_* table links before declaring data unavailable"),
+    ("cbioportal://gene-resolution-guide", "Guide for resolving ambiguous gene symbols, aliases, gene families, and shorthand such as CD3 before querying expression or alteration data"),
+    ("cbioportal://study-resolution-guide", "Guide for resolving requested studies, avoiding silent substitute cohorts, and redirecting to known external cBioPortal instances when data is not in this deployment"),
+]
 
 
-def _clinical_data_guide_text() -> str:
-    return _load_resource("clinical-data-guide.md")
+def _guide_filename(uri: str) -> str:
+    """Map a cbioportal://<name> guide URI to its shipped <name>.md filename."""
+    return uri.removeprefix("cbioportal://") + ".md"
 
 
-def _sample_filtering_guide_text() -> str:
-    return _load_resource("sample-filtering-guide.md")
+# --- MCP resources: register each guide URI from the GUIDES table -------------
+def _register_guide_resources() -> None:
+    def _reader(uri: str):
+        # The reader must take no args: a parameter makes FastMCP treat the
+        # static URI as a resource *template* and reject it for lacking a
+        # {placeholder}. So bind `uri` via this factory's closure instead.
+        def _read() -> str:
+            return _load_resource(_guide_filename(uri))
+
+        _read.__name__ = uri.removeprefix("cbioportal://").replace("-", "_")
+        return _read
+
+    for uri, _desc in GUIDES:
+        mcp.resource(uri)(_reader(uri))
 
 
-def _common_pitfalls_guide_text() -> str:
-    return _load_resource("common-pitfalls.md")
-
-
-def _treatment_guide_text() -> str:
-    return _load_resource("treatment-guide.md")
-
-
-def _faq_guide_text() -> str:
-    return _load_resource("faq-guide.md")
-
-
-def _statistical_tests_guide_text() -> str:
-    return _load_resource("statistical-tests-guide.md")
-
-
-def _gene_expression_guide_text() -> str:
-    return _load_resource("gene-expression-guide.md")
-
-def _external_resources_guide_text() -> str:
-    return _load_resource("external-resources-guide.md")
-
-def _gene_resolution_guide_text() -> str:
-    return _load_resource("gene-resolution-guide.md")
-
-def _study_resolution_guide_text() -> str:
-    return _load_resource("study-resolution-guide.md")
-
-# --- MCP resources (decorator registers them) --------------------------------
-@mcp.resource("cbioportal://mutation-frequency-guide")
-def mutation_frequency_guide() -> str:
-    return _mutation_frequency_guide_text()
-
-
-@mcp.resource("cbioportal://clinical-data-guide")
-def clinical_data_guide() -> str:
-    return _clinical_data_guide_text()
-
-
-@mcp.resource("cbioportal://sample-filtering-guide")
-def sample_filtering_guide() -> str:
-    return _sample_filtering_guide_text()
-
-
-@mcp.resource("cbioportal://common-pitfalls")
-def common_pitfalls_guide() -> str:
-    return _common_pitfalls_guide_text()
-
-
-@mcp.resource("cbioportal://treatment-guide")
-def treatment_guide() -> str:
-    return _treatment_guide_text()
-
-
-@mcp.resource("cbioportal://faq-guide")
-def faq_guide() -> str:
-    return _faq_guide_text()
-
-
-@mcp.resource("cbioportal://statistical-tests-guide")
-def statistical_tests_guide() -> str:
-    return _statistical_tests_guide_text()
-
-
-@mcp.resource("cbioportal://gene-expression-guide")
-def gene_expression_guide() -> str:
-    return _gene_expression_guide_text()
-
-@mcp.resource("cbioportal://external-resources-guide")
-def external_resources_guide() -> str:
-    return _external_resources_guide_text()
-
-@mcp.resource("cbioportal://gene-resolution-guide")
-def gene_resolution_guide() -> str:
-    return _gene_resolution_guide_text()
-
-@mcp.resource("cbioportal://study-resolution-guide")
-def study_resolution_guide() -> str:
-    return _study_resolution_guide_text()
+_register_guide_resources()
 
 
 @mcp.tool(
@@ -1784,51 +1735,8 @@ def list_guides() -> list[dict]:
         }
         for name in _list_available_general_guides()
     ]
-    return deployment_guides + [
-        {
-            "uri": "cbioportal://mutation-frequency-guide",
-            "description": "Comprehensive guide for calculating gene mutation frequencies with gene-specific profiling denominators",
-        },
-        {
-            "uri": "cbioportal://clinical-data-guide",
-            "description": "Guide for querying clinical data including patient vs sample level considerations",
-        },
-        {
-            "uri": "cbioportal://sample-filtering-guide",
-            "description": "Guide for filtering samples and studies in cBioPortal queries",
-        },
-        {
-            "uri": "cbioportal://common-pitfalls",
-            "description": "Guide to avoid common mistakes when querying cBioPortal data",
-        },
-        {
-            "uri": "cbioportal://treatment-guide",
-            "description": "Guide for querying treatment/clinical event data including drug agents, timelines, and linking to genomic data",
-        },
-        {
-            "uri": "cbioportal://faq-guide",
-            "description": "General cBioPortal FAQ: history, how to cite, data types, reference genome, abbreviations, GISTIC thresholds, API access",
-        },
-        {
-            "uri": "cbioportal://statistical-tests-guide",
-            "description": "Statistical test selection guide — decision matrix for choosing Fisher's exact, Wilcoxon, chi-squared, t-test, ANOVA, etc. based on data type and group count",
-        },
-        {
-            "uri": "cbioportal://gene-expression-guide",
-            "description": "Gene expression / copy-number / methylation analysis. Covers genetic_alteration_derived, profile_type discovery, and the gene_pair_coexpression view for Spearman correlation between two genes",
-        },
-        {
-            "uri": "cbioportal://external-resources-guide",
-            "description": "Guide for finding external linked resources such as imaging, pathology, Minerva, HTAN, or other resource_* table links before declaring data unavailable"
-        },
-        {
-            "uri": "cbioportal://gene-resolution-guide",
-            "description": "Guide for resolving ambiguous gene symbols, aliases, gene families, and shorthand such as CD3 before querying expression or alteration data"
-        },
-        {
-            "uri": "cbioportal://study-resolution-guide",
-            "description": "Guide for resolving requested studies, avoiding silent substitute cohorts, and redirecting to known external cBioPortal instances when data is not in this deployment"
-        },
+    core_guides = [{"uri": uri, "description": desc} for uri, desc in GUIDES]
+    return deployment_guides + core_guides + [
         {
             "uri": "cbioportal://study-guide/{study_id}",
             "description": "Dynamic study-specific guide - use get_study_guide(study_id) tool to generate",
@@ -1845,30 +1753,16 @@ def read_guide(uri: str) -> str:
     Args:
         uri: The guide URI (e.g., "cbioportal://mutation-frequency-guide")
     """
-    # Resource content mapping
-    resources = {
-        "cbioportal://mutation-frequency-guide": _mutation_frequency_guide_text(),
-        "cbioportal://clinical-data-guide": _clinical_data_guide_text(),
-        "cbioportal://sample-filtering-guide": _sample_filtering_guide_text(),
-        "cbioportal://common-pitfalls": _common_pitfalls_guide_text(),
-        "cbioportal://treatment-guide": _treatment_guide_text(),
-        "cbioportal://faq-guide": _faq_guide_text(),
-        "cbioportal://statistical-tests-guide": _statistical_tests_guide_text(),
-        "cbioportal://gene-expression-guide": _gene_expression_guide_text(),
-        "cbioportal://external-resources-guide": _external_resources_guide_text(),
-        "cbioportal://gene-resolution-guide": _gene_resolution_guide_text(),
-        "cbioportal://study-resolution-guide": _study_resolution_guide_text()
-    }
-
-    if uri not in resources:
-        available_list = "\n".join(f"  - {r}" for r in resources.keys())
+    valid_uris = [u for u, _ in GUIDES]
+    if uri not in valid_uris:
+        available_list = "\n".join(f"  - {u}" for u in valid_uris)
         return (
             f"Resource not found: {uri}.\n"
             f"Available resources:\n{available_list}\n\n"
             "Use list_guides() for descriptions, or get_study_guide(study_id) for study-specific guides."
         )
 
-    return resources[uri]
+    return _load_resource(_guide_filename(uri))
 
 
 @mcp.tool()
@@ -2288,7 +2182,7 @@ def survival_widget() -> str:
 
 
 @mcp.tool(
-    app=ui.survival_app_config(),
+    app=ui.app_config(ui.SURVIVAL_UI_URI),
     description="""
     Generate an interactive Kaplan-Meier survival curve for a cBioPortal study.
 
@@ -2361,7 +2255,7 @@ def oncoprint_widget() -> str:
 
 
 @mcp.tool(
-    app=ui.oncoprint_app_config(),
+    app=ui.app_config(ui.ONCOPRINT_UI_URI),
     description="""
     Generate an interactive OncoPrint (gene x sample alteration matrix) for a cBioPortal study.
 
@@ -2439,7 +2333,7 @@ def lollipop_widget() -> str:
 
 
 @mcp.tool(
-    app=ui.lollipop_app_config(),
+    app=ui.app_config(ui.LOLLIPOP_UI_URI, connect_domains=[ui.GENOME_NEXUS_ORIGIN]),
     description="""
     Generate an interactive mutation lollipop diagram for a single gene in a cBioPortal study.
 
@@ -2503,7 +2397,7 @@ def cooccurrence_widget() -> str:
 
 
 @mcp.tool(
-    app=ui.cooccurrence_app_config(),
+    app=ui.app_config(ui.COOCCURRENCE_UI_URI),
     description="""
     Analyze pairwise alteration co-occurrence and mutual exclusivity among genes
     in a cBioPortal study.
@@ -2915,7 +2809,7 @@ def line_chart_widget() -> str:
 
 
 @mcp.tool(
-    app=ui.pie_chart_app_config(),
+    app=ui.app_config(ui.PIE_UI_URI),
     description="""
     Render a generic pie (or donut) chart from data you supply.
 
@@ -2967,7 +2861,7 @@ def pie_chart(
 
 
 @mcp.tool(
-    app=ui.bar_chart_app_config(),
+    app=ui.app_config(ui.BAR_UI_URI),
     description="""
     Render a generic bar chart from data you supply.
 
@@ -3026,7 +2920,7 @@ def bar_chart(
 
 
 @mcp.tool(
-    app=ui.line_chart_app_config(),
+    app=ui.app_config(ui.LINE_UI_URI),
     description="""
     Render a generic line chart from data you supply.
 
