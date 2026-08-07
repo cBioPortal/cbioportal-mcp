@@ -236,7 +236,7 @@ def test_mutation_diagram_happy_path(monkeypatch):
 
 
 def test_lollipop_app_config_allows_genome_nexus():
-    cfg = ui.lollipop_app_config()
+    cfg = ui.app_config(ui.LOLLIPOP_UI_URI, connect_domains=[ui.GENOME_NEXUS_ORIGIN])
     assert cfg.resource_uri == ui.LOLLIPOP_UI_URI == "ui://cbioportal/lollipop"
     # The lollipop is the one widget that reaches the network: its CSP must
     # allow connecting to Genome Nexus (and only that).

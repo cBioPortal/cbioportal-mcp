@@ -10,17 +10,17 @@ def test_new_targeted_guides_are_registered_and_readable():
     assert "cbioportal://gene-resolution-guide" in server_source
     assert "cbioportal://study-resolution-guide" in server_source
 
-    assert "resource_definition" in server._external_resources_guide_text()
-    assert "CD3D" in server._gene_resolution_guide_text()
-    assert "These examples are not exhaustive" in server._gene_resolution_guide_text()
-    assert "pedcbioportal.kidsfirstdrc.org" in server._study_resolution_guide_text()
+    assert "resource_definition" in server._load_resource("external-resources-guide.md")
+    assert "CD3D" in server._load_resource("gene-resolution-guide.md")
+    assert "These examples are not exhaustive" in server._load_resource("gene-resolution-guide.md")
+    assert "pedcbioportal.kidsfirstdrc.org" in server._load_resource("study-resolution-guide.md")
 
 
 def test_new_targeted_guides_stay_concise():
     targeted_guides = [
-        server._external_resources_guide_text(),
-        server._gene_resolution_guide_text(),
-        server._study_resolution_guide_text(),
+        server._load_resource("external-resources-guide.md"),
+        server._load_resource("gene-resolution-guide.md"),
+        server._load_resource("study-resolution-guide.md"),
     ]
 
     for guide in targeted_guides:
@@ -39,10 +39,10 @@ def test_system_prompt_routes_to_targeted_guides():
 
 
 def test_existing_guides_cover_open_issue_patterns():
-    clinical = server._clinical_data_guide_text()
-    mutation = server._mutation_frequency_guide_text()
-    faq = server._faq_guide_text()
-    pitfalls = server._common_pitfalls_guide_text()
+    clinical = server._load_resource("clinical-data-guide.md")
+    mutation = server._load_resource("mutation-frequency-guide.md")
+    faq = server._load_resource("faq-guide.md")
+    pitfalls = server._load_resource("common-pitfalls.md")
 
     assert "Case-Insensitive Matching for Attribute Values" in clinical
     assert "Query the Requested Attribute, Not a Proxy" in clinical

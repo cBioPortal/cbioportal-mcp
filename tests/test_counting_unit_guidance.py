@@ -2,7 +2,7 @@ from cbioportal_mcp import server
 
 
 def test_mutation_frequency_guide_surfaces_counting_unit_rules():
-    guide = server._mutation_frequency_guide_text()
+    guide = server._load_resource("mutation-frequency-guide.md")
 
     assert "## Counting Unit: Samples vs Patients" in guide
     assert "Patient-level" in guide

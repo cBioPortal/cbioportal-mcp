@@ -213,7 +213,7 @@ def test_tool_happy_path(monkeypatch):
 
 
 def test_cooccurrence_app_config():
-    cfg = ui.cooccurrence_app_config()
+    cfg = ui.app_config(ui.COOCCURRENCE_UI_URI)
     assert cfg.resource_uri == ui.COOCCURRENCE_UI_URI == "ui://cbioportal/cooccurrence"
     assert cfg.visibility == ["model"]
     # Self-contained widget: no network, so no CSP connect allowlist.
