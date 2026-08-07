@@ -48,6 +48,54 @@ WHERE
 GROUP BY cs.cancer_study_identifier, cs.name, cs.description;
 ```
 
+### 4. Find Studies by Available Data Types
+
+Use this when the user asks *"which studies have mutation and copy-number data for X"*, *"studies with expression for Y"*, or any *"studies with Z data"* question. One JOIN against `genetic_profile` answers it — no schema exploration needed.
+
+**Canonical query — studies with ALL requested data types for a cancer type:**
+
+```sql
+SELECT
+    cs.cancer_study_identifier,
+    cs.name,
+    cs.type_of_cancer_id,
+    COUNT(DISTINCT gp.genetic_alteration_type) as matched_profile_count
+FROM cancer_study cs
+JOIN genetic_profile gp ON cs.cancer_study_id = gp.cancer_study_id
+WHERE cs.type_of_cancer_id = 'luad'          -- ← OncoTree code from search_oncotree
+  AND gp.genetic_alteration_type IN (
+      'MUTATION_EXTENDED',                    -- ← required data types
+      'COPY_NUMBER_ALTERATION'
+  )
+GROUP BY cs.cancer_study_identifier, cs.name, cs.type_of_cancer_id
+HAVING matched_profile_count = 2              -- ← must equal the count of requested types
+ORDER BY cs.cancer_study_identifier;
+```
+
+**`genetic_alteration_type` values you'll reference:**
+
+| Data type in the user's question | `genetic_alteration_type` |
+|---|---|
+| mutation / mutations | `MUTATION_EXTENDED` |
+| copy-number / CNA / amplification / deletion | `COPY_NUMBER_ALTERATION` |
+| mRNA expression | `MRNA_EXPRESSION` |
+| protein expression / RPPA | `PROTEIN_LEVEL` |
+| methylation | `METHYLATION` |
+| structural variant / fusion | `STRUCTURAL_VARIANT` |
+
+**Rules:**
+
+- **Resolve the cancer type first** via `search_oncotree(term)`; use the returned `type_of_cancer_id` (lowercase) in the WHERE clause. Don't `ILIKE '%lung%'`.
+- **`HAVING = N`** enforces "study has ALL N requested types". Use `HAVING >= 1` for "study has AT LEAST ONE of the types".
+- Do NOT `clickhouse_list_tables` or `clickhouse_list_table_columns` first — this query is the schema you need.
+- Do NOT run per-study probing queries. One query returns the whole list.
+
+**Worked example — "Which cBioPortal studies include lung adenocarcinoma samples with mutation and copy-number data?"**
+
+1. `search_oncotree("lung adenocarcinoma")` → `LUAD`
+2. Run the canonical query above with `type_of_cancer_id = 'luad'` and the two `genetic_alteration_type` values
+3. Return the list of studies, with `list_studies(search="<id>")` (or the navigator) only if the user then wants details on a specific one
+
 ## Sample Type Filtering
 
 ### 1. Common Sample Types
