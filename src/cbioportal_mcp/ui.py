@@ -69,96 +69,20 @@ def load_widget(filename: str) -> str:
         )
 
 
-def survival_app_config() -> AppConfig:
-    """AppConfig for the Kaplan-Meier survival tool.
+def app_config(resource_uri: str, connect_domains: list[str] | None = None) -> AppConfig:
+    """AppConfig for a ui:// widget tool.
 
-    The widget is fully self-contained (inline SVG, no external scripts or
-    network calls), so no CSP connect/resource domains are required — only the
-    host<->iframe postMessage bridge is used. ``visibility=["model"]`` means the
-    model invokes this entry-point tool; the host then renders the ui:// widget.
-    """
-    return AppConfig(
-        resource_uri=SURVIVAL_UI_URI,
-        visibility=["model"],
-        prefers_border=True,
-    )
-
-
-def oncoprint_app_config() -> AppConfig:
-    """AppConfig for the OncoPrint tool.
-
-    The widget is fully self-contained (inline SVG, no external scripts or
-    network calls), so no CSP connect/resource domains are required — only the
-    host<->iframe postMessage bridge is used. ``visibility=["model"]`` means the
-    model invokes this entry-point tool; the host then renders the ui:// widget.
-    """
-    return AppConfig(
-        resource_uri=ONCOPRINT_UI_URI,
-        visibility=["model"],
-        prefers_border=True,
-    )
-
-
-def lollipop_app_config() -> AppConfig:
-    """AppConfig for the mutation lollipop (``mutation_diagram``) tool.
-
-    Unlike the other widgets, the lollipop is **not** fully self-contained: the
-    iframe fetches the gene's canonical-transcript protein length and Pfam
-    domains directly from Genome Nexus (mirroring cBioPortal's own
-    react-mutation-mapper). So this config adds ``GENOME_NEXUS_ORIGIN`` to the
-    iframe's CSP ``connect-src`` allowlist; without it the host blocks the fetch
-    and the widget falls back to a domain-less backbone scaled to the
-    highest observed mutation position. ``visibility=["model"]`` means the model
-    invokes the tool and the host renders the linked ui:// widget.
-    """
-    return AppConfig(
-        resource_uri=LOLLIPOP_UI_URI,
-        visibility=["model"],
-        prefers_border=True,
-        csp=ResourceCSP(connect_domains=[GENOME_NEXUS_ORIGIN]),
-    )
-
-
-def cooccurrence_app_config() -> AppConfig:
-    """AppConfig for the alteration co-occurrence (``alteration_cooccurrence``) tool.
-
-    The widget is fully self-contained (inline-SVG heatmap, no external scripts or
-    network calls), so no CSP connect/resource domains are required — only the
-    host<->iframe postMessage bridge is used. ``visibility=["model"]`` means the
-    model invokes this entry-point tool; the host then renders the ui:// widget.
-    """
-    return AppConfig(
-        resource_uri=COOCCURRENCE_UI_URI,
-        visibility=["model"],
-        prefers_border=True,
-    )
-
-
-def _chart_app_config(resource_uri: str) -> AppConfig:
-    """AppConfig for a generic chart widget.
-
-    Same wiring as the survival/oncoprint apps: a self-contained inline-SVG
-    widget (no external scripts or network calls), so only the host<->iframe
-    postMessage bridge is used. ``visibility=["model"]`` means the model invokes
-    the chart tool and the host renders the linked ui:// widget.
+    Every widget uses the same host<->iframe postMessage bridge and
+    ``visibility=["model"]`` (the model invokes the entry-point tool; the host
+    renders the linked ui:// widget). ``connect_domains`` is only for a widget
+    that reaches the network: currently just the lollipop, which fetches the
+    gene's canonical-transcript protein length + Pfam domains live from Genome
+    Nexus, so ``GENOME_NEXUS_ORIGIN`` must be in the iframe CSP ``connect-src``
+    allowlist. Every other widget is fully self-contained (no CSP needed).
     """
     return AppConfig(
         resource_uri=resource_uri,
         visibility=["model"],
         prefers_border=True,
+        csp=ResourceCSP(connect_domains=connect_domains) if connect_domains else None,
     )
-
-
-def pie_chart_app_config() -> AppConfig:
-    """AppConfig for the generic pie/donut chart tool."""
-    return _chart_app_config(PIE_UI_URI)
-
-
-def bar_chart_app_config() -> AppConfig:
-    """AppConfig for the generic bar chart tool."""
-    return _chart_app_config(BAR_UI_URI)
-
-
-def line_chart_app_config() -> AppConfig:
-    """AppConfig for the generic line chart tool."""
-    return _chart_app_config(LINE_UI_URI)
