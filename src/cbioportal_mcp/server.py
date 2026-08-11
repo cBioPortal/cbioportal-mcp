@@ -233,17 +233,24 @@ def _list_available_study_guides() -> list[str]:
         study_guides_path = resources_path / "study-guides"
         # For Traversable (importlib.resources), iterate contents
         # For Path, use glob
-        if hasattr(study_guides_path, 'iterdir'):
+        if hasattr(study_guides_path, "iterdir"):
             # It's a Path-like object
-            return [f.stem for f in study_guides_path.iterdir()
-                    if f.name.endswith('.md') and not f.name.startswith('_')]
+            return [
+                f.stem
+                for f in study_guides_path.iterdir()
+                if f.name.endswith(".md") and not f.name.startswith("_")
+            ]
         else:
             # It's a Traversable from importlib.resources
-            return [f.name.removesuffix('.md') for f in study_guides_path.iterdir()
-                    if f.name.endswith('.md') and not f.name.startswith('_')]
+            return [
+                f.name.removesuffix(".md")
+                for f in study_guides_path.iterdir()
+                if f.name.endswith(".md") and not f.name.startswith("_")
+            ]
     except Exception as e:
         logger.error(f"Error listing study guides: {e}")
         return []
+
 
 def _load_general_guide(name: str) -> str | None:
     """Load a general guide from the guides/ directory if it exists."""
@@ -257,20 +264,28 @@ def _load_general_guide(name: str) -> str | None:
         logger.error(f"Error loading general guide {name}: {e}")
         return None
 
+
 def _list_available_general_guides() -> list[str]:
     """List general guide names available in resources/guides/."""
     try:
         resources_path = _get_resources_path()
         guides_path = resources_path / "guides"
-        if hasattr(guides_path, 'iterdir'):
-            return [f.stem for f in guides_path.iterdir()
-                    if f.name.endswith('.md') and not f.name.startswith('_')]
+        if hasattr(guides_path, "iterdir"):
+            return [
+                f.stem
+                for f in guides_path.iterdir()
+                if f.name.endswith(".md") and not f.name.startswith("_")
+            ]
         else:
-            return [f.name.removesuffix('.md') for f in guides_path.iterdir()
-                    if f.name.endswith('.md') and not f.name.startswith('_')]
+            return [
+                f.name.removesuffix(".md")
+                for f in guides_path.iterdir()
+                if f.name.endswith(".md") and not f.name.startswith("_")
+            ]
     except Exception as e:
         logger.error(f"Error listing general guides: {e}")
         return []
+
 
 @lru_cache(maxsize=1)
 def _load_oncotree_data() -> list[dict]:
@@ -1542,17 +1557,50 @@ def main():
 # URI suffix is the markdown filename (cbioportal://<name> -> <name>.md), so this
 # one table drives the resource registration, read_guide, and list_guides below.
 GUIDES: list[tuple[str, str]] = [
-    ("cbioportal://mutation-frequency-guide", "Comprehensive guide for calculating gene mutation frequencies with gene-specific profiling denominators"),
-    ("cbioportal://clinical-data-guide", "Guide for querying clinical data including patient vs sample level considerations"),
-    ("cbioportal://sample-filtering-guide", "Guide for filtering samples and studies in cBioPortal queries"),
-    ("cbioportal://common-pitfalls", "Guide to avoid common mistakes when querying cBioPortal data"),
-    ("cbioportal://treatment-guide", "Guide for querying treatment/clinical event data including drug agents, timelines, and linking to genomic data"),
-    ("cbioportal://faq-guide", "General cBioPortal FAQ: history, how to cite, data types, reference genome, abbreviations, GISTIC thresholds, API access"),
-    ("cbioportal://statistical-tests-guide", "Statistical test selection guide — decision matrix for choosing Fisher's exact, Wilcoxon, chi-squared, t-test, ANOVA, etc. based on data type and group count"),
-    ("cbioportal://gene-expression-guide", "Gene expression / copy-number / methylation analysis. Covers genetic_alteration_derived, profile_type discovery, and the gene_pair_coexpression view for Spearman correlation between two genes"),
-    ("cbioportal://external-resources-guide", "Guide for finding external linked resources such as imaging, pathology, Minerva, HTAN, or other resource_* table links before declaring data unavailable"),
-    ("cbioportal://gene-resolution-guide", "Guide for resolving ambiguous gene symbols, aliases, gene families, and shorthand such as CD3 before querying expression or alteration data"),
-    ("cbioportal://study-resolution-guide", "Guide for resolving requested studies, avoiding silent substitute cohorts, and redirecting to known external cBioPortal instances when data is not in this deployment"),
+    (
+        "cbioportal://mutation-frequency-guide",
+        "Comprehensive guide for calculating gene mutation frequencies with gene-specific profiling denominators",
+    ),
+    (
+        "cbioportal://clinical-data-guide",
+        "Guide for querying clinical data including patient vs sample level considerations",
+    ),
+    (
+        "cbioportal://sample-filtering-guide",
+        "Guide for filtering samples and studies in cBioPortal queries",
+    ),
+    (
+        "cbioportal://common-pitfalls",
+        "Guide to avoid common mistakes when querying cBioPortal data",
+    ),
+    (
+        "cbioportal://treatment-guide",
+        "Guide for querying treatment/clinical event data including drug agents, timelines, and linking to genomic data",
+    ),
+    (
+        "cbioportal://faq-guide",
+        "General cBioPortal FAQ: history, how to cite, data types, reference genome, abbreviations, GISTIC thresholds, API access",
+    ),
+    (
+        "cbioportal://statistical-tests-guide",
+        "Statistical test selection guide — decision matrix for choosing Fisher's exact, Wilcoxon, chi-squared, t-test, ANOVA, etc. based on data type and group count",
+    ),
+    (
+        "cbioportal://gene-expression-guide",
+        "Gene expression / copy-number / methylation analysis. Covers genetic_alteration_derived, profile_type discovery, and the gene_pair_coexpression view for Spearman correlation between two genes",
+    ),
+    (
+        "cbioportal://external-resources-guide",
+        "Guide for finding external linked resources such as imaging, pathology, Minerva, HTAN, or other resource_* table links before declaring data unavailable",
+    ),
+    (
+        "cbioportal://gene-resolution-guide",
+        "Guide for resolving ambiguous gene symbols, aliases, gene families, and shorthand such as CD3 before querying expression or alteration data",
+    ),
+    (
+        "cbioportal://study-resolution-guide",
+        "Guide for resolving requested studies, avoiding silent substitute cohorts, and redirecting to known external cBioPortal instances when data is not in this deployment",
+    ),
 ]
 
 
@@ -1731,17 +1779,21 @@ def list_guides() -> list[dict]:
     deployment_guides = [
         {
             "uri": f"cbioportal://general-guide/{name}",
-            "description": f"Deployment-specific guide — call get_general_guide('{name}')"
+            "description": f"Deployment-specific guide — call get_general_guide('{name}')",
         }
         for name in _list_available_general_guides()
     ]
     core_guides = [{"uri": uri, "description": desc} for uri, desc in GUIDES]
-    return deployment_guides + core_guides + [
-        {
-            "uri": "cbioportal://study-guide/{study_id}",
-            "description": "Dynamic study-specific guide - use get_study_guide(study_id) tool to generate",
-        },
-    ]
+    return (
+        deployment_guides
+        + core_guides
+        + [
+            {
+                "uri": "cbioportal://study-guide/{study_id}",
+                "description": "Dynamic study-specific guide - use get_study_guide(study_id) tool to generate",
+            },
+        ]
+    )
 
 
 @mcp.tool()
@@ -1780,7 +1832,7 @@ def get_general_guide(name: str) -> str:
     Args:
         name: The guide name without the .md extension (e.g. "cdsi-info").
     """
-    if not name or '/' in name or '\\' in name or name.startswith('.'):
+    if not name or "/" in name or "\\" in name or name.startswith("."):
         return f"Error: invalid guide name '{name}'"
     content = _load_general_guide(name)
     if content is None:
