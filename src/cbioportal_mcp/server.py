@@ -316,6 +316,187 @@ def _build_hierarchy_path(code: str, entries_by_code: dict[str, dict]) -> str:
     return " > ".join(parts)
 
 
+# --- Cohort filtering (shared by all four data apps) -------------------------
+#
+# Every data app answers for some cohort. With no filter that cohort is the whole
+# study, which for a pan-cancer registry like msk_chord_2024 means ~25k samples
+# spanning 40+ cancer types -- so "survival for breast cancer in MSK-CHORD" does
+# not error, it answers for everything and attaches a real log-rank p-value to a
+# cohort nobody asked about. The failure is invisible because the output looks
+# right. Hence two things here: the cohort is ALWAYS disclosed in the payload
+# (_cohort_block), and it can optionally be narrowed (_cohort_sample_ids /
+# _cohort_patient_ids).
+#
+# v1 predicate scope is deliberately narrow: ONE attribute, equality against one
+# or more values, e.g. {"CANCER_TYPE": ["Breast Cancer"]}. Ranges, negation and
+# compound predicates are follow-up work.
+
+# Attribute used to describe how heterogeneous an unfiltered study is.
+COHORT_SPREAD_ATTRIBUTE = "CANCER_TYPE"
+
+
+def _escape_sql_string(value: str) -> str:
+    """Escape a value for use inside a single-quoted SQL string literal.
+
+    Deliberately NOT ``_sanitize_search_term``: that one also escapes ``%`` and
+    ``_`` because it targets LIKE patterns, where those are wildcards. Cohort
+    values are compared with ``=``/``IN``, where both are ordinary characters --
+    escaping them there would stop ``MSI_HIGH`` or ``Stage_IV`` ever matching.
+    """
+    return value.replace("\\", "\\\\").replace("'", "''")
+
+
+def _parse_cohort(cohort: dict[str, list[str]]) -> tuple[str, list[str]]:
+    """Validate a cohort predicate and return ``(attribute, values)``.
+
+    Raises ValueError with an actionable message for anything outside v1 scope,
+    so the tool layer turns it into a readable error rather than a wrong answer.
+    """
+    if not isinstance(cohort, dict) or not cohort:
+        raise ValueError(
+            "cohort must be a non-empty mapping of one attribute to the values to "
+            'match, e.g. {"CANCER_TYPE": ["Breast Cancer"]}.'
+        )
+    if len(cohort) > 1:
+        raise ValueError(
+            f"cohort supports exactly one attribute; got {len(cohort)} "
+            f"({', '.join(sorted(str(k) for k in cohort))}). Compound predicates "
+            "are not supported yet."
+        )
+    attribute, raw_values = next(iter(cohort.items()))
+    attribute = _validate_attribute_name(str(attribute))
+    if isinstance(raw_values, str):  # models routinely pass a bare string
+        raw_values = [raw_values]
+    if not isinstance(raw_values, (list, tuple)):
+        raise ValueError(
+            f"cohort['{attribute}'] must be a list of values to match, "
+            f"got {type(raw_values).__name__}."
+        )
+    values = [str(v).strip() for v in raw_values if str(v).strip()]
+    if not values:
+        raise ValueError(f"cohort['{attribute}'] contained no non-empty values to match.")
+    return attribute, values
+
+
+def _cohort_value_sql(values: list[str]) -> str:
+    """Render cohort values as an upper-cased, escaped SQL ``IN`` list.
+
+    Matching is case-insensitive per ``cbioportal://clinical-data-guide``:
+    clinical values are free text and differ by case across studies.
+    """
+    return ", ".join(f"'{_escape_sql_string(v.upper())}'" for v in values)
+
+
+def _cohort_empty_error(study_id: str, cohort: dict[str, list[str]], grain: str) -> str:
+    """Message for a filter that matched nothing -- never render an empty chart."""
+    attribute, values = _parse_cohort(cohort)
+    return (
+        f"Cohort filter matched no {grain} in study '{study_id}': {attribute} in "
+        f"{values}. Check the attribute name and its exact values in "
+        f"clinical_data_derived, or omit the filter to analyse the whole study."
+    )
+
+
+def _cohort_sample_ids(study_id: str, cohort: dict[str, list[str]] | None) -> set[str] | None:
+    """Sample IDs matching the cohort predicate, or None when no filter is supplied.
+
+    ``None`` (no filter) and ``set()`` (filter matched nothing) mean different
+    things and callers must treat them differently -- hence not an empty set.
+    """
+    if cohort is None:
+        return None
+    attribute, values = _parse_cohort(cohort)
+    rows = run_select_query(f"""
+        SELECT DISTINCT sample_unique_id
+        FROM clinical_data_derived
+        WHERE cancer_study_identifier = '{study_id}'
+            AND attribute_name = '{attribute}'
+            AND upper(attribute_value) IN ({_cohort_value_sql(values)})
+    """)
+    matched: set[str] = set()
+    for row in rows:
+        sid = row.get("sample_unique_id")
+        if sid:
+            matched.add(sid)
+    return matched
+
+
+def _cohort_patient_ids(
+    study_id: str, cohort: dict[str, list[str]] | None
+) -> tuple[set[str] | None, int]:
+    """Patient IDs matching the cohort predicate, plus the count excluded as ambiguous.
+
+    Survival is patient-grain, but CANCER_TYPE and most clinical attributes are
+    sample-grain, so a multi-primary patient (say one breast and one lung sample)
+    has no single cohort membership. Rather than guessing -- which would silently
+    drop or double-count them -- this reuses ``_clinical_patient_values``' rule:
+    patients whose samples disagree are excluded, and the count is returned so
+    the caller can surface it instead of discarding it.
+    """
+    if cohort is None:
+        return None, 0
+    attribute, values = _parse_cohort(cohort)
+    pat_values, n_ambiguous = _clinical_patient_values(study_id, attribute)
+    wanted = {v.upper() for v in values}
+    matched = {pid for pid, val in pat_values.items() if str(val).upper() in wanted}
+    return matched, n_ambiguous
+
+
+def _study_cancer_type_spread(study_id: str) -> tuple[int, int]:
+    """Return ``(n_samples, n_distinct_cancer_types)`` for a study."""
+    rows = run_select_query(f"""
+        SELECT COUNT(DISTINCT sample_unique_id) AS n_samples,
+               COUNT(DISTINCT attribute_value) AS n_cancer_types
+        FROM clinical_data_derived
+        WHERE cancer_study_identifier = '{study_id}'
+            AND attribute_name = '{COHORT_SPREAD_ATTRIBUTE}'
+    """)
+    if not rows:
+        return 0, 0
+    row = rows[0]
+    try:
+        return int(row.get("n_samples") or 0), int(row.get("n_cancer_types") or 0)
+    except (TypeError, ValueError):
+        return 0, 0
+
+
+def _cohort_block(
+    study_id: str,
+    cohort: dict[str, list[str]] | None,
+    n_samples: int | None,
+    n_patients: int | None,
+    warnings: list[str],
+) -> dict:
+    """Build the payload's ``cohort`` block, warning when the cohort is implicit.
+
+    Present on every data-app payload whether or not a filter was supplied: an
+    answer for the wrong cohort is only invisible while the payload declines to
+    say which cohort it used.
+
+    ``n_samples`` is the sample universe the analysis actually ran over after
+    filtering (None for patient-grain apps); ``n_patients`` likewise for patients.
+    """
+    block: dict = {
+        "study_id": study_id,
+        "filter": cohort,
+        "n_samples": n_samples,
+        "n_patients": n_patients,
+        "unfiltered": cohort is None,
+    }
+    if cohort is None:
+        n_total, n_types = _study_cancer_type_spread(study_id)
+        if n_types > 1:
+            message = (
+                f"No cohort filter applied: spans {n_total} samples "
+                f"across {n_types} cancer types."
+            )
+            block["warning"] = message
+            # The widgets already render payload["warnings"], so appending here
+            # surfaces the disclosure in the UI without a widget rebuild.
+            warnings.append(message)
+    return block
+
+
 # --- Kaplan-Meier survival app helpers ---------------------------------------
 
 # Supported survival endpoints -> human label. Each maps to clinical attributes
@@ -426,11 +607,15 @@ def _survival_time_ticks(max_time: float, n: int = 5) -> list[float]:
 
 
 def _fetch_survival_observations(
-    study_id: str, endpoint: str
+    study_id: str, endpoint: str, cohort_patients: set[str] | None = None
 ) -> tuple[dict[str, tuple[float, int]], int]:
     """Fetch per-patient (time, event) observations for an endpoint.
 
     Survival is per-patient, so this aggregates to ``patient_unique_id``.
+
+    ``cohort_patients`` restricts the result before anything is counted, so the
+    dropped-patient count describes the cohort rather than the whole study
+    (reporting "500 patients dropped" for a 200-patient cohort is its own bug).
 
     Returns:
         (observations keyed by patient, count of patients dropped for
@@ -453,6 +638,8 @@ def _fetch_survival_observations(
     for row in rows:
         pid = row.get("patient_unique_id")
         if not pid:
+            continue
+        if cohort_patients is not None and pid not in cohort_patients:
             continue
         event = _parse_survival_status(row.get("status"))
         raw_time = row.get("time")
@@ -531,16 +718,23 @@ def _build_survival_payload(
     group_by_gene: str | None,
     alteration_types: list[str] | None,
     group_by_clinical: str | None,
+    cohort: dict[str, list[str]] | None = None,
 ) -> dict:
     """Assemble the Kaplan-Meier data contract consumed by the survival widget.
 
-    Returns a dict with study/endpoint metadata, one entry per group (curve,
-    counts, median), the log-rank result when 2+ groups exist, and warnings.
+    Returns a dict with study/endpoint metadata, the cohort actually analysed,
+    one entry per group (curve, counts, median), the log-rank result when 2+
+    groups exist, and warnings.
     """
     endpoint = _validate_endpoint(endpoint)
     warnings: list[str] = []
 
-    observations, n_dropped = _fetch_survival_observations(study_id, endpoint)
+    # Restrict the patient set up front: every count, curve and p-value below is
+    # then over the cohort, never over the whole study.
+    cohort_attribute = _parse_cohort(cohort)[0] if cohort is not None else None
+    cohort_patients, n_cohort_ambiguous = _cohort_patient_ids(study_id, cohort)
+    observations, n_dropped = _fetch_survival_observations(study_id, endpoint, cohort_patients)
+
     payload: dict = {
         "study_id": study_id,
         "endpoint": endpoint,
@@ -555,14 +749,29 @@ def _build_survival_payload(
             "Survival is per-patient; alteration status is aggregated to the "
             "patient (any altered sample => altered). 'Wild-type' means no "
             "qualifying alteration among this study's patients with survival "
-            "data and is not adjusted for gene-panel coverage."
+            "data and is not adjusted for gene-panel coverage. The 'cohort' "
+            "block states which patients this curve describes."
         ),
     }
-    if not observations:
-        payload["error"] = (
-            f"No {endpoint} survival data found for study '{study_id}'. "
-            f"Expected clinical attributes '{endpoint}_MONTHS' and '{endpoint}_STATUS'."
+    payload["cohort"] = _cohort_block(
+        study_id, cohort, n_samples=None, n_patients=len(observations), warnings=warnings
+    )
+    if n_cohort_ambiguous:
+        warnings.append(
+            f"{n_cohort_ambiguous} patient(s) have conflicting {cohort_attribute} "
+            "values across their samples (e.g. multi-primary) and were excluded "
+            "from cohort matching."
         )
+    if not observations:
+        # Two different failures: an over-narrow filter, or a study with no
+        # survival data at all. Saying which one saves a round trip.
+        if cohort is not None:
+            payload["error"] = _cohort_empty_error(study_id, cohort, "patients with survival data")
+        else:
+            payload["error"] = (
+                f"No {endpoint} survival data found for study '{study_id}'. "
+                f"Expected clinical attributes '{endpoint}_MONTHS' and '{endpoint}_STATUS'."
+            )
         return payload
     if n_dropped:
         warnings.append(
@@ -1005,9 +1214,11 @@ def _build_oncoprint_payload(
     alteration_types: list[str] | None,
     clinical_tracks: list[str] | None,
     max_samples: int | None,
+    cohort: dict[str, list[str]] | None = None,
 ) -> dict:
     """Assemble the OncoPrint data contract consumed by the widget."""
     warnings: list[str] = []
+    cohort_samples = _cohort_sample_ids(study_id, cohort)
     alt_types = alteration_types or list(ONCOPRINT_ALTERATION_TYPES)
     for alt in alt_types:  # validate up front (raises ValueError on bad input)
         _validate_alteration_type(alt)
@@ -1036,20 +1247,46 @@ def _build_oncoprint_payload(
             "that gene (gene-panel coverage). Per-gene % is computed over the "
             "full profiled set, not just the shown columns; for cohorts larger "
             "than the column cap, altered samples are shown first and the matrix "
-            "is truncated."
+            "is truncated. The 'cohort' block states which samples this matrix "
+            "describes."
         ),
     }
 
+    if cohort is not None and not cohort_samples:
+        payload["cohort"] = _cohort_block(study_id, cohort, 0, None, warnings)
+        payload["error"] = _cohort_empty_error(study_id, cohort, "samples")
+        return payload
+
     genes_resolved = _resolve_oncoprint_genes(study_id, genes)
     if not genes_resolved:
+        payload["cohort"] = _cohort_block(study_id, cohort, 0, None, warnings)
         payload["error"] = (
             f"No genes to display for study '{study_id}'. The study may have no "
             "genomic events, or the named genes have no alterations."
         )
         return payload
+    if cohort_samples is not None and not genes:
+        warnings.append(
+            "Genes were auto-selected by study-wide alteration frequency, not by "
+            "frequency within the filtered cohort."
+        )
 
     cells, sample_to_patient = _fetch_oncoprint_events(study_id, genes_resolved, alt_types)
     profiled = _fetch_profiled_samples(study_id, genes_resolved)
+
+    # Apply the cohort to BOTH the alterations and the profiled denominator. If
+    # only the numerator were filtered, every per-gene frequency below would be
+    # computed against a study-wide denominator and come out wrong.
+    if cohort_samples is not None:
+        cells = {
+            g: {sid: c for sid, c in gene_cells.items() if sid in cohort_samples}
+            for g, gene_cells in cells.items()
+        }
+        cells = {g: c for g, c in cells.items() if c}
+        profiled = {g: s & cohort_samples for g, s in profiled.items()}
+        sample_to_patient = {
+            sid: pid for sid, pid in sample_to_patient.items() if sid in cohort_samples
+        }
 
     # Order rows most-altered first (the staircase); ties keep input order.
     orig_index = {g: i for i, g in enumerate(genes_resolved)}
@@ -1064,6 +1301,7 @@ def _build_oncoprint_payload(
         profiled_union |= s
 
     if not altered_samples and not profiled_union:
+        payload["cohort"] = _cohort_block(study_id, cohort, 0, None, warnings)
         payload["error"] = (
             f"No samples found for study '{study_id}' with the selected genes and alteration types."
         )
@@ -1073,6 +1311,7 @@ def _build_oncoprint_payload(
     selected_set = set(selected)
     payload["n_samples_total"] = n_total
     payload["n_samples_shown"] = len(selected)
+    payload["cohort"] = _cohort_block(study_id, cohort, n_total, None, warnings)
     if truncated:
         warnings.append(
             f"Showing {len(selected)} of {n_total} profiled samples (altered "
@@ -1171,9 +1410,12 @@ def _fetch_lollipop_mutations(study_id: str, gene: str) -> list[dict]:
     """)
 
 
-def _build_lollipop_payload(study_id: str, gene: str) -> dict:
+def _build_lollipop_payload(
+    study_id: str, gene: str, cohort: dict[str, list[str]] | None = None
+) -> dict:
     """Assemble the mutation-lollipop data contract consumed by the widget."""
     warnings: list[str] = []
+    cohort_samples = _cohort_sample_ids(study_id, cohort)
     payload: dict = {
         "study_id": study_id,
         "gene": gene,
@@ -1192,15 +1434,25 @@ def _build_lollipop_payload(study_id: str, gene: str) -> dict:
             "protein backbone length and Pfam domains are fetched live from Genome "
             "Nexus by the widget; if unavailable, the axis is scaled to the highest "
             "observed position and no domains are drawn. Counts are per sample "
-            "(somatic + germline, excluding UNCALLED)."
+            "(somatic + germline, excluding UNCALLED). The 'cohort' block states "
+            "which samples these counts describe."
         ),
     }
 
+    if cohort is not None and not cohort_samples:
+        payload["cohort"] = _cohort_block(study_id, cohort, 0, None, warnings)
+        payload["error"] = _cohort_empty_error(study_id, cohort, "samples")
+        return payload
+
     rows = _fetch_lollipop_mutations(study_id, gene)
+    if cohort_samples is not None:
+        rows = [r for r in rows if r.get("sample_unique_id") in cohort_samples]
     if not rows:
+        payload["cohort"] = _cohort_block(study_id, cohort, 0, None, warnings)
         payload["error"] = (
-            f"No mutations found for {gene} in study '{study_id}'. The gene may "
-            "have no mutation events, or the study may have no mutation data."
+            f"No mutations found for {gene} in study '{study_id}'"
+            + (" within the requested cohort. " if cohort_samples is not None else ". ")
+            + "The gene may have no mutation events, or the study may have no mutation data."
         )
         return payload
 
@@ -1269,6 +1521,9 @@ def _build_lollipop_payload(study_id: str, gene: str) -> dict:
     payload["n_samples_mutated"] = len(all_samples)
     payload["max_position"] = max_pos or None
     payload["unmapped_count"] = len(unmapped_samples)
+    # The lollipop has no profiled denominator (it plots counts, not rates), so
+    # the sample universe it ran over is exactly the mutated samples it counted.
+    payload["cohort"] = _cohort_block(study_id, cohort, len(all_samples), None, warnings)
     if not mutations:
         payload["error"] = (
             f"{gene} has mutation events in study '{study_id}', but none carry a "
@@ -1374,6 +1629,7 @@ def _build_cooccurrence_payload(
     study_id: str,
     genes: list[str] | None,
     alteration_types: list[str] | None,
+    cohort: dict[str, list[str]] | None = None,
 ) -> dict:
     """Assemble the co-occurrence data contract consumed by the heatmap widget.
 
@@ -1383,6 +1639,7 @@ def _build_cooccurrence_payload(
     to q-values across all pairs.
     """
     warnings: list[str] = []
+    cohort_samples = _cohort_sample_ids(study_id, cohort)
     requested_types = alteration_types or list(COOCCURRENCE_ALTERATION_TYPES)
     resolved_types: list[str] = []
     seen_types: set[str] = set()
@@ -1409,23 +1666,51 @@ def _build_cooccurrence_payload(
             "negative = mutually exclusive), and the p-values are Benjamini-Hochberg "
             "corrected to q-values. Alterations are per sample; profiling uses "
             "mutation (MUTATION_EXTENDED) coverage, so copy-number/structural events "
-            "on samples without mutation profiling are not counted."
+            "on samples without mutation profiling are not counted. The 'cohort' "
+            "block states which samples these tests describe."
         ),
     }
+
+    if cohort is not None and not cohort_samples:
+        payload["cohort"] = _cohort_block(study_id, cohort, 0, None, warnings)
+        payload["error"] = _cohort_empty_error(study_id, cohort, "samples")
+        return payload
 
     resolved_genes = _resolve_cooccurrence_genes(study_id, genes)
     payload["genes"] = resolved_genes
     if len(resolved_genes) < 2:
+        payload["cohort"] = _cohort_block(study_id, cohort, 0, None, warnings)
         payload["error"] = (
             "Co-occurrence analysis needs at least two genes. "
             f"Found {len(resolved_genes)} for study '{study_id}'. Provide 2+ valid "
             "gene symbols, or pick a study with alteration data."
         )
         return payload
+    if cohort_samples is not None and not genes:
+        warnings.append(
+            "Genes were auto-selected by study-wide alteration frequency, not by "
+            "frequency within the filtered cohort."
+        )
 
     cells, _ = _fetch_oncoprint_events(study_id, resolved_genes, resolved_types)
     altered = {g: set(cells.get(g, {}).keys()) for g in resolved_genes}
     profiled = _fetch_profiled_samples(study_id, resolved_genes)
+
+    # Restrict alterations AND profiling to the cohort before any pair is scored.
+    # _cooccurrence_pair derives its universe from profiled[a] & profiled[b], so
+    # narrowing profiled here is what keeps each 2x2 table's denominator honest;
+    # filtering only `altered` would inflate every odds ratio.
+    if cohort_samples is not None:
+        altered = {g: s & cohort_samples for g, s in altered.items()}
+        profiled = {g: s & cohort_samples for g, s in profiled.items()}
+
+    payload["cohort"] = _cohort_block(
+        study_id,
+        cohort,
+        n_samples=len(set().union(*profiled.values())) if profiled else 0,
+        n_patients=None,
+        warnings=warnings,
+    )
 
     payload["gene_stats"] = [
         {
@@ -2255,10 +2540,17 @@ def survival_widget() -> str:
         group_by_clinical: Clinical attribute name to split the cohort
                            (e.g. "SUBTYPE", "ER_STATUS"). Optional.
                            Ignored when group_by_gene is also given.
+        cohort: Optional cohort filter restricting WHICH patients are analysed,
+                as one attribute mapped to the values to match, e.g.
+                {"CANCER_TYPE": ["Breast Cancer"]}. Matching is
+                case-insensitive. Use this for questions about a subset of a
+                multi-cancer study ("breast cancer in MSK-CHORD") - without it
+                the analysis covers the whole study.
 
     Returns:
         Structured JSON with per-group KM curves, medians, patient/event counts,
-        at-risk tables, and a log-rank test result when 2+ groups are present.
+        at-risk tables, a log-rank test result when 2+ groups are present, and a
+        'cohort' block stating which patients the curves actually describe.
 """,
 )
 def survival_curve(
@@ -2267,6 +2559,7 @@ def survival_curve(
     group_by_gene: str | None = None,
     alteration_types: list[str] | None = None,
     group_by_clinical: str | None = None,
+    cohort: dict[str, list[str]] | None = None,
 ) -> dict:
     # Error returns keep the contract shape (endpoint + empty groups) so the
     # widget recognizes and renders them consistently across host transports.
@@ -2285,6 +2578,7 @@ def survival_curve(
             group_by_gene=group_by_gene,
             alteration_types=alteration_types or ["mutation"],
             group_by_clinical=group_by_clinical,
+            cohort=cohort,
         )
     except ValueError as e:
         return _error(str(e))
@@ -2332,11 +2626,19 @@ def oncoprint_widget() -> str:
         max_samples: Max sample columns to render (default 200, hard cap 200).
                      Altered samples are prioritized; the view is truncated for
                      larger cohorts (per-gene % still reflects all samples).
+        cohort: Optional cohort filter restricting WHICH samples are analysed, as
+                one attribute mapped to the values to match, e.g.
+                {"CANCER_TYPE": ["Breast Cancer"]}. Matching is case-insensitive.
+                Applied to the profiled denominator as well as the alterations,
+                so per-gene percentages stay correct. Note this filters the
+                cohort; it is not the same as clinical_tracks, which only
+                display an attribute.
 
     Returns:
         Structured JSON: gene rows, sample columns (MemoSort order), a sparse
-        alteration-cell map, not-profiled cells, per-gene frequency stats, and
-        clinical tracks.
+        alteration-cell map, not-profiled cells, per-gene frequency stats,
+        clinical tracks, and a 'cohort' block stating which samples the matrix
+        actually describes.
 """,
 )
 def oncoprint(
@@ -2345,6 +2647,7 @@ def oncoprint(
     alteration_types: list[str] | None = None,
     clinical_tracks: list[str] | None = None,
     max_samples: int | None = None,
+    cohort: dict[str, list[str]] | None = None,
 ) -> dict:
     # Error returns keep the contract shape (study_id + empty genes/samples) so
     # the widget recognizes and renders them consistently across host transports.
@@ -2363,6 +2666,7 @@ def oncoprint(
             alteration_types=alteration_types,
             clinical_tracks=clinical_tracks,
             max_samples=max_samples,
+            cohort=cohort,
         )
     except ValueError as e:
         return _error(str(e))
@@ -2406,15 +2710,19 @@ def lollipop_widget() -> str:
     Args:
         study_id: cBioPortal study identifier (e.g. "brca_tcga_pan_can_atlas_2018").
         gene: A single Hugo gene symbol (e.g. "TP53", "PIK3CA", "EGFR").
+        cohort: Optional cohort filter restricting WHICH samples are counted, as
+                one attribute mapped to the values to match, e.g.
+                {"CANCER_TYPE": ["Breast Cancer"]}. Matching is case-insensitive.
 
     Returns:
         Structured JSON: the gene, a list of distinct protein changes
         (protein_change, position, count, class, types), per-class counts, the
-        number of mutated samples, the highest observed position, and the count of
-        unplottable mutations.
+        number of mutated samples, the highest observed position, the count of
+        unplottable mutations, and a 'cohort' block stating which samples the
+        counts actually describe.
 """,
 )
-def mutation_diagram(study_id: str, gene: str) -> dict:
+def mutation_diagram(study_id: str, gene: str, cohort: dict[str, list[str]] | None = None) -> dict:
     # Error returns keep the contract shape (study_id + gene + empty mutations) so
     # the widget recognizes and renders them consistently across host transports.
     def _error(message: str) -> dict:
@@ -2427,7 +2735,7 @@ def mutation_diagram(study_id: str, gene: str) -> dict:
         return _error(str(e))
 
     try:
-        return _build_lollipop_payload(validated_study, validated_gene)
+        return _build_lollipop_payload(validated_study, validated_gene, cohort)
     except ValueError as e:
         return _error(str(e))
     except Exception as e:
@@ -2475,17 +2783,26 @@ def cooccurrence_widget() -> str:
         alteration_types: Optional alteration types to count as "altered"
             (any of "mutation", "amplification", "deep_deletion",
             "structural_variant"). Defaults to all four.
+        cohort: Optional cohort filter restricting WHICH samples are tested, as
+            one attribute mapped to the values to match, e.g.
+            {"CANCER_TYPE": ["Breast Cancer"]}. Matching is case-insensitive.
+            Applied to each pair's profiled denominator too, so the contingency
+            tables stay correct. Worth using on mixed cohorts: exclusivity
+            measured across tumour types can be an artifact of tissue rather
+            than a real interaction.
 
     Returns:
-        Structured JSON: the gene list, per-gene altered/profiled counts, and a
-        list of pairs (gene_a, gene_b, n_both, n_a_only, n_b_only, n_neither,
-        log2_odds_ratio, p_value, q_value, tendency, significant).
+        Structured JSON: the gene list, per-gene altered/profiled counts, a list
+        of pairs (gene_a, gene_b, n_both, n_a_only, n_b_only, n_neither,
+        log2_odds_ratio, p_value, q_value, tendency, significant), and a 'cohort'
+        block stating which samples the tests actually describe.
 """,
 )
 def alteration_cooccurrence(
     study_id: str,
     genes: list[str] | None = None,
     alteration_types: list[str] | None = None,
+    cohort: dict[str, list[str]] | None = None,
 ) -> dict:
     # Error returns keep the contract shape (study_id + empty genes/pairs) so the
     # widget recognizes and renders them consistently across host transports.
@@ -2498,7 +2815,7 @@ def alteration_cooccurrence(
         return _error(str(e))
 
     try:
-        return _build_cooccurrence_payload(validated_study, genes, alteration_types)
+        return _build_cooccurrence_payload(validated_study, genes, alteration_types, cohort)
     except ValueError as e:
         return _error(str(e))
     except Exception as e:
