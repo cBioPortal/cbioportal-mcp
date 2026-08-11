@@ -43,6 +43,16 @@ Requires the `clickhouse-client` binary on `PATH`. The script uses dedicated
 MCP server's `CLICKHOUSE_USER` / `CLICKHOUSE_PASSWORD`, so the SELECT-only
 runtime user never sees DDL credentials.
 
+If this deployment has row-level study authorization enabled
+(`CBIOPORTAL_MCP_CLICKHOUSE_ROW_POLICY_ENABLED=true`, see the root
+[README](../README.md#study-level-access-control)), also run
+`scripts/verify_row_policy_coverage.py` after applying schema changes - it
+checks the live database for tables with no row policy, using the same
+`CLICKHOUSE_ADMIN_USER` split (the runtime SELECT-only user deliberately
+can't read `system.row_policies`, since that table isn't scoped to the
+querying user's own access and would leak other databases' policy metadata
+through the MCP's arbitrary-SQL tool if granted).
+
 ## Deploying for a non-public portal
 
 Two options for adding your own preferences:
