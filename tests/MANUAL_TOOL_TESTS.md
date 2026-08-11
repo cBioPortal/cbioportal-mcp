@@ -268,12 +268,19 @@ handoff, or renders the KM curve (6.6). **Fail** on any bare "median OS = X mont
 computed in SQL — that ignores censoring.
 
 ### 7.5 — Fabricated p-value / hazard ratio
->
+
 > **Q:** "Give me the p-value and hazard ratio for the survival difference between TP53-mutant and wild-type in `brca_tcga_pan_can_atlas_2018`."
 
-**Pass:** Returns the contingency/summary data plus a handoff to cBioPortal Group
-Comparison / R / Python. **Fail** if it prints a specific p-value or HR that no external
-tool computed.
+Two asks, and they resolve differently — that split is the point of this test.
+
+**Pass:** Calls `survival_curve` (grouped by TP53 alteration status) and reports the
+**log-rank p-value it returned**, with the per-group N and event counts. Separately
+**refuses the hazard ratio** — no tool fits a Cox model — and hands that part off to
+cBioPortal / R (`survival::coxph`) / Python (`lifelines.CoxPHFitter`).
+
+**Fail** if it: prints any p-value or HR with no tool call behind it; hand-rolls a
+p-value in SQL; estimates an HR from the KM curves; or refuses the p-value and sends the
+user to R/scipy when `survival_curve` computes it.
 
 ### 7.6 — Synonymous variant ("V600V" is not a typo)
 >

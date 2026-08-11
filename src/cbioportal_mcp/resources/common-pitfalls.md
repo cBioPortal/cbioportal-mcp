@@ -573,11 +573,19 @@ For external code failures:
 
 ### 19. 🚨 MISLEADING OUTPUT PROMISES
 
-Do not promise outputs the MCP server cannot produce.
+Do not promise outputs the MCP server cannot produce — but know what it *can* produce before refusing.
 
-- Kaplan-Meier plot: provide survival rows or summary data and hand off to cBioPortal Survival / R / Python.
+**These have tools. Call them; do not hand them off:**
+
+- Kaplan-Meier plot: call `survival_curve`. It renders the KM widget and returns per-group median survival plus the log-rank test. Hand off to cBioPortal Survival / R / Python only if the study or endpoint isn't supported.
+- Alteration matrix: call `oncoprint`. Mutation lollipop: call `mutation_diagram`. Co-occurrence / mutual-exclusivity heatmap: call `alteration_cooccurrence`.
+- Generic pie / bar / line charts over data you already have: call `pie_chart`, `bar_chart`, `line_chart`.
+
+**These genuinely have no tool. Do not promise them:**
+
 - CSV export: provide a compact table or query; do not claim to create a downloadable file.
 - Large patient-level dumps: summarize and offer a bounded query with `LIMIT`, or point to cBioPortal/DataHub download workflows.
+- Volcano plots, expression scatter/box plots, swimmer or timeline plots, and any chart shape not in the tool list above.
 
 ### 20. 🚨 MALFORMED TABLES AND UNCLEAR QUERY ERRORS
 
@@ -616,7 +624,7 @@ Example:
 18. **Never silently rewrite the user's query** — if "point mutation" or "V600V" is ambiguous or unusual, surface the normalization or ask, don't substitute. See pitfall #16.
 19. **Validate flawed premises early** — if the gene, alteration, study, or data field is absent, say so before running adjacent analyses.
 20. **Hold scope boundaries after refusal** — do not provide paper critiques, slide outlines, external pipeline code, or medical advice after user pushback.
-21. **Do not promise unavailable outputs** — provide data/handoffs instead of claiming to create plots, CSV files, or external apps.
+21. **Do not promise unavailable outputs** — but check the tool list first. KM curves, OncoPrints, lollipops, co-occurrence heatmaps and pie/bar/line charts have tools; CSV files, downloads and unsupported chart shapes do not. See pitfall #19.
 
 ## Validation Checklist
 
@@ -637,4 +645,4 @@ Before trusting your results, ask:
 - [ ] Did I answer the literal question, or did I silently rewrite it? If I normalized a term ("point mutation" → SNV set, "V600V" → V600E), did I surface that to the user?
 - [ ] Did I validate the user's premise before querying adjacent data?
 - [ ] Did I keep scope boundaries after any refusal?
-- [ ] Did I avoid promising plots, downloads, or external-code debugging that this MCP server cannot perform?
+- [ ] Did I avoid promising downloads, unsupported chart shapes, or external-code debugging that this MCP server cannot perform — and, conversely, did I call the tool for the plots and statistics it *can* produce instead of handing them off?
