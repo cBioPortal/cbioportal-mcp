@@ -5,11 +5,13 @@ This module is intentionally dependency-free (standard library only): no
 it can be unit-tested in isolation, with no cBioPortal/ClickHouse knowledge.
 
 - ``kaplan_meier`` — the product-limit estimator (step curve, at-risk counts,
-  median survival, censor marks).
+  median survival, censor marks, pointwise confidence band).
 - ``logrank_test`` — the multivariate log-rank test for 2+ groups
   (chi-square statistic, degrees of freedom, p-value).
 - ``chi_square_sf`` — the chi-square survival function (upper-tail p-value),
   via the regularized upper incomplete gamma function.
+- ``normal_ppf`` — the standard normal quantile function, for the band's
+  critical value.
 
 An "observation" is ``(time, event)`` where ``time >= 0`` is the follow-up time
 and ``event`` is ``1`` if the event (e.g. death) was observed at ``time`` or
@@ -105,6 +107,40 @@ def chi_square_sf(x: float, df: int) -> float:
 
 
 # ---------------------------------------------------------------------------
+# Standard normal quantile (no scipy)
+# ---------------------------------------------------------------------------
+
+
+def normal_cdf(x: float) -> float:
+    """Standard normal CDF, via the stdlib error function."""
+    return 0.5 * math.erfc(-x / math.sqrt(2.0))
+
+
+def normal_ppf(p: float) -> float:
+    """Standard normal quantile function (inverse CDF) for ``0 < p < 1``.
+
+    Bisection on the (strictly increasing) CDF rather than a rational
+    approximation: the closed forms need a page of magic constants, and this is
+    called once per curve, so the ~60 ``erfc`` evaluations cost nothing. The
+    bracket is +/-40 sigma, well outside the range where the CDF is
+    distinguishable from 0 or 1 in double precision.
+    """
+    if not 0.0 < p < 1.0:
+        raise ValueError("normal_ppf requires 0 < p < 1")
+    if p == 0.5:
+        return 0.0
+    lo, hi = -40.0, 40.0
+    # Each step halves an 80-wide bracket; 60 steps is past double precision.
+    for _ in range(60):
+        mid = 0.5 * (lo + hi)
+        if normal_cdf(mid) < p:
+            lo = mid
+        else:
+            hi = mid
+    return 0.5 * (lo + hi)
+
+
+# ---------------------------------------------------------------------------
 # Kaplan-Meier estimator
 # ---------------------------------------------------------------------------
 
@@ -125,8 +161,41 @@ def _clean_observations(observations: Iterable[Observation]) -> list[Observation
     return cleaned
 
 
+def _greenwood_interval(survival: float, greenwood_sum: float, z: float) -> tuple[float, float]:
+    """Pointwise confidence limits for one Kaplan-Meier step point.
+
+    ``greenwood_sum`` is Greenwood's sum ``sum(d_i / (n_i * (n_i - d_i)))`` over
+    event times up to this point, so the variance of ``S(t)`` is
+    ``S(t)**2 * greenwood_sum``.
+
+    Uses the log-log (log-minus-log) transform: the limits are those of
+    ``log(-log S)`` mapped back through ``S = exp(-exp(.))``, which keeps them
+    inside ``(0, 1)`` without clipping. A plain ``S +/- z * se`` interval runs
+    outside the unit interval whenever ``S`` is near 0 or 1 -- exactly where a
+    survival band is read hardest, in the sparse tail.
+
+    ``S = 1`` (no events yet) and ``S = 0`` (no survivors) are degenerate: the
+    transform is undefined and the estimator carries no information about where
+    the truth might be, so the interval collapses onto the point estimate --
+    the same convention R's ``survfit`` uses.
+    """
+    if survival >= 1.0:
+        return 1.0, 1.0
+    if survival <= 0.0:
+        return 0.0, 0.0
+    if greenwood_sum <= 0.0:
+        return survival, survival
+    log_s = math.log(survival)
+    # c = z * se(log(-log S)); se is sqrt(greenwood_sum) / |log S|.
+    c = z * math.sqrt(greenwood_sum) / -log_s
+    # S is decreasing in log(-log S), so +c gives the LOWER survival limit.
+    return survival ** math.exp(c), survival ** math.exp(-c)
+
+
 def kaplan_meier(
-    observations: Iterable[Observation], time_ticks: Sequence[float] | None = None
+    observations: Iterable[Observation],
+    time_ticks: Sequence[float] | None = None,
+    conf_level: float = 0.95,
 ) -> dict:
     """Compute the Kaplan-Meier (product-limit) estimate for one group.
 
@@ -134,15 +203,25 @@ def kaplan_meier(
         observations: iterable of ``(time, event)`` pairs.
         time_ticks: optional times at which to report the number-at-risk
             (for the at-risk table under the plot). Defaults to ``[]``.
+        conf_level: coverage of the pointwise confidence band (default 0.95).
 
     Returns a dict with:
         - ``n_patients`` / ``n_events`` / ``n_censored``
         - ``max_time``
         - ``median_survival`` (float, or ``None`` if not reached)
-        - ``curve``: list of ``{time, survival, at_risk, events, censored}``
+        - ``conf_level``: the band's coverage, echoed back.
+        - ``curve``: list of
+          ``{time, survival, std_err, ci_lower, ci_upper, at_risk, events, censored}``
           step points, always starting at ``{time: 0, survival: 1.0}``.
+          ``std_err`` is Greenwood's standard error of ``S(t)``; the limits are
+          pointwise (see ``_greenwood_interval``), not a simultaneous band, so
+          two curves whose bands overlap at some time have *not* thereby been
+          tested for a difference -- that is what ``logrank_test`` is for.
         - ``at_risk_at_ticks``: number at risk at each requested tick time.
     """
+    if not 0.0 < conf_level < 1.0:
+        raise ValueError("conf_level must be between 0 and 1 (exclusive)")
+    z = normal_ppf(0.5 + conf_level / 2.0)
     obs = _clean_observations(observations)
     n = len(obs)
     result: dict = {
@@ -151,7 +230,19 @@ def kaplan_meier(
         "n_censored": sum(1 for _, e in obs if not e),
         "max_time": max((t for t, _ in obs), default=0.0),
         "median_survival": None,
-        "curve": [{"time": 0.0, "survival": 1.0, "at_risk": n, "events": 0, "censored": 0}],
+        "conf_level": conf_level,
+        "curve": [
+            {
+                "time": 0.0,
+                "survival": 1.0,
+                "std_err": 0.0,
+                "ci_lower": 1.0,
+                "ci_upper": 1.0,
+                "at_risk": n,
+                "events": 0,
+                "censored": 0,
+            }
+        ],
         "at_risk_at_ticks": [],
     }
     if n == 0:
@@ -170,16 +261,26 @@ def kaplan_meier(
     survival = 1.0
     at_risk = n
     median = None
+    greenwood_sum = 0.0  # running sum(d / (n * (n - d))) over event times
     for t in distinct_times:
         d = events_at.get(t, 0)
         c = censored_at.get(t, 0)
         at_risk_here = at_risk  # number with time >= t, before removals at t
         if d > 0 and at_risk_here > 0:
             survival *= 1.0 - d / at_risk_here
+            # n == d means no survivors past t: survival is exactly 0 from here
+            # on and the Greenwood term diverges, so leave the sum alone and let
+            # the S == 0 branch of _greenwood_interval handle it.
+            if at_risk_here > d:
+                greenwood_sum += d / (at_risk_here * (at_risk_here - d))
+        ci_lower, ci_upper = _greenwood_interval(survival, greenwood_sum, z)
         result["curve"].append(
             {
                 "time": t,
                 "survival": survival,
+                "std_err": survival * math.sqrt(greenwood_sum),
+                "ci_lower": ci_lower,
+                "ci_upper": ci_upper,
                 "at_risk": at_risk_here,
                 "events": d,
                 "censored": c,

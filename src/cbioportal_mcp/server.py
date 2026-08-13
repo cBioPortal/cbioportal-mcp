@@ -570,6 +570,12 @@ SURVIVAL_ENDPOINTS = {
 
 MAX_SURVIVAL_GROUPS = 4
 
+# Coverage of the pointwise confidence band drawn around each KM curve. Fixed at
+# the convention the reader will assume from an unlabelled survival figure;
+# echoed into the payload so the widget can label the band rather than hard-code
+# "95%" on its own side of the contract.
+SURVIVAL_CONF_LEVEL = 0.95
+
 # *_STATUS strings encode the event indicator. cBioPortal normally prefixes a
 # numeric code ("1:DECEASED"); these keyword sets are a fallback for un-coded
 # values. Censored keywords are checked first so "Progression Free" is not
@@ -803,6 +809,25 @@ def _build_survival_payload(
         "grouping": {"type": "none"},
         "groups": [],
         "time_ticks": [],
+        "conf_level": SURVIVAL_CONF_LEVEL,
+        # Describes ci_lower/ci_upper on every curve point. Kept out of 'notes'
+        # on purpose: the widget renders 'notes' verbatim under the figure and
+        # already captions the band itself, so this block is for whoever reads
+        # the payload rather than the picture.
+        "band": {
+            "conf_level": SURVIVAL_CONF_LEVEL,
+            "scope": "pointwise",
+            "method": "Greenwood variance, log-log (log-minus-log) transform",
+            "note": (
+                "ci_lower/ci_upper are a 95% POINTWISE band: the interval covers "
+                "S(t) at each t separately, not the whole curve simultaneously. "
+                "Overlapping bands are NOT a test of whether two curves differ - "
+                "quote the log-rank p-value in 'stats' for that. Bands widen "
+                "sharply once few patients remain at risk, so curves that "
+                "separate only in the tail are usually noise; check "
+                "at_risk_at_ticks before reading late separation as a finding."
+            ),
+        },
         "stats": None,
         "warnings": warnings,
         "notes": (
@@ -897,7 +922,7 @@ def _build_survival_payload(
 
     groups_out = []
     for name, obs in grouped:
-        km = kaplan_meier(obs, time_ticks=time_ticks)
+        km = kaplan_meier(obs, time_ticks=time_ticks, conf_level=SURVIVAL_CONF_LEVEL)
         groups_out.append(
             {
                 "name": name,
@@ -911,6 +936,8 @@ def _build_survival_payload(
                     {
                         "time": round(p["time"], 3),
                         "survival": round(p["survival"], 5),
+                        "ci_lower": round(p["ci_lower"], 5),
+                        "ci_upper": round(p["ci_upper"], 5),
                         "at_risk": p["at_risk"],
                         "events": p["events"],
                         "censored": p["censored"],
@@ -2612,6 +2639,14 @@ def survival_widget() -> str:
         at-risk tables, a log-rank test result when 2+ groups are present, a
         'cohort' block stating which patients the curves actually describe, and a
         'provenance' block with the SQL that produced them.
+
+        Each curve point carries ci_lower/ci_upper, a 95% POINTWISE confidence
+        band (Greenwood variance, log-log transform), shaded in the chart. The
+        band is not simultaneous over time, and two curves whose bands overlap
+        have NOT thereby been tested for a difference - report the log-rank
+        p-value for that. Bands widen sharply once few patients remain at risk,
+        so curves that separate only in the tail are usually noise; say so
+        rather than reading the separation as a finding.
 """,
 )
 def survival_curve(
