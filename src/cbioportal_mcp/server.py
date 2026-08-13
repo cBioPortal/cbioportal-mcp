@@ -18,6 +18,9 @@ import json
 import logging
 import re
 import sys
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from functools import lru_cache
 from importlib import resources as importlib_resources
 from importlib.resources.abc import Traversable
@@ -26,6 +29,7 @@ from fastmcp import FastMCP
 from fastmcp.apps import UI_MIME_TYPE
 
 
+from cbioportal_mcp import __version__
 from cbioportal_mcp.env import get_mcp_config, TransportType
 from cbioportal_mcp.authentication.permissions import ensure_db_permissions
 from cbioportal_mcp import ui
@@ -316,6 +320,62 @@ def _build_hierarchy_path(code: str, entries_by_code: dict[str, dict]) -> str:
     return " > ".join(parts)
 
 
+# --- Query provenance (shared by all four data apps) -------------------------
+#
+# A chart in a chat is not reproducible: the researcher cannot see which query
+# produced it, so they cannot re-run it, adapt it, or check it. Every data-app
+# payload is assembled from run_select_query calls, so the executed SQL is
+# already in hand -- these helpers record it and hand it back in the payload.
+#
+# The recording deliberately sits ABOVE run_select_query rather than inside it:
+# the data apps route through _query, so only their SQL is captured, and only
+# while a payload is being built.
+
+
+# The SQL executed by the payload build currently running on this thread/task,
+# or None when nothing is capturing. A ContextVar (not a module-level list) so
+# concurrent tool calls -- these sync tools run in worker threads -- cannot
+# record into each other's payloads.
+_recorded_queries: ContextVar[list[str] | None] = ContextVar("_recorded_queries", default=None)
+
+
+@contextmanager
+def _record_queries() -> Iterator[list[str]]:
+    """Capture the SQL run by _query inside this block."""
+    queries: list[str] = []
+    token = _recorded_queries.set(queries)
+    try:
+        yield queries
+    finally:
+        _recorded_queries.reset(token)
+
+
+def _query(sql: str) -> list[dict]:
+    """run_select_query, recording the SQL when a payload build is capturing it.
+
+    Records the string as passed, not a reconstruction from the parameters, so
+    what the payload reports is exactly what ran.
+    """
+    recorded = _recorded_queries.get()
+    if recorded is not None:
+        recorded.append(sql)
+    return run_select_query(sql)
+
+
+def _with_provenance(build: Callable[[], dict]) -> dict:
+    """Run a payload builder, attaching the SQL it executed to its payload.
+
+    Applied at the tool boundary rather than inside the builders so that every
+    builder return path -- including the ones that bail out with an ``error``
+    after querying, such as a cohort filter that matched nothing -- carries the
+    queries that got it there.
+    """
+    with _record_queries() as queries:
+        payload = build()
+    payload["provenance"] = {"queries": queries, "server_version": __version__}
+    return payload
+
+
 # --- Cohort filtering (shared by all four data apps) -------------------------
 #
 # Every data app answers for some cohort. With no filter that cohort is the whole
@@ -406,7 +466,7 @@ def _cohort_sample_ids(study_id: str, cohort: dict[str, list[str]] | None) -> se
     if cohort is None:
         return None
     attribute, values = _parse_cohort(cohort)
-    rows = run_select_query(f"""
+    rows = _query(f"""
         SELECT DISTINCT sample_unique_id
         FROM clinical_data_derived
         WHERE cancer_study_identifier = '{study_id}'
@@ -444,7 +504,7 @@ def _cohort_patient_ids(
 
 def _study_cancer_type_spread(study_id: str) -> tuple[int, int]:
     """Return ``(n_samples, n_distinct_cancer_types)`` for a study."""
-    rows = run_select_query(f"""
+    rows = _query(f"""
         SELECT COUNT(DISTINCT sample_unique_id) AS n_samples,
                COUNT(DISTINCT attribute_value) AS n_cancer_types
         FROM clinical_data_derived
@@ -621,7 +681,7 @@ def _fetch_survival_observations(
         (observations keyed by patient, count of patients dropped for
         missing/unparseable time or status).
     """
-    rows = run_select_query(f"""
+    rows = _query(f"""
         SELECT
             patient_unique_id,
             MAX(CASE WHEN attribute_name = '{endpoint}_MONTHS'
@@ -669,7 +729,7 @@ def _altered_patients(study_id: str, gene: str, alteration_types: list[str]) -> 
         cfg = _validate_alteration_type(alt)
         filters.append(f"({cfg['event_filter']})")
     combined = " OR ".join(filters)
-    rows = run_select_query(f"""
+    rows = _query(f"""
         SELECT DISTINCT patient_unique_id
         FROM genomic_event_derived
         WHERE cancer_study_identifier = '{study_id}'
@@ -690,7 +750,7 @@ def _clinical_patient_values(study_id: str, attribute: str) -> tuple[dict[str, s
     Patients with conflicting values across samples are excluded (and counted),
     since a single grouping value cannot be assigned.
     """
-    rows = run_select_query(f"""
+    rows = _query(f"""
         SELECT DISTINCT patient_unique_id, attribute_value
         FROM clinical_data_derived
         WHERE cancer_study_identifier = '{study_id}'
@@ -968,7 +1028,7 @@ def _resolve_oncoprint_genes(study_id: str, genes: list[str] | None) -> list[str
         return resolved[:MAX_ANALYSIS_GENES]
 
     combined = _oncoprint_event_filter(list(ONCOPRINT_ALTERATION_TYPES))
-    rows = run_select_query(f"""
+    rows = _query(f"""
         SELECT hugo_gene_symbol, COUNT(DISTINCT sample_unique_id) AS altered_samples
         FROM genomic_event_derived
         WHERE cancer_study_identifier = '{study_id}'
@@ -992,7 +1052,7 @@ def _fetch_oncoprint_events(
     """
     gene_list = ", ".join(f"'{g}'" for g in genes)
     combined = _oncoprint_event_filter(alteration_types)
-    rows = run_select_query(f"""
+    rows = _query(f"""
         SELECT sample_unique_id, patient_unique_id, hugo_gene_symbol,
                variant_type, mutation_type, cna_alteration
         FROM genomic_event_derived
@@ -1039,7 +1099,7 @@ def _fetch_profiled_samples(study_id: str, genes: list[str]) -> dict[str, set[st
     gene_list = ", ".join(f"'{g}'" for g in genes)
     profiled: dict[str, set[str]] = {g: set() for g in genes}
 
-    panel_rows = run_select_query(f"""
+    panel_rows = _query(f"""
         SELECT sample_unique_id, hugo_gene_symbol
         FROM mutation_panel_gene_coverage
         WHERE cancer_study_identifier = '{study_id}'
@@ -1051,7 +1111,7 @@ def _fetch_profiled_samples(study_id: str, genes: list[str]) -> dict[str, set[st
         if sid and gene in profiled:
             profiled[gene].add(sid)
 
-    wes_rows = run_select_query(f"""
+    wes_rows = _query(f"""
         SELECT sample_unique_id
         FROM mutation_wes_coverage
         WHERE cancer_study_identifier = '{study_id}'
@@ -1138,7 +1198,7 @@ def _fetch_clinical_tracks(
             attribute = _validate_attribute_name(attr)
         except ValueError:
             continue
-        rows = run_select_query(f"""
+        rows = _query(f"""
             SELECT sample_unique_id, patient_unique_id, attribute_value, type
             FROM clinical_data_derived
             WHERE cancer_study_identifier = '{study_id}'
@@ -1401,7 +1461,7 @@ def _fetch_lollipop_mutations(study_id: str, gene: str) -> list[dict]:
     event, so the caller can count *distinct samples* per protein change exactly.
     """
     mut_filter = ALTERATION_CONFIGS["mutation"]["event_filter"]
-    return run_select_query(f"""
+    return _query(f"""
         SELECT sample_unique_id, mutation_variant, mutation_type
         FROM genomic_event_derived
         WHERE cancer_study_identifier = '{study_id}'
@@ -1572,7 +1632,7 @@ def _resolve_cooccurrence_genes(study_id: str, genes: list[str] | None) -> list[
         return resolved[:MAX_COOCCURRENCE_GENES]
 
     combined = _oncoprint_event_filter(list(COOCCURRENCE_ALTERATION_TYPES))
-    rows = run_select_query(f"""
+    rows = _query(f"""
         SELECT hugo_gene_symbol, COUNT(DISTINCT sample_unique_id) AS altered_samples
         FROM genomic_event_derived
         WHERE cancer_study_identifier = '{study_id}'
@@ -2549,8 +2609,9 @@ def survival_widget() -> str:
 
     Returns:
         Structured JSON with per-group KM curves, medians, patient/event counts,
-        at-risk tables, a log-rank test result when 2+ groups are present, and a
-        'cohort' block stating which patients the curves actually describe.
+        at-risk tables, a log-rank test result when 2+ groups are present, a
+        'cohort' block stating which patients the curves actually describe, and a
+        'provenance' block with the SQL that produced them.
 """,
 )
 def survival_curve(
@@ -2572,13 +2633,15 @@ def survival_curve(
         return _error(str(e))
 
     try:
-        return _build_survival_payload(
-            study_id=study_id,
-            endpoint=endpoint,
-            group_by_gene=group_by_gene,
-            alteration_types=alteration_types or ["mutation"],
-            group_by_clinical=group_by_clinical,
-            cohort=cohort,
+        return _with_provenance(
+            lambda: _build_survival_payload(
+                study_id=study_id,
+                endpoint=endpoint,
+                group_by_gene=group_by_gene,
+                alteration_types=alteration_types or ["mutation"],
+                group_by_clinical=group_by_clinical,
+                cohort=cohort,
+            )
         )
     except ValueError as e:
         return _error(str(e))
@@ -2637,8 +2700,9 @@ def oncoprint_widget() -> str:
     Returns:
         Structured JSON: gene rows, sample columns (MemoSort order), a sparse
         alteration-cell map, not-profiled cells, per-gene frequency stats,
-        clinical tracks, and a 'cohort' block stating which samples the matrix
-        actually describes.
+        clinical tracks, a 'cohort' block stating which samples the matrix
+        actually describes, and a 'provenance' block with the SQL that
+        produced it.
 """,
 )
 def oncoprint(
@@ -2660,13 +2724,15 @@ def oncoprint(
         return _error(str(e))
 
     try:
-        return _build_oncoprint_payload(
-            study_id=validated_study,
-            genes=genes,
-            alteration_types=alteration_types,
-            clinical_tracks=clinical_tracks,
-            max_samples=max_samples,
-            cohort=cohort,
+        return _with_provenance(
+            lambda: _build_oncoprint_payload(
+                study_id=validated_study,
+                genes=genes,
+                alteration_types=alteration_types,
+                clinical_tracks=clinical_tracks,
+                max_samples=max_samples,
+                cohort=cohort,
+            )
         )
     except ValueError as e:
         return _error(str(e))
@@ -2718,8 +2784,9 @@ def lollipop_widget() -> str:
         Structured JSON: the gene, a list of distinct protein changes
         (protein_change, position, count, class, types), per-class counts, the
         number of mutated samples, the highest observed position, the count of
-        unplottable mutations, and a 'cohort' block stating which samples the
-        counts actually describe.
+        unplottable mutations, a 'cohort' block stating which samples the counts
+        actually describe, and a 'provenance' block with the SQL that produced
+        them.
 """,
 )
 def mutation_diagram(study_id: str, gene: str, cohort: dict[str, list[str]] | None = None) -> dict:
@@ -2735,7 +2802,9 @@ def mutation_diagram(study_id: str, gene: str, cohort: dict[str, list[str]] | No
         return _error(str(e))
 
     try:
-        return _build_lollipop_payload(validated_study, validated_gene, cohort)
+        return _with_provenance(
+            lambda: _build_lollipop_payload(validated_study, validated_gene, cohort)
+        )
     except ValueError as e:
         return _error(str(e))
     except Exception as e:
@@ -2794,8 +2863,9 @@ def cooccurrence_widget() -> str:
     Returns:
         Structured JSON: the gene list, per-gene altered/profiled counts, a list
         of pairs (gene_a, gene_b, n_both, n_a_only, n_b_only, n_neither,
-        log2_odds_ratio, p_value, q_value, tendency, significant), and a 'cohort'
-        block stating which samples the tests actually describe.
+        log2_odds_ratio, p_value, q_value, tendency, significant), a 'cohort'
+        block stating which samples the tests actually describe, and a
+        'provenance' block with the SQL that produced them.
 """,
 )
 def alteration_cooccurrence(
@@ -2815,7 +2885,9 @@ def alteration_cooccurrence(
         return _error(str(e))
 
     try:
-        return _build_cooccurrence_payload(validated_study, genes, alteration_types, cohort)
+        return _with_provenance(
+            lambda: _build_cooccurrence_payload(validated_study, genes, alteration_types, cohort)
+        )
     except ValueError as e:
         return _error(str(e))
     except Exception as e:
