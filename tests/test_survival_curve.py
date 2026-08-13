@@ -163,6 +163,62 @@ def test_payload_warns_on_dropped_patients(monkeypatch):
     assert p["groups"][0]["n_patients"] == 2
 
 
+# --- confidence band in the payload contract ---------------------------------
+
+
+def test_payload_curve_points_carry_confidence_limits(monkeypatch):
+    monkeypatch.setattr(server, "run_select_query", _make_fake(SIX))
+    p = server._build_survival_payload("study", "OS", None, None, None)
+    curve = p["groups"][0]["curve"]
+    assert curve, "expected a non-empty curve"
+    for pt in curve:
+        assert "ci_lower" in pt and "ci_upper" in pt
+        assert 0.0 <= pt["ci_lower"] <= pt["survival"] <= pt["ci_upper"] <= 1.0
+
+
+def test_payload_declares_the_band_it_drew(monkeypatch):
+    """The widget labels the band off conf_level; it must not guess."""
+    monkeypatch.setattr(server, "run_select_query", _make_fake(SIX))
+    p = server._build_survival_payload("study", "OS", None, None, None)
+    assert p["conf_level"] == 0.95
+    assert p["band"]["conf_level"] == 0.95
+    assert p["band"]["scope"] == "pointwise"
+    assert "Greenwood" in p["band"]["method"]
+
+
+def test_band_caveat_is_not_duplicated_into_the_rendered_notes(monkeypatch):
+    """'notes' renders verbatim under the figure, which already captions itself.
+
+    Pins the split so a future edit does not push the band prose back into the
+    string the widget prints.
+    """
+    monkeypatch.setattr(server, "run_select_query", _make_fake(SIX))
+    p = server._build_survival_payload("study", "OS", None, None, None)
+    assert "pointwise" not in p["notes"].lower()
+    assert "log-rank" in p["band"]["note"].lower()
+
+
+def test_band_widens_in_the_sparse_tail(monkeypatch):
+    """The band must actually fan out, not sit at constant width.
+
+    Uses the Freireich 6-MP arm: events keep coming while censoring thins the
+    risk set, so the estimate stays mid-range and the band widens visibly. Made
+    up of real times rather than a synthetic ramp -- with no censoring the curve
+    reaches S=0 and the band is squeezed against the floor instead, which is
+    correct but tests nothing.
+    """
+    times = [6, 6, 6, 7, 10, 13, 16, 22, 23]
+    censored = [6, 9, 10, 11, 17, 19, 20, 25, 32, 32, 34, 35]
+    data = [(f"e{i}", t, 1) for i, t in enumerate(times)]
+    data += [(f"c{i}", t, 0) for i, t in enumerate(censored)]
+    monkeypatch.setattr(server, "run_select_query", _make_fake(data))
+    p = server._build_survival_payload("study", "OS", None, None, None)
+    curve = [pt for pt in p["groups"][0]["curve"] if pt["events"]]
+    early = curve[0]["ci_upper"] - curve[0]["ci_lower"]
+    late = curve[-1]["ci_upper"] - curve[-1]["ci_lower"]
+    assert late > early * 1.2
+
+
 # --- survival_curve tool wrapper (error contract) ----------------------------
 
 
