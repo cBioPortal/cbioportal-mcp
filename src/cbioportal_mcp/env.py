@@ -144,6 +144,23 @@ class McpConfig:
         value = os.getenv("CBIOPORTAL_MCP_GOOGLE_BASE_URL")
         return value if value else None
 
+    @property
+    def google_refresh_ttl_days(self) -> int:
+        """How long (in days) a Google OAuth session stays refreshable without a full relogin.
+
+        This is our own local bookkeeping window, not a real Google limit —
+        Google's production refresh tokens don't expire on a fixed calendar
+        schedule. FastMCP's OAuthProxy falls back to a hardcoded 30-day
+        assumption when the upstream provider doesn't report
+        `refresh_expires_in` in its token response (true for Google), and
+        applies it as a hard cliff from first login rather than a sliding
+        window. See `cbioportal_mcp.auth._RefreshTTLFloorWrapper`, which
+        overrides that fallback using this value.
+
+        Default: 180.
+        """
+        return int(os.getenv("CBIOPORTAL_MCP_GOOGLE_REFRESH_TTL_DAYS", "180"))
+
 
 # Global instance placeholders for the singleton pattern
 _MCP_CONFIG_INSTANCE = None

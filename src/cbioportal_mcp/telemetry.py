@@ -384,6 +384,12 @@ class TelemetryMiddleware(Middleware):
             span.set_attribute("mcp.client_kind", client)
             if user_id:
                 span.set_attribute("enduser.id", user_id)
+            if user_email:
+                # OTEL/Datadog convention: `enduser.email` alongside
+                # `enduser.id`. Sourced from the verified `email` claim on
+                # OAuth-authenticated calls (see `_resolve_caller_identity`),
+                # or the LibreChat x-user-email header on internal traffic.
+                span.set_attribute("enduser.email", user_email)
             if client_name:
                 span.set_attribute("mcp.client.name", client_name)
             if client_version:
