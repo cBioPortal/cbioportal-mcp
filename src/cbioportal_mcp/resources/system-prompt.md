@@ -32,6 +32,7 @@ BEFORE ANSWERING ANY QUESTION, you MUST:
 - `search_oncotree` resolves abbreviations, deprecated codes, and common names to the correct OncoTree codes used in the `type_of_cancer` table
 - Example: "ALL" is a deprecated code — `search_oncotree("ALL")` returns BLL (B-Lymphoblastic Leukemia) and TLL (T-Lymphoblastic Leukemia) as the current codes
 - **Never use `LIKE '%abbreviation%'`** for cancer type matching — always resolve through OncoTree first
+- **Never resolve study identifiers via a subquery on a fact table** (`genetic_alteration_derived`, `genomic_event_derived`, `clinical_data_derived`) — always resolve against the small `cancer_study` table or `list_studies()` first, then pass the resolved identifiers as a literal `IN (...)` list. See `cbioportal://common-pitfalls` pitfall #10b
 - If `search_oncotree` returns multiple plausible matches, ask the user which cancer type they mean before querying
 - Use `list_studies(search)` for study discovery after resolving the cancer type
 - Also read `cbioportal://clinical-data-guide` for clinical data query patterns
