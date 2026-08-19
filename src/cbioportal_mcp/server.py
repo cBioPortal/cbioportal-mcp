@@ -916,6 +916,11 @@ WHERE cancer_study_identifier = '{study_id}'
 
 # Maximum allowed limit for list queries to prevent expensive unbounded queries
 MAX_LIST_LIMIT = 100
+CBIOPORTAL_STUDY_SUMMARY_URL_TEMPLATE = "https://www.cbioportal.org/study/summary?id={study_id}"
+
+
+def _study_summary_url(study_id: str) -> str:
+    return CBIOPORTAL_STUDY_SUMMARY_URL_TEMPLATE.format(study_id=study_id)
 
 @mcp.tool()
 def list_studies(search: str = None, limit: int = 20) -> list[dict]:
@@ -928,7 +933,8 @@ def list_studies(search: str = None, limit: int = 20) -> list[dict]:
         limit: Maximum number of studies to return (default 20, max 100)
 
     Returns:
-        List of studies with their identifiers, names, descriptions, sample counts, and guide availability
+        List of studies with identifiers, names, descriptions, sample counts, cBioPortal URLs,
+        and guide availability
     """
     available_guides = set(_list_available_study_guides())
     
@@ -977,6 +983,8 @@ def list_studies(search: str = None, limit: int = 20) -> list[dict]:
         for study in results:
             study_id = study.get('cancer_study_identifier', '')
             study['has_guide'] = study_id in available_guides
+            if study_id:
+                study['url'] = _study_summary_url(study_id)
         
         return results
         
