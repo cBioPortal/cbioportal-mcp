@@ -1015,6 +1015,7 @@ def search_oncotree(search_term: str) -> list[dict]:
     term_lower = search_term.strip().lower()
     if not term_lower:
         return [{"error": "search_term cannot be empty"}]
+    term_tokens = re.findall(r"[a-z0-9]+", term_lower)
 
     entries_by_code = {e["code"]: e for e in entries if "code" in e}
 
@@ -1028,6 +1029,7 @@ def search_oncotree(search_term: str) -> list[dict]:
         main_type_lower = main_type.lower()
         tissue = entry.get("tissue", "")
         tissue_lower = tissue.lower()
+        combined_text = f"{code_lower} {name_lower} {main_type_lower} {tissue_lower}"
         revocations = [r.lower() for r in entry.get("revocations", [])]
         precursors = [p.lower() for p in entry.get("precursors", [])]
 
@@ -1059,6 +1061,10 @@ def search_oncotree(search_term: str) -> list[dict]:
         # Tissue match
         elif term_lower in tissue_lower:
             score = 40
+        # Multi-word clinical phrasing often combines histology and site, e.g.
+        # "salivary adenoid cystic carcinoma" spans name + mainType.
+        elif term_tokens and all(token in combined_text for token in term_tokens):
+            score = 55
 
         if score > 0:
             result = {

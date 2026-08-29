@@ -552,6 +552,30 @@ Use this pattern when:
 
 Do not query unrelated genes or "helpful" substitutes unless you state why and the user accepts the substitution.
 
+### 17b. 🚨 AMBIGUOUS ACC / ADENOID CYSTIC CARCINOMA SCOPES
+
+`ACC` is ambiguous. It can mean adrenocortical carcinoma (`ACC`), adenoid cystic carcinoma of the salivary gland (`ACYC`), adenoid cystic breast cancer (`ACBC`), or other site-specific entities. When the user names an anatomical site, lock every downstream query and narrative summary to the matching OncoTree code.
+
+Common examples:
+
+| User wording | Use this scope |
+|---|---|
+| "salivary cancer (adenoid cystic carcinoma)" | `ACYC` — Adenoid Cystic Carcinoma, Salivary Gland Cancer |
+| "adenoid cystic breast cancer" | `ACBC` |
+| "adrenocortical carcinoma" or exact code `ACC` | `ACC` |
+
+#### ❌ Wrong: split scopes inside one answer
+
+> The OncoPrint link is filtered to salivary ACC, but the driver summary aggregates all ACC-labeled cancer types.
+
+#### ✅ Correct: keep one scope
+
+After resolving the site-specific OncoTree code, quote it back to the user and use it for every query in that turn:
+
+> I am treating this as salivary gland adenoid cystic carcinoma (`ACYC`), not every cancer abbreviated ACC.
+
+If any result row or narrative claim comes from another `cancer_type_detailed`, drop it or explicitly label it as outside the requested scope.
+
 ### 18. 🚨 OUT-OF-SCOPE DRIFT AFTER USER PUSHBACK
 
 If you decline a request because it is outside cBioPortal scope, hold that boundary when the user rephrases or pushes gently.
@@ -615,8 +639,9 @@ Example:
 17. **Never fabricate OncoKB/driver annotations** — check for driver columns first
 18. **Never silently rewrite the user's query** — if "point mutation" or "V600V" is ambiguous or unusual, surface the normalization or ask, don't substitute. See pitfall #16.
 19. **Validate flawed premises early** — if the gene, alteration, study, or data field is absent, say so before running adjacent analyses.
-20. **Hold scope boundaries after refusal** — do not provide paper critiques, slide outlines, external pipeline code, or medical advice after user pushback.
-21. **Do not promise unavailable outputs** — provide data/handoffs instead of claiming to create plots, CSV files, or external apps.
+20. **Lock site-specific cancer scopes** — if the user specifies salivary ACC, use `ACYC` throughout and do not mix in breast/lung/adrenal ACC rows.
+21. **Hold scope boundaries after refusal** — do not provide paper critiques, slide outlines, external pipeline code, or medical advice after user pushback.
+22. **Do not promise unavailable outputs** — provide data/handoffs instead of claiming to create plots, CSV files, or external apps.
 
 ### 21. 🚨 ENUMERATION / CATALOG QUESTIONS TRIGGER SCHEMA EXPLORATION
 
@@ -671,6 +696,7 @@ Before trusting your results, ask:
 - [ ] Did I verify all tables and columns exist before querying them?
 - [ ] Did I answer the literal question, or did I silently rewrite it? If I normalized a term ("point mutation" → SNV set, "V600V" → V600E), did I surface that to the user?
 - [ ] Did I validate the user's premise before querying adjacent data?
+- [ ] If the user named an anatomical site with an ambiguous abbreviation like ACC, did every query use the same site-specific OncoTree scope?
 - [ ] Did I keep scope boundaries after any refusal?
 - [ ] Did I avoid promising plots, downloads, or external-code debugging that this MCP server cannot perform?
 - [ ] For enumeration/catalog questions ("what cancer types", "what studies", "what guides"), did I use a first-class list tool once instead of exploring the schema?

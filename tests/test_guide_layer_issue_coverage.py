@@ -60,3 +60,19 @@ def test_existing_guides_cover_open_issue_patterns():
     assert "FLAWED PREMISE OR NONEXISTENT DATA FIELD" in pitfalls
     assert "OUT-OF-SCOPE DRIFT AFTER USER PUSHBACK" in pitfalls
     assert "MISLEADING OUTPUT PROMISES" in pitfalls
+
+
+def test_common_pitfalls_cover_ambiguous_acc_scope():
+    pitfalls = server._common_pitfalls_guide_text()
+
+    assert "AMBIGUOUS ACC / ADENOID CYSTIC CARCINOMA SCOPES" in pitfalls
+    assert "salivary gland adenoid cystic carcinoma (`ACYC`)" in pitfalls
+    assert "not every cancer abbreviated ACC" in pitfalls
+    assert "do not mix in breast/lung/adrenal ACC rows" in pitfalls
+
+
+def test_search_oncotree_matches_site_plus_histology_terms():
+    results = server.search_oncotree.fn("salivary adenoid cystic carcinoma")
+
+    assert results[0]["code"] == "ACYC"
+    assert results[0]["mainType"] == "Salivary Gland Cancer"
