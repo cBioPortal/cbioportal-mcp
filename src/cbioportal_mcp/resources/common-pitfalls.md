@@ -552,6 +552,29 @@ Use this pattern when:
 
 Do not query unrelated genes or "helpful" substitutes unless you state why and the user accepts the substitution.
 
+### 17b. 🚨 LEFT- VS RIGHT-SIDED COLORECTAL CANCER
+
+Left-sided vs right-sided colorectal cancer is an anatomical/embryological distinction. It is not the same as colon vs rectum.
+
+- Right-sided CRC generally refers to cecum, ascending colon, and hepatic flexure.
+- Left-sided CRC generally refers to splenic flexure, descending colon, sigmoid colon, and rectum.
+- `TUMOR_TISSUE_SITE` values such as `Colon` and `Rectum` do not encode enough subsite detail to split left vs right.
+
+#### ❌ Wrong: substitute colon vs rectum
+
+> User: *"Compare mutation frequency between left-sided and right-sided CRC."*
+> Agent: *"I'll compare colon vs rectum as a rough proxy."*
+
+That comparison is misleading because colon contains both left- and right-sided subsites, and rectum is not the opposite of colon.
+
+#### ✅ Correct: require subsite-level evidence
+
+First inspect available clinical attributes and values for subsite fields such as `TUMOR_LOCATION`, `TUMOR_SITE`, `PRIMARY_SITE`, or study-specific colon subsite annotations. Only build left/right groups if values identify specific subsites such as ascending, cecum, hepatic flexure, descending, sigmoid, splenic flexure, or rectum.
+
+If the deployment/study only has `Colon` and `Rectum`, answer:
+
+> I do not see the anatomical subsite detail needed to compare left- vs right-sided CRC in this study. I should not substitute colon-vs-rectum, because that is a different comparison.
+
 ### 18. 🚨 OUT-OF-SCOPE DRIFT AFTER USER PUSHBACK
 
 If you decline a request because it is outside cBioPortal scope, hold that boundary when the user rephrases or pushes gently.
@@ -615,8 +638,9 @@ Example:
 17. **Never fabricate OncoKB/driver annotations** — check for driver columns first
 18. **Never silently rewrite the user's query** — if "point mutation" or "V600V" is ambiguous or unusual, surface the normalization or ask, don't substitute. See pitfall #16.
 19. **Validate flawed premises early** — if the gene, alteration, study, or data field is absent, say so before running adjacent analyses.
-20. **Hold scope boundaries after refusal** — do not provide paper critiques, slide outlines, external pipeline code, or medical advice after user pushback.
-21. **Do not promise unavailable outputs** — provide data/handoffs instead of claiming to create plots, CSV files, or external apps.
+20. **Do not substitute colon-vs-rectum for CRC sidedness** — left/right requires anatomical subsite values.
+21. **Hold scope boundaries after refusal** — do not provide paper critiques, slide outlines, external pipeline code, or medical advice after user pushback.
+22. **Do not promise unavailable outputs** — provide data/handoffs instead of claiming to create plots, CSV files, or external apps.
 
 ### 21. 🚨 ENUMERATION / CATALOG QUESTIONS TRIGGER SCHEMA EXPLORATION
 
@@ -671,6 +695,7 @@ Before trusting your results, ask:
 - [ ] Did I verify all tables and columns exist before querying them?
 - [ ] Did I answer the literal question, or did I silently rewrite it? If I normalized a term ("point mutation" → SNV set, "V600V" → V600E), did I surface that to the user?
 - [ ] Did I validate the user's premise before querying adjacent data?
+- [ ] If the user asked for left- vs right-sided CRC, did I verify subsite-level location values instead of using colon-vs-rectum?
 - [ ] Did I keep scope boundaries after any refusal?
 - [ ] Did I avoid promising plots, downloads, or external-code debugging that this MCP server cannot perform?
 - [ ] For enumeration/catalog questions ("what cancer types", "what studies", "what guides"), did I use a first-class list tool once instead of exploring the schema?

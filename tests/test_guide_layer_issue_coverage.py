@@ -60,3 +60,12 @@ def test_existing_guides_cover_open_issue_patterns():
     assert "FLAWED PREMISE OR NONEXISTENT DATA FIELD" in pitfalls
     assert "OUT-OF-SCOPE DRIFT AFTER USER PUSHBACK" in pitfalls
     assert "MISLEADING OUTPUT PROMISES" in pitfalls
+
+
+def test_common_pitfalls_cover_crc_sidedness_not_colon_vs_rectum():
+    pitfalls = server._common_pitfalls_guide_text()
+
+    assert "LEFT- VS RIGHT-SIDED COLORECTAL CANCER" in pitfalls
+    assert "not the same as colon vs rectum" in pitfalls
+    assert "I should not substitute colon-vs-rectum" in pitfalls
+    assert "subsite-level" in pitfalls
