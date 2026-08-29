@@ -21,9 +21,13 @@ Do not say cBioPortal has no imaging or external-resource data until you have ch
 
 cBioPortal may store links to external viewers or portals even when it does not store raw images.
 
+## Preferred Tool
+
+Call `find_external_resources(search, study_search, limit)` first. Use `search` for the resource concept (for example, `Minerva imaging pathology`) and `study_search` for a study/cohort filter (for example, `HTAN`).
+
 ## Discovery Query
 
-Start with table and column validation, then use this pattern:
+If the tool is unavailable or you need to inspect the exact SQL shape, start with table and column validation, then use this pattern:
 
 ```sql
 SELECT
