@@ -42,6 +42,68 @@ If your query returns a frequency over 100%, **do not try to debug or explain th
 
 Rewrite the query using one of the canonical patterns below (either single-study or the [Cross-Cancer-Type](#cross-cancer-type-mutation-frequency) recipe). Do **not** loop on diagnostic queries trying to attribute the >100% to "data inconsistencies" — there are none.
 
+## When the user says your numbers don't match the study view
+
+The STOP rule above only fires above 100%. The more common failure is a frequency that
+looks perfectly reasonable and is still wrong, because the study view computes
+
+    frequency = numberOfAlteredCases / numberOfProfiledCases
+
+and both terms are easy to get subtly wrong. Ground truth for any study is the same
+endpoint the study view itself uses:
+
+```
+POST https://www.cbioportal.org/api/mutated-genes/fetch
+Content-Type: application/json
+
+{"studyIds": ["glioma_mskcc_2019"]}
+```
+
+Field semantics, because two of these are traps:
+
+| Field | Meaning | Use as |
+|---|---|---|
+| `numberOfAlteredCases` | distinct **samples** with >=1 mutation in the gene | numerator |
+| `numberOfProfiledCases` | distinct samples profiled **for that gene** | denominator |
+| `totalCount` | mutation **events**, not samples | never a numerator |
+| `numberOfAlteredCasesOnPanel` | altered cases restricted to panel-covered samples | panel-only views |
+
+### The denominator is per-gene, and the numerator is per-sample
+
+Both mistakes are silent. In `glioma_mskcc_2019` (1,004 samples):
+
+| gene | altered samples | profiled for gene | events | study view | `totalCount` / 1004 |
+|---|--:|--:|--:|--:|--:|
+| TERT | 604 | **882** | 623 | **68.5%** | 62.1% |
+| TP53 | 405 | 1004 | 511 | **40.3%** | 50.9% |
+| EGFR | 146 | 1004 | 197 | **14.5%** | 19.6% |
+| ATRX | 222 | 1004 | 255 | **22.1%** | 25.4% |
+
+TERT is profiled in 882 of 1,004 samples, so a study-wide denominator understates it.
+TP53 has 511 mutation events across 405 samples, so counting events overstates it. In
+that one study the profiled denominator takes 10 distinct values across 485 genes
+(45 to 1,004), and **268 of 485 genes have more events than altered samples** — so
+`COUNT(*)` is wrong for the majority of genes, not for an unlucky few.
+
+Note the errors run in both directions. A number being lower than the UI does not mean
+you were conservative; it means the denominator was wrong too.
+
+### Reconciliation procedure
+
+When a user reports a mismatch, do not defend the number and do not attribute it to
+"data inconsistencies" — there are none. Work through this in order:
+
+1. Numerator is `COUNT(DISTINCT sample_unique_id)`, never `COUNT(*)` and never `SUM`.
+2. Denominator comes from `sample_to_gene_panel_derived` **for that gene**, unioned with
+   `mutation_wes_coverage` so WES samples are not dropped (see the STOP rule).
+3. `mutation_status != 'UNCALLED'` and `off_panel = 0` are both applied.
+4. Numerator and denominator cover the **same sample set** — same study list, same
+   filters. A cohort filter applied to only one of them produces exactly this symptom.
+5. State the counting unit you used (samples vs patients). The study view counts samples.
+
+If the mismatch survives all five, say so plainly and report both your number and the
+UI's rather than picking one.
+
 ## Promoter and Non-Coding Mutation Questions
 
 When the user mentions "promoter", "non-coding", `C228T`, `C250T`, `-124C>T`, `-146C>T`, or "TERT promoter", do not treat the question as "all mutations in the gene."
