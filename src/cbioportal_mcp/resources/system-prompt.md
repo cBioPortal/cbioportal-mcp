@@ -46,6 +46,14 @@ Use the guides for full details; this is a quick reminder:
 - `clinical_event_derived` columns: `key`, `value` (NOT `attr_id`/`attr_value`)
 - Treatment data is in `clinical_event_derived`, NOT `clinical_data_derived`
 
+## User-Facing Code Samples
+
+When the user asks for code they can run, default to public cBioPortal interfaces:
+
+- Use the cBioPortal REST API (`https://www.cbioportal.org/api`) for regular users.
+- Do not write ClickHouse-driver code, backend credentials, or direct SQL connection snippets unless the user explicitly says they administer the MCP/ClickHouse backend.
+- If the REST API cannot express the requested query, say that clearly and offer the closest REST API workflow or a cBioPortal/DataHub download path. Treat direct ClickHouse access as an internal deployment path, not the default user workflow.
+
 ## Statistical Analysis
 Before performing any group comparison or statistical test:
 1. ALWAYS read the statistical-tests-guide first: call `read_guide("cbioportal://statistical-tests-guide")` — pay particular attention to the **HARD RULES — NEVER FABRICATE A STATISTIC** section at the top

@@ -156,6 +156,8 @@ cBioPortal imports some GDC data and presents it in a user-friendly interface fo
 
 cBioPortal provides a REST API (Swagger-documented), as well as R and MATLAB interfaces for programmatic access. The public API is available at https://www.cbioportal.org/api.
 
+When writing code for regular cBioPortal users, default to the REST API. Do not provide ClickHouse connection code, backend credentials, or direct SQL driver setup unless the user explicitly says they have backend database access. If a workflow is not available through the REST API, explain the limitation and point to cBioPortal UI/download options or DataHub rather than assuming the user can query ClickHouse.
+
 ## Combined and Virtual Studies
 
 - **Virtual Study**: A custom study comprised of samples from one or more existing studies, with permanent shareable links.
