@@ -317,6 +317,54 @@ def _sample_filtering_guide_text() -> str:
 def _common_pitfalls_guide_text() -> str:
     return _load_resource("common-pitfalls.md")
 
+# Pitfall headers look like "### 1. 🚨 TITLE" or "### 5b. 🚨 TITLE".
+_PITFALL_HEADER_RE = re.compile(r'^### (\d+[a-z]?)\.\s*.*$', re.MULTILINE)
+
+def _pitfall_sort_key(number: str) -> tuple[int, str]:
+    m = re.match(r'(\d+)(.*)', number)
+    return (int(m.group(1)), m.group(2))
+
+@lru_cache(maxsize=1)
+def _common_pitfall_sections() -> dict[str, str]:
+    """Split common-pitfalls.md into individually addressable sections by
+    pitfall number.
+
+    The full guide is ~4,300 words (~5,700 tokens), but callers that already
+    know which pitfall applies — including system-prompt.md's own routing
+    rules — only need one ~100-400 token section. Cached because the file is
+    baked into the image and doesn't change at runtime.
+    """
+    text = _common_pitfalls_guide_text()
+    headers = list(_PITFALL_HEADER_RE.finditer(text))
+    sections: dict[str, str] = {}
+    for i, m in enumerate(headers):
+        start = m.start()
+        end = headers[i + 1].start() if i + 1 < len(headers) else len(text)
+        sections[m.group(1)] = text[start:end].rstrip()
+    return sections
+
+def _common_pitfall_fragment(number: str) -> str | None:
+    """Return one pitfall's section text plus a short footer, or None if unknown."""
+    section = _common_pitfall_sections().get(number)
+    if section is None:
+        return None
+    return (
+        f"{section}\n\n"
+        f"---\n"
+        f"(Excerpt of pitfall #{number} from cbioportal://common-pitfalls. "
+        f"Read the full guide for the others.)"
+    )
+
+def _unknown_pitfall_message(number: str) -> str:
+    available = ", ".join(
+        sorted(_common_pitfall_sections().keys(), key=_pitfall_sort_key)
+    )
+    return (
+        f"No pitfall numbered '{number}' in cbioportal://common-pitfalls.\n"
+        f"Available pitfall numbers: {available}\n\n"
+        'Use read_guide("cbioportal://common-pitfalls") for the full guide.'
+    )
+
 def _treatment_guide_text() -> str:
     return _load_resource("treatment-guide.md")
 
@@ -560,7 +608,7 @@ def list_guides() -> list[dict]:
         },
         {
             "uri": "cbioportal://common-pitfalls",
-            "description": "Guide to avoid common mistakes when querying cBioPortal data"
+            "description": "Guide to avoid common mistakes when querying cBioPortal data. If you already know which numbered pitfall applies, fetch just that section via read_guide(\"cbioportal://common-pitfalls#<number>\") (e.g. #16) instead of the full guide"
         },
         {
             "uri": "cbioportal://treatment-guide",
@@ -604,8 +652,16 @@ def read_guide(uri: str) -> str:
     Use this after calling list_guides() to read the detailed content of guides.
 
     Args:
-        uri: The guide URI (e.g., "cbioportal://mutation-frequency-guide")
+        uri: The guide URI (e.g., "cbioportal://mutation-frequency-guide"). For
+            cbioportal://common-pitfalls, append "#<number>" (e.g.
+            "cbioportal://common-pitfalls#16") to fetch a single pitfall
+            instead of the full guide, when you already know which one applies.
     """
+    if uri.startswith("cbioportal://common-pitfalls#"):
+        number = uri.split("#", 1)[1]
+        fragment = _common_pitfall_fragment(number)
+        return fragment if fragment is not None else _unknown_pitfall_message(number)
+
     # Resource content mapping
     resources = {
         "cbioportal://mutation-frequency-guide": _mutation_frequency_guide_text(),
