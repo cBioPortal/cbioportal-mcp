@@ -468,6 +468,61 @@ WHERE cs.cancer_study_identifier ILIKE '%htan%';
 
 **Key rule:** cBioPortal stores external resource links in `resource_sample`, `resource_patient`, `resource_study`, and `resource_definition` tables. Always check these before saying something is out of scope.
 
+#### ❌ Wrong: Generic "is there any imaging data?" → blanket refusal
+```
+User: "is there any imaging data?"
+Bot:  "No, cBioPortal does not contain imaging data such as CT scans, MRI
+       images, pathology slides, or other radiological/histological images.
+       cBioPortal focuses specifically on molecular genomic data..."
+```
+
+This is wrong: HTAN-loaded studies (`brca_hta9_htan_2022`, `crc_hta8_htan_2024`,
+`crc_hta11_htan_2021`, `ovary_geomx_gray_foundation_2024`, etc.) link to
+Minerva imaging viewers via `resource_sample`. The agent must verify
+absence by query, not by intuition about the database scope.
+
+#### ✅ Correct: Check `resource_definition` for imaging-type resources first
+```sql
+-- Step 1: Are there any imaging-related resource types defined at all?
+SELECT resource_id, display_name, description, resource_type
+FROM resource_definition
+WHERE lower(display_name)  ILIKE ANY ('%imag%', '%minerva%', '%viewer%',
+                                       '%histol%', '%pathol%', '%radiol%',
+                                       '%wsi%', '%slide%')
+   OR lower(description)   ILIKE ANY ('%imag%', '%minerva%', '%viewer%',
+                                       '%histol%', '%pathol%', '%radiol%')
+ORDER BY resource_type, display_name;
+
+-- Step 2: For each matched resource_id, find the studies that link to it
+--         and a sample URL so the user has something concrete to click.
+SELECT
+    rs.cancer_study_identifier,
+    rs.resource_id,
+    rd.display_name,
+    count(DISTINCT rs.sample_unique_id) AS samples_with_link,
+    any(rs.url) AS example_url
+FROM resource_sample rs
+JOIN resource_definition rd USING (resource_id)
+WHERE rs.resource_id IN (
+    SELECT resource_id FROM resource_definition
+    WHERE lower(display_name) ILIKE ANY ('%imag%','%minerva%','%viewer%',
+                                          '%histol%','%pathol%','%radiol%')
+)
+GROUP BY rs.cancer_study_identifier, rs.resource_id, rd.display_name
+ORDER BY samples_with_link DESC;
+```
+
+If step 1 returns rows: report them. The honest answer is *"cBioPortal
+doesn't host imaging files itself, but it links to external imaging
+viewers for some studies — here are the studies that have such links,
+and an example URL"*. If step 1 returns ZERO rows in this deployment,
+then "no imaging data" is a defensible answer for the current clone.
+
+Apply the same pattern for questions about whole-slide images (`%slide%`,
+`%wsi%`), pathology reports, methylation array IDATs, or any other
+non-tabular data type the user names: query `resource_definition` for
+matching keywords first, then `resource_*` for the actual links.
+
 ### 15. 🚨 HALLUCINATED TABLES OR COLUMNS
 
 #### ❌ Wrong: Querying tables or columns that don't exist
