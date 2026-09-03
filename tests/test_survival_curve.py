@@ -219,6 +219,68 @@ def test_band_widens_in_the_sparse_tail(monkeypatch):
     assert late > early * 1.2
 
 
+# --- curve size ---------------------------------------------------------------
+
+
+def _large_cohort(n=1500):
+    """One distinct follow-up time per patient, so the curve has n steps."""
+    return [(f"p{i}", i + 1, 1 if i % 3 else 0) for i in range(n)]
+
+
+def test_small_curves_are_not_binned(monkeypatch):
+    monkeypatch.setattr(server, "run_select_query", _make_fake(SIX))
+    g = server._build_survival_payload("study", "OS", None, None, None)["groups"][0]
+    assert "curve_binned" not in g
+    assert len(g["curve"]) == 6  # t=0 anchor + 5 distinct times
+
+
+def test_large_curves_are_binned_to_the_cap(monkeypatch):
+    data = _large_cohort()
+    monkeypatch.setattr(server, "run_select_query", _make_fake(data))
+    p = server._build_survival_payload("study", "OS", None, None, None)
+    g = p["groups"][0]
+    assert len(g["curve"]) == server.MAX_CURVE_POINTS
+    assert g["curve_binned"] is True
+    assert g["curve_steps_total"] == len(data)
+    assert any("binned" in w for w in p["warnings"])
+
+
+def test_binned_curve_keeps_group_level_numbers_exact(monkeypatch):
+    """Binning must not change what the curve is *about*: n, events, median."""
+    data = _large_cohort()
+    monkeypatch.setattr(server, "run_select_query", _make_fake(data))
+    g = server._build_survival_payload("study", "OS", None, None, None)["groups"][0]
+    assert g["n_patients"] == len(data)
+    assert g["n_events"] == sum(e for _, _, e in data)
+    assert sum(pt["events"] for pt in g["curve"]) == g["n_events"]
+    assert sum(pt["censored"] for pt in g["curve"]) == g["n_censored"]
+    # The median comes from the full curve, so it must land on a real event time.
+    assert g["median_survival"] is not None
+    assert g["at_risk_at_ticks"][0] == len(data)
+
+
+def test_binned_curve_still_spans_the_full_follow_up(monkeypatch):
+    data = _large_cohort()
+    monkeypatch.setattr(server, "run_select_query", _make_fake(data))
+    p = server._build_survival_payload("study", "OS", None, None, None)
+    curve = p["groups"][0]["curve"]
+    assert curve[0]["time"] == 0 and curve[0]["survival"] == 1.0
+    assert curve[-1]["time"] == max(t for _, t, _ in data)
+    assert curve[-1]["time"] >= p["time_ticks"][-1]
+
+
+def test_binning_is_applied_per_group(monkeypatch):
+    data = _large_cohort()
+    altered = [pid for pid, _, _ in data[::2]]
+    monkeypatch.setattr(server, "run_select_query", _make_fake(data, altered=altered))
+    p = server._build_survival_payload("study", "OS", "TP53", ["mutation"], None)
+    assert len(p["groups"]) == 2
+    for g in p["groups"]:
+        assert len(g["curve"]) <= server.MAX_CURVE_POINTS
+    # The log-rank test runs on the observations, not the binned curves.
+    assert p["stats"]["p_value"] is not None
+
+
 # --- survival_curve tool wrapper (error contract) ----------------------------
 
 

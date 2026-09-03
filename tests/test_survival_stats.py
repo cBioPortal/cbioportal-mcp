@@ -6,6 +6,7 @@ import pytest
 
 from cbioportal_mcp.survival_stats import (
     chi_square_sf,
+    downsample_curve,
     kaplan_meier,
     logrank_test,
     normal_cdf,
@@ -320,3 +321,95 @@ def test_logrank_no_events():
     lr = logrank_test({"a": [(1, 0), (2, 0)], "b": [(3, 0), (4, 0)]})
     assert lr["p_value"] is None
     assert "reason" in lr
+
+
+# ---------------------------------------------------------------------------
+# Curve downsampling
+# ---------------------------------------------------------------------------
+
+
+def _big_curve(n_patients=2000):
+    """A KM curve with one distinct event time per patient."""
+    obs = [(float(i + 1), 1 if i % 3 else 0) for i in range(n_patients)]
+    return kaplan_meier(obs)
+
+
+def test_downsample_leaves_short_curves_alone():
+    km = kaplan_meier([(1, 1), (2, 0), (3, 1)])
+    out = downsample_curve(km["curve"], 200)
+    assert out == km["curve"]
+
+
+def test_downsample_respects_the_cap():
+    curve = _big_curve()["curve"]
+    assert len(curve) > 1000
+    out = downsample_curve(curve, 200)
+    assert len(out) == 200
+
+
+def test_downsample_keeps_the_endpoints():
+    curve = _big_curve()["curve"]
+    out = downsample_curve(curve, 200)
+    assert out[0] == curve[0]
+    assert out[0]["time"] == 0.0 and out[0]["survival"] == 1.0
+    assert out[-1]["time"] == curve[-1]["time"]
+    assert out[-1]["survival"] == curve[-1]["survival"]
+
+
+def test_downsample_preserves_exact_survival_and_band_at_reported_times():
+    km = _big_curve()
+    by_time = {p["time"]: p for p in km["curve"]}
+    for p in downsample_curve(km["curve"], 200):
+        original = by_time[p["time"]]
+        assert p["survival"] == original["survival"]
+        assert p["ci_lower"] == original["ci_lower"]
+        assert p["ci_upper"] == original["ci_upper"]
+        assert p["at_risk"] == original["at_risk"]
+
+
+def test_downsample_conserves_event_and_censor_totals():
+    km = _big_curve()
+    out = downsample_curve(km["curve"], 200)
+    assert sum(p["events"] for p in out) == km["n_events"]
+    assert sum(p["censored"] for p in out) == km["n_censored"]
+
+
+def test_downsample_is_monotone_in_time_and_survival():
+    out = downsample_curve(_big_curve()["curve"], 200)
+    times = [p["time"] for p in out]
+    survivals = [p["survival"] for p in out]
+    assert times == sorted(times)
+    assert len(set(times)) == len(times)
+    assert all(b <= a for a, b in zip(survivals, survivals[1:]))
+
+
+def test_downsample_tracks_the_full_curve_closely():
+    """Binning is a coarser grid, not a different estimator.
+
+    Between two reported times the binned curve holds the earlier value while
+    the true curve walks down to the later one, so the error at any time is
+    bounded by the drop across the bin containing it -- and nothing else.
+    """
+    km = _big_curve()
+    out = downsample_curve(km["curve"], 200)
+    worst = 0.0
+    i = 0
+    for p in km["curve"]:
+        while i + 1 < len(out) and out[i + 1]["time"] <= p["time"]:
+            i += 1
+        worst = max(worst, abs(out[i]["survival"] - p["survival"]))
+    bin_drops = [a["survival"] - b["survival"] for a, b in zip(out, out[1:])]
+    assert worst <= max(bin_drops) + 1e-12
+    # And on this curve no single bin swallows a large part of the fall.
+    assert max(bin_drops) < 0.05
+
+
+def test_downsample_handles_a_cap_larger_than_the_curve():
+    curve = kaplan_meier([(1, 1), (2, 1)])["curve"]
+    assert downsample_curve(curve, 1000) == curve
+
+
+@pytest.mark.parametrize("cap", [0, 1])
+def test_downsample_degenerate_caps_return_the_curve(cap):
+    curve = _big_curve(50)["curve"]
+    assert downsample_curve(curve, cap) == curve
