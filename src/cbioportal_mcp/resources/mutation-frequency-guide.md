@@ -6,6 +6,7 @@
 - When reporting across multiple studies, show **ranges** (e.g., "TP53 is mutated in 30–60% of samples") rather than a single average
 - **NEVER** sum mutation events across studies to compute an aggregate frequency — this can exceed 100% due to double-counting
 - Warn users that samples may overlap across cohorts (e.g., MSK studies may share patients)
+- **For one gene across named studies** ("in MSK-CHORD and TCGA", "in all lung adenocarcinoma studies") call `cross_study_alteration_frequency` — one row per study with its own panel-aware denominator, a random-effects pooled estimate, heterogeneity and a difference test. See [Across named studies](#across-named-studies-cross_study_alteration_frequency). Do not write per-study queries and combine the numbers by hand.
 - **Choose and state the counting unit**: use patient-level frequencies for prevalence/rate questions unless the user explicitly asks for samples; use sample-level frequencies when the user asks about samples.
 - **For "across cancer types" questions**, jump to the [Cross-Cancer-Type Mutation Frequency](#cross-cancer-type-mutation-frequency) section below — there is one correct recipe and several common wrong ones.
 
@@ -160,6 +161,8 @@ Same WES-aware denominator handling as the cohort view.
 
 ### Variant: a handful of named studies (`gene_mutation_frequency_in_studies`)
 
+**Prefer `cross_study_alteration_frequency` for this shape** (next section): it keeps the studies separate, filters each to a cancer type by OncoTree code, checks for shared patients, and pools with a random-effects model. Use this view only as a raw-SQL cross-check of the merged bucket.
+
 Use when the user names two or more studies that aren't a shipped preference and aren't worth defining one for — e.g. *"TP53 in METABRIC and TCGA Pan-Cancer Atlas breast"*. Takes an `Array(String)` of study ids:
 
 ```sql
@@ -172,6 +175,30 @@ ORDER BY frequency_pct DESC;
 ```
 
 **You are responsible for non-overlap.** Sample IDs are study-prefixed (`<study_id>_<sample.stable_id>`), so the same physical sample appearing in two studies under different IDs WILL be double-counted by this view and produce a frequency that's higher than reality. The shipped preferences (`all_studies_non_redundant`, `pan_cancer_tcga`) are vetted to be non-overlapping; ad-hoc lists are not. If you can't vouch for non-overlap, fall back to the single-study view or a shipped preference.
+
+### Across named studies (`cross_study_alteration_frequency`)
+
+When the user names two or more studies, or asks for one cancer type "across all studies", do not write per-study queries and combine the numbers yourself. Call the tool:
+
+```
+cross_study_alteration_frequency(
+    gene="TP53",
+    studies=["msk_chord_2024", "luad_tcga_pan_can_atlas_2018"],   # ids from list_studies, and/or
+    preference="all_studies_non_redundant",                        # a cancer_study_query_preferences set
+    cancer_type="LUAD",        # OncoTree code from search_oncotree; matched per sample on ONCOTREE_CODE
+    unit="sample",             # or "patient" for prevalence / fraction-of-patients wording
+)
+```
+
+What comes back and how to report it:
+
+- `studies[]` — one row per study: `samples` and `patients` counts (cohort / profiled / altered), `frequency_pct` with a Wilson 95% `ci95`, the study's `panels`, and a `status`. **These rows are the headline.** `not_covered` means the gene is not on that study's panels (0 profiled — never report it as 0%); `below_min_profiled` and `overlap` rows are shown but excluded from pooling.
+- `pooled` — a DerSimonian–Laird random-effects meta-analytic proportion with `ci95` over the included, non-overlapping studies. Report it *as* a pooled estimate with its CI and `heterogeneity.i2_pct`. It is not `SUM(altered) / SUM(profiled)`; those crude totals are returned as `n_altered` / `n_profiled` only so you can show them, labelled as such.
+- `difference_test` — whether the studies differ (k×2 chi-square, or Fisher's exact for two small studies). Quote `p_value` from the payload; never compute one.
+- `overlap` — studies that share patients (`msk_chord_2024` sits inside `msk_impact_50k_2026`; the four TCGA releases of one cohort share patients). The smaller study is kept out of the pooling and named in `warnings`; its per-study row is unaffected.
+- `warnings` / `notes` — carry them into the answer, especially the heterogeneity warning (it lists the design differences: panels vs WES, metastatic vs primary) and "spans N cancer types" when no `cancer_type` was given.
+
+Resolve the inputs first: `search_oncotree` for the code (the tool also accepts the exact OncoTree name), `list_studies` for ids. "TCGA" for one disease means its `*_tcga_pan_can_atlas_2018` study; passing `luad_tcga` and `luad_tcga_pan_can_atlas_2018` together produces an overlap warning, not a pooled number. The cross-cancer-type recipes above remain the answer for "across cancer types *within* one cohort"; this tool is for "across studies".
 
 ### Variant: copy-number or structural-variant alterations (`gene_alteration_frequency_by_cancer_type`)
 
@@ -285,6 +312,7 @@ ORDER BY frequency_pct DESC;
 - **DO NOT** UNION mutation events from many separate studies and then group by `type_of_cancer_id` — frequencies don't compose without per-cancer-type profiling denominators.
 - **DO NOT** group by `cancer_study.type_of_cancer_id` for `msk_chord_2024`, `msk_impact_50k_2026`, or GENIE — they're `type_of_cancer_id = 'mixed'`. Use `clinical_data_derived.CANCER_TYPE`.
 - **DO NOT** try to debug a >100% result query-by-query. See the STOP rule above.
+- **DO NOT** combine per-study frequencies by hand (`SUM(altered) / SUM(profiled)`, or an average of percentages) — call `cross_study_alteration_frequency`; it pools with a random-effects model and refuses overlapping studies.
 
 ## Overview
 For accurate gene mutation frequency calculations, you must use gene-specific profiling denominators, not study-wide sample counts.
