@@ -10,6 +10,7 @@ Read this guide when the user mentions:
 - GENIE, AACR GENIE, MSK private cohorts, institutional cohorts
 - "download study", "which study", "find cohort", "data from [portal]"
 - a named cohort that `list_studies(search=...)` does not find
+- "TCGA" for one disease, MSK-CHORD vs MSK-IMPACT, or any request to compare or pool studies
 
 ## Core Rules
 
@@ -42,6 +43,17 @@ These are not necessarily queryable from this MCP server, but they are useful re
 When reporting numbers from a substitute:
 
 > Scope note: these counts are from `[substitute_study_id]` in this deployment, not from the requested PBTA cohort.
+
+## Same Cohort, Several Releases
+
+Releases of one cohort share patients:
+
+| Cohort | Releases | Pick |
+|---|---|---|
+| TCGA, one disease | `<disease>_tcga` (Firehose Legacy), `_tcga_pub`, `_tcga_pan_can_atlas_2018`, `_tcga_gdc` | `*_tcga_pan_can_atlas_2018` unless the user names a release |
+| MSK clinical sequencing | `msk_chord_2024` sits almost entirely inside `msk_impact_50k_2026` | one of them, never both |
+
+Say which release you used. To compare or pool studies, call `cross_study_alteration_frequency`: it detects shared patients and keeps the smaller study out of the pooled estimate, so "TCGA vs TCGA" surfaces as an overlap warning, not a doubled count.
 
 ## Do Not
 
