@@ -33,7 +33,7 @@ from cbioportal_mcp import __version__
 from cbioportal_mcp.env import get_mcp_config, TransportType
 from cbioportal_mcp.authentication.permissions import ensure_db_permissions
 from cbioportal_mcp import ui
-from cbioportal_mcp.survival_stats import kaplan_meier, logrank_test
+from cbioportal_mcp.survival_stats import downsample_curve, kaplan_meier, logrank_test
 from cbioportal_mcp.cooccurrence_stats import (
     benjamini_hochberg,
     fisher_exact_two_sided,
@@ -576,6 +576,14 @@ MAX_SURVIVAL_GROUPS = 4
 # "95%" on its own side of the contract.
 SURVIVAL_CONF_LEVEL = 0.95
 
+# Max step points reported per curve. A 25k-patient study has ~2,000 distinct
+# follow-up times per group; streaming every one of them is both far more
+# resolution than the plot can show (the chart is a few hundred pixels wide) and
+# enough JSON to blow an agent's context when the payload is read back. Longer
+# curves are binned by survival_stats.downsample_curve, which keeps exact
+# survival/CI values at the times it does report.
+MAX_CURVE_POINTS = 200
+
 # *_STATUS strings encode the event indicator. cBioPortal normally prefixes a
 # numeric code ("1:DECEASED"); these keyword sets are a fallback for un-coded
 # values. Censored keywords are checked first so "Progression Free" is not
@@ -921,8 +929,13 @@ def _build_survival_payload(
     payload["time_ticks"] = time_ticks
 
     groups_out = []
+    binned_any = False
     for name, obs in grouped:
         km = kaplan_meier(obs, time_ticks=time_ticks, conf_level=SURVIVAL_CONF_LEVEL)
+        full_points = len(km["curve"])
+        points = downsample_curve(km["curve"], MAX_CURVE_POINTS)
+        binned = len(points) < full_points
+        binned_any = binned_any or binned
         groups_out.append(
             {
                 "name": name,
@@ -931,6 +944,13 @@ def _build_survival_payload(
                 "n_censored": km["n_censored"],
                 "median_survival": (
                     round(km["median_survival"], 2) if km["median_survival"] is not None else None
+                ),
+                # Present only when the curve was binned, so the reader can tell
+                # a 200-point curve that is complete from one that is a summary.
+                **(
+                    {"curve_binned": True, "curve_steps_total": full_points - 1}
+                    if binned
+                    else {}
                 ),
                 "curve": [
                     {
@@ -942,12 +962,20 @@ def _build_survival_payload(
                         "events": p["events"],
                         "censored": p["censored"],
                     }
-                    for p in km["curve"]
+                    for p in points
                 ],
                 "at_risk_at_ticks": km["at_risk_at_ticks"],
             }
         )
     payload["groups"] = groups_out
+    if binned_any:
+        warnings.append(
+            f"Curves longer than {MAX_CURVE_POINTS} points were binned down to "
+            f"{MAX_CURVE_POINTS} (see curve_binned / curve_steps_total). Survival, "
+            "CI and at-risk values are exact at each time reported; 'events' and "
+            "'censored' are summed over the interval ending at that time. Medians, "
+            "at-risk tables and the log-rank test are computed from the full data."
+        )
 
     if len(grouped) >= 2:
         lr = logrank_test({name: obs for name, obs in grouped})
@@ -2647,6 +2675,13 @@ def survival_widget() -> str:
         p-value for that. Bands widen sharply once few patients remain at risk,
         so curves that separate only in the tail are usually noise; say so
         rather than reading the separation as a finding.
+
+        Long curves are binned down to 200 points for transport and flagged
+        with 'curve_binned'. Survival/CI/at-risk values stay exact at each
+        reported time and 'events'/'censored' are summed over the preceding
+        interval, so per-instant event counts are not recoverable from a binned
+        curve. Medians, at-risk tables and the log-rank p-value always come
+        from the full data.
 """,
 )
 def survival_curve(

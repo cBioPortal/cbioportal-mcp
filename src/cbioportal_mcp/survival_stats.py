@@ -12,6 +12,8 @@ it can be unit-tested in isolation, with no cBioPortal/ClickHouse knowledge.
   via the regularized upper incomplete gamma function.
 - ``normal_ppf`` — the standard normal quantile function, for the band's
   critical value.
+- ``downsample_curve`` — bin a step curve down to a transport-sized number of
+  points, for studies with thousands of distinct event times.
 
 An "observation" is ``(time, event)`` where ``time >= 0`` is the follow-up time
 and ``event`` is ``1`` if the event (e.g. death) was observed at ``time`` or
@@ -295,6 +297,52 @@ def kaplan_meier(
     if time_ticks:
         result["at_risk_at_ticks"] = [sum(1 for t, _ in obs if t >= tick) for tick in time_ticks]
     return result
+
+
+def downsample_curve(curve: Sequence[dict], max_points: int) -> list[dict]:
+    """Bin a Kaplan-Meier step curve down to at most ``max_points`` points.
+
+    A study with tens of thousands of patients has one step per distinct
+    follow-up time -- thousands of points per curve -- which is far more than a
+    plot needs and more than a tool payload should carry.
+
+    The curve is cut into roughly equal-sized runs of consecutive points and
+    each run is represented by its *last* point, so:
+
+    - ``time`` / ``survival`` / ``ci_lower`` / ``ci_upper`` / ``std_err`` /
+      ``at_risk`` are exact values of the estimator at the reported time -- no
+      interpolation or smoothing happens, the step function is just reported on
+      a coarser time grid.
+    - ``events`` and ``censored`` are summed over the run, so they still total
+      the group's ``n_events`` / ``n_censored``. They now describe the interval
+      ending at ``time`` rather than that instant alone.
+
+    Binning by *count* rather than by elapsed time keeps the resolution where
+    the events are: stretches dense in distinct times get narrow bins.
+
+    The ``t = 0`` anchor point is always kept, and so is the final point (the
+    end of follow-up), so the curve's extent is unchanged.
+    """
+    n = len(curve)
+    if max_points < 2 or n <= max_points:
+        return [dict(p) for p in curve]
+
+    rest = curve[1:]
+    m = len(rest)
+    n_bins = max_points - 1
+    out = [dict(curve[0])]
+    start = 0
+    for i in range(1, n_bins + 1):
+        end = (i * m) // n_bins
+        if end <= start:
+            continue
+        chunk = rest[start:end]
+        point = dict(chunk[-1])
+        point["events"] = sum(p["events"] for p in chunk)
+        point["censored"] = sum(p["censored"] for p in chunk)
+        out.append(point)
+        start = end
+    return out
 
 
 # ---------------------------------------------------------------------------
