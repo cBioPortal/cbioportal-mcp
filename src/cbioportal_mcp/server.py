@@ -39,6 +39,7 @@ from cbioportal_mcp.cooccurrence_stats import (
     fisher_exact_two_sided,
     log2_odds_ratio,
 )
+from cbioportal_mcp.meta_stats import homogeneity_test, pooled_proportion, wilson_interval
 from cbioportal_mcp.telemetry import configure_telemetry, TelemetryMiddleware
 
 logger = logging.getLogger(__name__)
@@ -1884,6 +1885,803 @@ def _build_cooccurrence_payload(
     return payload
 
 
+# --- Cross-study alteration frequency (meta-analysis) app --------------------
+#
+# Every other data app answers for ONE study. Researchers routinely ask for a
+# gene "across MSK-CHORD and TCGA" or "in all lung adenocarcinoma studies", and
+# the shipped SQL views cannot express that either: they bucket on the broad
+# CANCER_TYPE only, so "Lung Adenocarcinoma" inside msk_chord_2024 -- a
+# CANCER_TYPE_DETAILED / ONCOTREE_CODE value -- is unreachable, and
+# gene_mutation_frequency_in_studies merges studies into one bucket with no
+# overlap protection.
+#
+# This app returns one row per study (its own cohort, its own panel-aware
+# denominator) and only then a pooled estimate: a DerSimonian-Laird
+# random-effects proportion with heterogeneity, never SUM/SUM. Studies that
+# share patients (MSK-CHORD is a subset of MSK-IMPACT-50k; the TCGA releases of
+# one cohort overlap) are detected from the data and kept out of the pooling.
+# Design, verified numbers and the reconciliation checklist:
+# docs/cross-study-meta-analysis-plan.md.
+
+CROSS_STUDY_KIND = "cross_study_frequency"
+CROSS_STUDY_UNITS = ("sample", "patient")
+CROSS_STUDY_DEFAULT_MIN_PROFILED = 10
+# Cap on OncoTree codes after subtype expansion: a tissue-level code such as
+# LUNG expands to a few dozen; anything larger is a mistake, not a cohort.
+MAX_CROSS_STUDY_CODES = 250
+# I-squared above which the payload warns that the studies disagree.
+CROSS_STUDY_HIGH_I2 = 0.75
+# How the cancer-type filter was applied in a study, in the order tried.
+COHORT_KEY_ONCOTREE = "ONCOTREE_CODE"
+COHORT_KEY_DETAILED = "CANCER_TYPE_DETAILED"
+COHORT_KEY_STUDY_TYPE = "STUDY_TYPE"  # whole study; cancer_study.type_of_cancer_id matched
+COHORT_KEY_ALL_SAMPLES = "ALL_SAMPLES"  # whole study; no cancer type requested
+VALID_PREFERENCE_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_]+$")
+
+
+def _validate_preference_name(name: str) -> str:
+    """Validate a cancer_study_query_preferences.preference_name for SQL use."""
+    if not name or not VALID_PREFERENCE_NAME_PATTERN.match(name):
+        raise ValueError(
+            f"Invalid preference name '{name}'. Preference names may only contain "
+            "alphanumeric characters and underscores (e.g. 'pan_cancer_tcga')."
+        )
+    return name
+
+
+def _normalize_study_ids(studies) -> list[str]:
+    """Accept a list of study ids (or one comma-separated string) and validate each."""
+    if studies is None:
+        return []
+    if isinstance(studies, str):
+        items = studies.split(",")
+    elif isinstance(studies, (list, tuple, set)):
+        items = list(studies)
+    else:
+        raise ValueError("studies must be a list of cBioPortal study identifiers.")
+    out: list[str] = []
+    for item in items:
+        sid = str(item).strip()
+        if not sid:
+            continue
+        sid = _validate_study_id(sid)
+        if sid not in out:
+            out.append(sid)
+    return out
+
+
+def _sql_string_list(values) -> str:
+    """Render values as an escaped, single-quoted SQL list body: 'a', 'b'."""
+    return ", ".join(f"'{_escape_sql_string(str(v))}'" for v in values)
+
+
+def _as_int(value) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _round_p(p: float) -> float:
+    """Three significant digits: keeps 1e-9 as 1e-9 instead of rounding it to 0."""
+    return float(f"{p:.3g}")
+
+
+def _oncotree_suggestions(term: str, entries: list[dict]) -> str:
+    """Up to five OncoTree entries whose name contains the term, for error messages."""
+    t = term.strip().lower()
+    hits = [
+        e
+        for e in entries
+        if t in (e.get("name") or "").lower() or (e.get("code") or "").lower().startswith(t)
+    ]
+    return ", ".join(f"{e['code']} ({e.get('name', '')})" for e in hits[:5])
+
+
+def _resolve_cancer_type_codes(
+    cancer_type, include_subtypes: bool
+) -> tuple[list[str], list[str], list[str]]:
+    """Map the caller's cancer type(s) to OncoTree codes.
+
+    Returns ``(requested, expanded, names)``: the codes as given (upper-cased),
+    the codes after subtype expansion, and the OncoTree names of the expanded
+    set -- the CANCER_TYPE_DETAILED fallback matches on those names. Accepts a
+    code ("LUAD"), an exact OncoTree name ("Lung Adenocarcinoma"), or a list of
+    either. Anything else raises ValueError with suggestions, because a typo
+    here would silently produce an empty cohort.
+    """
+    if isinstance(cancer_type, str):
+        items = cancer_type.split(",")
+    elif isinstance(cancer_type, (list, tuple, set)):
+        items = list(cancer_type)
+    else:
+        raise ValueError("cancer_type must be an OncoTree code or a list of OncoTree codes.")
+    entries = _load_oncotree_data()
+    if not entries:
+        raise ValueError("OncoTree data is not available; filter with cohort={...} instead.")
+    by_code = {e["code"].upper(): e for e in entries if e.get("code")}
+    by_name = {e["name"].strip().lower(): e for e in entries if e.get("name")}
+
+    requested: list[str] = []
+    for item in items:
+        term = str(item).strip()
+        if not term:
+            continue
+        entry = by_code.get(term.upper()) or by_name.get(term.lower())
+        if entry is None:
+            suggestions = _oncotree_suggestions(term, entries)
+            hint = f" Did you mean: {suggestions}?" if suggestions else ""
+            raise ValueError(
+                f"Unknown OncoTree code '{term}'. Resolve the cancer type with "
+                f"search_oncotree(...) first and pass its code.{hint}"
+            )
+        code = entry["code"].upper()
+        if code not in requested:
+            requested.append(code)
+    if not requested:
+        raise ValueError("cancer_type contained no OncoTree codes.")
+
+    expanded = list(requested)
+    if include_subtypes:
+        children: dict[str, list[str]] = {}
+        for e in entries:
+            parent = (e.get("parent") or "").upper()
+            code = (e.get("code") or "").upper()
+            if parent and code:
+                children.setdefault(parent, []).append(code)
+        queue = list(requested)
+        while queue:
+            current = queue.pop(0)
+            for child in children.get(current, []):
+                if child in expanded:
+                    continue
+                expanded.append(child)
+                queue.append(child)
+                if len(expanded) > MAX_CROSS_STUDY_CODES:
+                    raise ValueError(
+                        f"cancer_type {requested} expands to more than "
+                        f"{MAX_CROSS_STUDY_CODES} OncoTree subtypes; pass a more specific "
+                        "code or include_subtypes=False."
+                    )
+    names = [by_code[c]["name"] for c in expanded if c in by_code and by_code[c].get("name")]
+    return requested, expanded, names
+
+
+def _fetch_cross_study_studies(study_ids: list[str], preference: str | None) -> list[dict]:
+    """Resolve explicit ids and/or a named preference against cancer_study."""
+    clauses = []
+    if study_ids:
+        clauses.append(f"cancer_study_identifier IN ({_sql_string_list(study_ids)})")
+    if preference:
+        clauses.append(
+            "cancer_study_identifier IN (SELECT cancer_study_identifier "
+            f"FROM cancer_study_query_preferences WHERE preference_name = '{preference}')"
+        )
+    return _query(f"""
+        SELECT cancer_study_identifier, name, type_of_cancer_id
+        FROM cancer_study
+        WHERE {" OR ".join(clauses)}
+        ORDER BY cancer_study_identifier
+    """)
+
+
+def _fetch_cross_study_attributes(study_ids: list[str]) -> dict[str, dict]:
+    """Per study: does it carry ONCOTREE_CODE / CANCER_TYPE_DETAILED, and how mixed is it."""
+    rows = _query(f"""
+        SELECT cancer_study_identifier,
+               uniqExactIf(sample_unique_id, attribute_name = 'ONCOTREE_CODE') AS n_oncotree,
+               uniqExactIf(sample_unique_id, attribute_name = 'CANCER_TYPE_DETAILED') AS n_detailed,
+               uniqExactIf(attribute_value, attribute_name = 'CANCER_TYPE') AS n_cancer_types
+        FROM clinical_data_derived
+        WHERE cancer_study_identifier IN ({_sql_string_list(study_ids)})
+            AND attribute_name IN ('ONCOTREE_CODE', 'CANCER_TYPE_DETAILED', 'CANCER_TYPE')
+        GROUP BY cancer_study_identifier
+    """)
+    out: dict[str, dict] = {}
+    for row in rows:
+        sid = row.get("cancer_study_identifier")
+        if sid:
+            out[sid] = {
+                key: _as_int(row.get(key)) for key in ("n_oncotree", "n_detailed", "n_cancer_types")
+            }
+    return out
+
+
+def _assign_cohort_keys(
+    study_ids: list[str],
+    studies_meta: dict[str, dict],
+    attrs: dict[str, dict],
+    codes: list[str],
+) -> tuple[dict[str, str], list[dict]]:
+    """Decide, per study, how the cancer-type filter is applied.
+
+    ONCOTREE_CODE is the per-sample key that harmonises across studies (518 of
+    545 public studies carry it, none partially). Studies without it fall back
+    to CANCER_TYPE_DETAILED, matched on the OncoTree names, and a study with
+    neither attribute counts as a whole when its own study-level cancer type
+    is one of the requested codes. Anything else cannot be filtered and is
+    reported rather than silently answered.
+    """
+    assignments: dict[str, str] = {}
+    without: list[dict] = []
+    for sid in study_ids:
+        if not codes:
+            assignments[sid] = COHORT_KEY_ALL_SAMPLES
+            continue
+        a = attrs.get(sid, {})
+        study_type = (studies_meta.get(sid, {}).get("type_of_cancer_id") or "").upper()
+        if a.get("n_oncotree", 0) > 0:
+            assignments[sid] = COHORT_KEY_ONCOTREE
+        elif a.get("n_detailed", 0) > 0:
+            assignments[sid] = COHORT_KEY_DETAILED
+        elif study_type and study_type in codes:
+            assignments[sid] = COHORT_KEY_STUDY_TYPE
+        else:
+            without.append(
+                {
+                    "study_id": sid,
+                    "reason": (
+                        "no per-sample ONCOTREE_CODE or CANCER_TYPE_DETAILED attribute, and "
+                        f"the study's own cancer type '{study_type.lower() or 'unknown'}' is "
+                        "not among the requested codes"
+                    ),
+                }
+            )
+    return assignments, without
+
+
+def _cross_study_cohort_sql(
+    assignments: dict[str, str],
+    codes: list[str],
+    names: list[str],
+    cohort_pred: tuple[str, list[str]] | None,
+) -> str:
+    """Body of the ``cohort`` CTE: one UNION ALL branch per cohort key.
+
+    The cohort CTE drives every other query (counts, overlap, sample types), so
+    the generic ``cohort`` predicate is applied here once and the numerator and
+    denominator can never disagree about which samples are in.
+    """
+    by_key: dict[str, list[str]] = {}
+    for sid, key in assignments.items():
+        by_key.setdefault(key, []).append(sid)
+    branches: list[str] = []
+    if by_key.get(COHORT_KEY_ONCOTREE):
+        branches.append(f"""SELECT cancer_study_identifier, sample_unique_id, patient_unique_id
+            FROM clinical_data_derived
+            WHERE cancer_study_identifier IN ({_sql_string_list(by_key[COHORT_KEY_ONCOTREE])})
+                AND attribute_name = 'ONCOTREE_CODE'
+                AND upper(attribute_value) IN ({_sql_string_list(codes)})""")
+    if by_key.get(COHORT_KEY_DETAILED):
+        upper_names = [n.upper() for n in names]
+        branches.append(f"""SELECT cancer_study_identifier, sample_unique_id, patient_unique_id
+            FROM clinical_data_derived
+            WHERE cancer_study_identifier IN ({_sql_string_list(by_key[COHORT_KEY_DETAILED])})
+                AND attribute_name = 'CANCER_TYPE_DETAILED'
+                AND upper(attribute_value) IN ({_sql_string_list(upper_names)})""")
+    whole = by_key.get(COHORT_KEY_STUDY_TYPE, []) + by_key.get(COHORT_KEY_ALL_SAMPLES, [])
+    if whole:
+        branches.append(f"""SELECT cancer_study_identifier, sample_unique_id, patient_unique_id
+            FROM sample_derived
+            WHERE cancer_study_identifier IN ({_sql_string_list(whole)})""")
+    body = "\n            UNION ALL\n            ".join(branches)
+    if cohort_pred is not None:
+        attribute, values = cohort_pred
+        body = f"""SELECT cancer_study_identifier, sample_unique_id, patient_unique_id
+            FROM (
+            {body}
+            )
+            WHERE sample_unique_id IN (
+                SELECT sample_unique_id
+                FROM clinical_data_derived
+                WHERE cancer_study_identifier IN ({_sql_string_list(assignments)})
+                    AND attribute_name = '{attribute}'
+                    AND upper(attribute_value) IN ({_cohort_value_sql(values)})
+            )"""
+    return body
+
+
+def _cross_study_profiled_sql(gene: str, config: dict, study_ids: list[str]) -> str:
+    """Samples profiled for ``gene`` under the alteration's profiling type: panel ∪ WES.
+
+    Mutations use the shipped coverage views; other profiling types take the
+    same panel-membership-or-WES branch that gene_alteration_frequency_by_cancer_type
+    uses. WES is not a row in gene_panel, which is the >100% trap the views exist for.
+    """
+    ids = _sql_string_list(study_ids)
+    ptype = config["profiling_type"]
+    if ptype == "MUTATION_EXTENDED":
+        return f"""SELECT sample_unique_id
+            FROM mutation_panel_gene_coverage
+            WHERE hugo_gene_symbol = '{gene}' AND cancer_study_identifier IN ({ids})
+            UNION ALL
+            SELECT sample_unique_id
+            FROM mutation_wes_coverage
+            WHERE cancer_study_identifier IN ({ids})"""
+    return f"""SELECT stgp.sample_unique_id
+            FROM sample_to_gene_panel_derived stgp
+            JOIN gene_panel gp ON stgp.gene_panel_id = gp.stable_id
+            JOIN gene_panel_list gpl ON gp.internal_id = gpl.internal_id
+            JOIN gene g ON gpl.gene_id = g.entrez_gene_id
+            WHERE g.hugo_gene_symbol = '{gene}'
+                AND stgp.alteration_type = '{ptype}'
+                AND stgp.cancer_study_identifier IN ({ids})
+            UNION ALL
+            SELECT sample_unique_id
+            FROM sample_to_gene_panel_derived
+            WHERE gene_panel_id = 'WES' AND alteration_type = '{ptype}'
+                AND cancer_study_identifier IN ({ids})"""
+
+
+def _fetch_cross_study_counts(
+    gene: str, config: dict, study_ids: list[str], cohort_sql: str
+) -> dict[str, dict]:
+    """Per study: cohort / profiled / altered on both grains, in one grouped query.
+
+    ``altered`` is intersected with ``profiled`` so an off-panel-but-called event
+    can never push a study over 100%. ClickHouse LEFT JOIN fills non-matches
+    with '' (not NULL), so the guards are ``uniqExactIf(col, joined != '')`` --
+    a plain COUNT(DISTINCT CASE ...) counts the empty string as one extra value.
+    """
+    ids = _sql_string_list(study_ids)
+    rows = _query(f"""
+        WITH cohort AS (
+            {cohort_sql}
+        ),
+        profiled AS (
+            {_cross_study_profiled_sql(gene, config, study_ids)}
+        ),
+        altered AS (
+            SELECT DISTINCT sample_unique_id
+            FROM genomic_event_derived
+            WHERE cancer_study_identifier IN ({ids})
+                AND hugo_gene_symbol = '{gene}'
+                AND {config["event_filter"]}
+                AND off_panel = 0
+        )
+        SELECT c.cancer_study_identifier AS study,
+               uniqExact(c.sample_unique_id) AS cohort_samples,
+               uniqExactIf(c.sample_unique_id, p.sample_unique_id != '') AS profiled_samples,
+               uniqExactIf(c.sample_unique_id, p.sample_unique_id != '' AND a.sample_unique_id != '') AS altered_samples,
+               uniqExact(c.patient_unique_id) AS cohort_patients,
+               uniqExactIf(c.patient_unique_id, p.sample_unique_id != '') AS profiled_patients,
+               uniqExactIf(c.patient_unique_id, p.sample_unique_id != '' AND a.sample_unique_id != '') AS altered_patients
+        FROM cohort c
+        LEFT JOIN profiled p USING (sample_unique_id)
+        LEFT JOIN altered a USING (sample_unique_id)
+        GROUP BY study
+        ORDER BY study
+    """)  # noqa: E501
+    keys = (
+        "cohort_samples",
+        "profiled_samples",
+        "altered_samples",
+        "cohort_patients",
+        "profiled_patients",
+        "altered_patients",
+    )
+    out: dict[str, dict] = {}
+    for row in rows:
+        sid = row.get("study")
+        if sid:
+            out[sid] = {key: _as_int(row.get(key)) for key in keys}
+    return out
+
+
+def _fetch_cross_study_overlap(study_ids: list[str], cohort_sql: str) -> list[dict]:
+    """Institutional ids shared between studies, within the cohort.
+
+    ``sample_derived`` carries the un-prefixed ``patient_stable_id`` /
+    ``sample_stable_id`` (P-0001234, TCGA-05-4244, ...), which stay the same
+    across MSK releases and TCGA versions. Returns one row per (grain, set of
+    studies) with the number of ids they share. Heuristic: generic ids can
+    collide between unrelated studies, re-identified samples escape it.
+    """
+    rows = _query(f"""
+        WITH cohort AS (
+            {cohort_sql}
+        ),
+        ids AS (
+            SELECT cancer_study_identifier, patient_stable_id, sample_stable_id
+            FROM sample_derived
+            WHERE cancer_study_identifier IN ({_sql_string_list(study_ids)})
+                AND sample_unique_id IN (SELECT sample_unique_id FROM cohort)
+        )
+        SELECT grain, studies, count() AS shared_ids
+        FROM (
+            SELECT grain, id, arraySort(groupUniqArray(cancer_study_identifier)) AS studies
+            FROM (
+                SELECT 'patient' AS grain, patient_stable_id AS id, cancer_study_identifier FROM ids
+                UNION ALL
+                SELECT 'sample' AS grain, sample_stable_id AS id, cancer_study_identifier FROM ids
+            )
+            WHERE id != ''
+            GROUP BY grain, id
+            HAVING length(studies) > 1
+        )
+        GROUP BY grain, studies
+        ORDER BY grain, shared_ids DESC
+    """)
+    return rows
+
+
+def _fetch_cross_study_panels(study_ids: list[str], profiling_type: str) -> dict[str, list[str]]:
+    rows = _query(f"""
+        SELECT cancer_study_identifier, arraySort(groupUniqArray(gene_panel_id)) AS panels
+        FROM sample_to_gene_panel_derived
+        WHERE cancer_study_identifier IN ({_sql_string_list(study_ids)})
+            AND alteration_type = '{profiling_type}'
+        GROUP BY cancer_study_identifier
+    """)
+    out: dict[str, list[str]] = {}
+    for row in rows:
+        sid = row.get("cancer_study_identifier")
+        panels = row.get("panels")
+        if isinstance(panels, str):  # a transport that serialises arrays as text
+            panels = [p.strip(" '\"") for p in panels.strip("[]").split(",") if p.strip()]
+        if sid:
+            out[sid] = [str(p) for p in (panels or [])]
+    return out
+
+
+def _fetch_cross_study_sample_types(
+    study_ids: list[str], cohort_sql: str
+) -> dict[str, dict[str, int]]:
+    rows = _query(f"""
+        WITH cohort AS (
+            {cohort_sql}
+        )
+        SELECT cd.cancer_study_identifier, cd.attribute_value AS sample_type,
+               uniqExact(cd.sample_unique_id) AS n
+        FROM clinical_data_derived cd
+        WHERE cd.cancer_study_identifier IN ({_sql_string_list(study_ids)})
+            AND cd.attribute_name = 'SAMPLE_TYPE'
+            AND cd.sample_unique_id IN (SELECT sample_unique_id FROM cohort)
+        GROUP BY cd.cancer_study_identifier, sample_type
+        ORDER BY cd.cancer_study_identifier, n DESC
+    """)
+    out: dict[str, dict[str, int]] = {}
+    for row in rows:
+        sid = row.get("cancer_study_identifier")
+        stype = row.get("sample_type")
+        if sid and stype:
+            out.setdefault(sid, {})[str(stype)] = _as_int(row.get("n"))
+    return out
+
+
+def _overlap_pairs(rows: list[dict], present: list[str]) -> list[dict]:
+    """Collapse the overlap probe into per-pair counts among ``present`` studies."""
+    pairs: dict[tuple[str, str], dict[str, int]] = {}
+    for row in rows:
+        grain = row.get("grain")
+        studies = row.get("studies")
+        if isinstance(studies, str):
+            studies = [s.strip(" '\"") for s in studies.strip("[]").split(",") if s.strip()]
+        studies = sorted(s for s in (studies or []) if s in present)
+        n = _as_int(row.get("shared_ids"))
+        if grain not in ("patient", "sample") or len(studies) < 2 or n <= 0:
+            continue
+        for i, a in enumerate(studies):
+            for b in studies[i + 1 :]:
+                entry = pairs.setdefault((a, b), {"shared_patients": 0, "shared_samples": 0})
+                entry["shared_patients" if grain == "patient" else "shared_samples"] += n
+    return [
+        {"studies": list(key), **counts}
+        for key, counts in sorted(
+            pairs.items(), key=lambda kv: (-kv[1]["shared_patients"], -kv[1]["shared_samples"])
+        )
+    ]
+
+
+def _cross_study_design_summary(rows: list[dict], limit: int = 6) -> str:
+    """One line naming how the pooled studies differ: panels and sample-type mix.
+
+    Ordered by profiled size (the rows already are), capped so the warning stays
+    readable when fifteen studies are pooled.
+    """
+    designs = []
+    for r in rows[:limit]:
+        bits = []
+        if r.get("panels"):
+            bits.append("/".join(r["panels"][:4]) + ("…" if len(r["panels"]) > 4 else ""))
+        if r.get("sample_types"):
+            top = sorted(r["sample_types"].items(), key=lambda kv: -kv[1])[:2]
+            bits.append(", ".join(f"{k} {v}" for k, v in top))
+        designs.append(f"{r['study_id']} ({'; '.join(bits) or 'design unknown'})")
+    if len(rows) > limit:
+        designs.append(f"and {len(rows) - limit} more")
+    return "; ".join(designs)
+
+
+def _build_cross_study_payload(
+    gene: str,
+    studies,
+    preference: str | None,
+    cancer_type,
+    include_subtypes: bool,
+    cohort: dict[str, list[str]] | None,
+    alteration: str,
+    unit: str,
+    min_profiled: int,
+    pool: bool,
+) -> dict:
+    """Assemble the cross-study payload; raises ValueError for bad arguments."""
+    gene = _validate_gene_symbol(gene)
+    config = _validate_alteration_type(alteration)
+    if unit not in CROSS_STUDY_UNITS:
+        raise ValueError(f"unit must be one of {', '.join(CROSS_STUDY_UNITS)}; got '{unit}'.")
+    try:
+        min_profiled = int(min_profiled)
+    except (TypeError, ValueError) as e:
+        raise ValueError("min_profiled must be an integer.") from e
+    if min_profiled < 1:
+        raise ValueError("min_profiled must be at least 1.")
+    study_ids = _normalize_study_ids(studies)
+    preference = _validate_preference_name(preference) if preference else None
+    if not study_ids and not preference:
+        raise ValueError(
+            "Name the studies to compare: pass study ids in `studies` (use list_studies to "
+            "find them) and/or a `preference` from cancer_study_query_preferences "
+            "(e.g. 'pan_cancer_tcga')."
+        )
+    if cancer_type is not None and cancer_type != "" and cancer_type != []:
+        requested_codes, codes, names = _resolve_cancer_type_codes(cancer_type, include_subtypes)
+    else:
+        requested_codes, codes, names = [], [], []
+    cohort_pred = _parse_cohort(cohort) if cohort is not None else None
+    profiling_type = config["profiling_type"]
+
+    def _error(message: str) -> dict:
+        return {"error": message, "kind": CROSS_STUDY_KIND, "gene": gene, "studies": []}
+
+    # 1. Which studies exist. Unknown ids are an error, not a silent drop.
+    resolved = _fetch_cross_study_studies(study_ids, preference)
+    studies_meta = {
+        r["cancer_study_identifier"]: r for r in resolved if r.get("cancer_study_identifier")
+    }
+    missing = [sid for sid in study_ids if sid not in studies_meta]
+    if missing:
+        return _error(
+            f"Unknown study id(s): {', '.join(missing)}. Use list_studies(search=...) to "
+            "find the exact identifier."
+        )
+    if not studies_meta:
+        return _error(
+            f"Preference '{preference}' resolved to no studies in this deployment. See "
+            "SELECT DISTINCT preference_name FROM cancer_study_query_preferences."
+        )
+    all_ids = list(study_ids) + sorted(sid for sid in studies_meta if sid not in study_ids)
+
+    # 2. How each study can be filtered to the cancer type.
+    attrs = _fetch_cross_study_attributes(all_ids)
+    assignments, without_cohort = _assign_cohort_keys(all_ids, studies_meta, attrs, codes)
+    if not assignments:
+        return _error(
+            f"None of the requested studies can be filtered to {requested_codes}: "
+            + "; ".join(f"{w['study_id']}: {w['reason']}" for w in without_cohort)
+        )
+    cohort_sql = _cross_study_cohort_sql(assignments, codes, names, cohort_pred)
+    query_ids = list(assignments)
+
+    # 3. The counts.
+    counts = _fetch_cross_study_counts(gene, config, query_ids, cohort_sql)
+    present: list[str] = []
+    for sid in query_ids:
+        if counts.get(sid, {}).get("cohort_samples", 0) > 0:
+            present.append(sid)
+        else:
+            reason = "no samples matched"
+            if codes:
+                reason += f" {assignments[sid]} in {codes}"
+            if cohort_pred is not None:
+                reason += f" with cohort filter {cohort_pred[0]} in {cohort_pred[1]}"
+            without_cohort.append({"study_id": sid, "reason": reason})
+    if not present:
+        return _error(
+            "No samples matched the cohort in any requested study: "
+            + "; ".join(f"{w['study_id']}: {w['reason']}" for w in without_cohort)
+            + ". Check the OncoTree code / cohort values (clinical_data_derived)."
+        )
+
+    # 4-6. Overlap (only meaningful for 2+ studies), panels, sample-type mix.
+    overlap_rows = _fetch_cross_study_overlap(present, cohort_sql) if len(present) >= 2 else []
+    panels = _fetch_cross_study_panels(present, profiling_type)
+    sample_types = _fetch_cross_study_sample_types(present, cohort_sql)
+
+    warnings: list[str] = []
+    notes: list[str] = []
+    grain = "samples" if unit == "sample" else "patients"
+    rows: list[dict] = []
+    by_id: dict[str, dict] = {}
+    for sid in present:
+        c = counts[sid]
+        n_profiled = c[f"profiled_{grain}"]
+        n_altered = c[f"altered_{grain}"]
+        row = {
+            "study_id": sid,
+            "name": studies_meta[sid].get("name"),
+            "cohort_key": assignments[sid],
+            "samples": {
+                "cohort": c["cohort_samples"],
+                "profiled": c["profiled_samples"],
+                "altered": c["altered_samples"],
+            },
+            "patients": {
+                "cohort": c["cohort_patients"],
+                "profiled": c["profiled_patients"],
+                "altered": c["altered_patients"],
+            },
+            "frequency_pct": None,
+            "ci95": None,
+            "weight_pct": None,
+            "panels": panels.get(sid, []),
+            "sample_types": sample_types.get(sid) or None,
+            "status": "included",
+        }
+        if n_profiled == 0:
+            row["status"] = "not_covered"
+            warnings.append(
+                f"{gene} is not on any {profiling_type} panel in {sid}: "
+                f"{c['cohort_samples']} cohort samples, 0 profiled. Shown as not covered, "
+                "not as 0%."
+            )
+        else:
+            lo, hi = wilson_interval(n_altered, n_profiled)
+            row["frequency_pct"] = round(100.0 * n_altered / n_profiled, 1)
+            row["ci95"] = [round(100.0 * lo, 1), round(100.0 * hi, 1)]
+            if n_profiled < min_profiled:
+                row["status"] = "below_min_profiled"
+        rows.append(row)
+        by_id[sid] = row
+
+    # Overlap guard: of two studies that share ids, keep the larger profiled
+    # cohort in the pooling and exclude the smaller. The remaining included set
+    # is pairwise disjoint; per-study rows are never touched.
+    pairs = _overlap_pairs(overlap_rows, present)
+    excluded_for_overlap: list[str] = []
+    for pair in pairs:
+        a, b = pair["studies"]
+        if by_id[a]["status"] != "included" or by_id[b]["status"] != "included":
+            continue
+        drop = min((a, b), key=lambda s: (by_id[s][grain]["profiled"], -present.index(s)))
+        keep = b if drop == a else a
+        by_id[drop]["status"] = "overlap"
+        by_id[drop]["overlaps_with"] = keep
+        excluded_for_overlap.append(drop)
+        shared = pair["shared_patients"] or pair["shared_samples"]
+        which = "patients" if pair["shared_patients"] else "samples"
+        warnings.append(
+            f"{a} and {b} share {shared} {which} (same institutional ids): {drop} was "
+            f"excluded from pooling, {keep} kept (larger profiled cohort). Per-study rows "
+            "are unaffected."
+        )
+
+    included = [r for r in rows if r["status"] == "included"]
+    below = [r["study_id"] for r in rows if r["status"] == "below_min_profiled"]
+    tuples = [(r[grain]["altered"], r[grain]["profiled"]) for r in included]
+
+    pooled = heterogeneity_block = difference = None
+    if len(included) >= 2:
+        meta = pooled_proportion(tuples)
+        heterogeneity_block = {
+            "q": round(meta["q"], 3),
+            "df": meta["df"],
+            "p_value": _round_p(meta["p_heterogeneity"]),
+            "i2_pct": round(100.0 * meta["i2"], 1),
+            "tau2": round(meta["tau2"], 4),
+        }
+        if pool:
+            re_ = meta["random"]
+            fe = meta["fixed"]
+            pooled = {
+                "method": "random_effects_dersimonian_laird",
+                "scale": "logit",
+                "k": meta["k"],
+                "studies": [r["study_id"] for r in included],
+                "frequency_pct": round(100.0 * re_["proportion"], 1),
+                "ci95": [round(100.0 * re_["ci"][0], 1), round(100.0 * re_["ci"][1], 1)],
+                "fixed_effect_pct": round(100.0 * fe["proportion"], 1),
+                "fixed_effect_ci95": [round(100.0 * fe["ci"][0], 1), round(100.0 * fe["ci"][1], 1)],
+                "n_altered": sum(a for a, _ in tuples),
+                "n_profiled": sum(n for _, n in tuples),
+            }
+            for r, w in zip(included, re_["weights"], strict=True):
+                r["weight_pct"] = round(100.0 * w, 1)
+        test = homogeneity_test(tuples)
+        difference = {
+            "test": test["test"],
+            "statistic": None if test["statistic"] is None else round(test["statistic"], 3),
+            "df": test["df"],
+            "p_value": _round_p(test["p_value"]),
+            "k": test["k"],
+        }
+        if meta["i2"] >= CROSS_STUDY_HIGH_I2:
+            warnings.append(
+                f"High between-study heterogeneity (I² = {heterogeneity_block['i2_pct']}%, "
+                f"p = {heterogeneity_block['p_value']}). The studies differ in design: "
+                + _cross_study_design_summary(included)
+                + ". Report the per-study rates as the headline; the pooled value is a "
+                "summary of these studies, not a population estimate."
+            )
+    else:
+        notes.append(
+            f"Pooled estimate and difference test not computed: {len(included)} study "
+            f"eligible (need 2 with >= {min_profiled} profiled {grain}, not overlapping)."
+        )
+    if len(included) >= 2 and not pool:
+        notes.append("pool=False: pooled estimate withheld; heterogeneity and test still shown.")
+
+    # Disclosures the model must carry into its answer.
+    if not codes:
+        for sid in present:
+            n_types = attrs.get(sid, {}).get("n_cancer_types", 0)
+            if n_types > 1 and cohort_pred is None:
+                warnings.append(
+                    f"No cancer-type filter: {sid} spans {n_types} cancer types "
+                    f"({counts[sid]['cohort_samples']} samples). Pass cancer_type=<OncoTree "
+                    "code> to compare like with like."
+                )
+    notes.append(
+        f"Counting unit: {grain}. frequency_pct = altered {grain} / {grain} profiled for "
+        f"{gene} ({profiling_type}) within each study's cohort; both grains are reported "
+        "per study. Pass unit='patient' for prevalence / fraction-of-patients questions."
+    )
+    notes.append(
+        "Per-study rows are the primary result. The pooled value is a DerSimonian-Laird "
+        "random-effects meta-analytic proportion (logit scale) over the non-overlapping "
+        "included studies, not a sum of counts; report it with its CI and I²."
+    )
+    if below:
+        notes.append(
+            f"Shown but excluded from pooling and the test (fewer than {min_profiled} "
+            f"profiled {grain}): {', '.join(below)}."
+        )
+    if codes:
+        notes.append(
+            f"Cancer type: OncoTree {requested_codes}"
+            + (f" expanded to {codes}" if codes != requested_codes else "")
+            + " matched per sample on ONCOTREE_CODE (fallbacks per row in cohort_key)."
+        )
+    if profiling_type != "MUTATION_EXTENDED":
+        notes.append(
+            f"Denominators count samples profiled for {profiling_type}; alteration "
+            f"'{alteration}' counts {config['event_filter']}."
+        )
+
+    return {
+        "kind": CROSS_STUDY_KIND,
+        "gene": gene,
+        "alteration": alteration,
+        "unit": unit,
+        "min_profiled": min_profiled,
+        "preference": preference,
+        "cancer_type": (
+            {
+                "requested": requested_codes,
+                "codes": codes,
+                "names": names,
+                "include_subtypes": bool(include_subtypes),
+            }
+            if codes
+            else None
+        ),
+        "filter": cohort,
+        "studies": rows,
+        "studies_without_cohort": without_cohort,
+        "pooled": pooled,
+        "heterogeneity": heterogeneity_block,
+        "difference_test": difference,
+        "overlap": {
+            "checked": len(present) >= 2,
+            "pairs": pairs,
+            "excluded": excluded_for_overlap,
+            "pooling_blocked": bool(excluded_for_overlap) and len(included) < 2,
+        },
+        "warnings": warnings,
+        "notes": notes,
+    }
+
+
 # Create FastMCP instance
 mcp = FastMCP(
     name="cBioPortal MCP Server",
@@ -2963,6 +3761,105 @@ def alteration_cooccurrence(
     except Exception as e:
         logger.error("alteration_cooccurrence error: %s", e)
         return _error(f"Unexpected error computing co-occurrence: {e}")
+
+
+# --- Cross-study alteration frequency (meta-analysis) tool -------------------
+
+
+@mcp.tool(
+    description="""
+    Compare a gene's alteration frequency ACROSS several cBioPortal studies
+    (cross-study meta-analysis), e.g. "TP53 in lung adenocarcinoma across
+    MSK-CHORD and TCGA" or "KRAS in all lung adenocarcinoma studies".
+
+    Use this instead of running one query per study and combining the numbers
+    yourself. Returns one row per study (its own cohort, its own panel-aware
+    denominator, Wilson 95% CI), then a DerSimonian-Laird random-effects pooled
+    frequency with heterogeneity (Q, I², τ²) and a test of whether the studies
+    differ (k×2 chi-square, or Fisher's exact for two small studies). It never
+    sums counts across studies. Studies that share patients (MSK-CHORD is a
+    subset of MSK-IMPACT-50k; the TCGA releases of one cohort overlap) are
+    detected from the data: the smaller study is kept out of the pooling and
+    the pair is reported.
+
+    Args:
+        gene: Hugo gene symbol (e.g. "TP53").
+        studies: Study identifiers to compare (resolve names with list_studies).
+            "TCGA" for one disease normally means its *_tcga_pan_can_atlas_2018
+            study; do not pass several releases of the same cohort.
+        preference: A named study set from cancer_study_query_preferences
+            (e.g. "pan_cancer_tcga", "all_studies_non_redundant"); unioned with
+            `studies`. At least one of `studies` / `preference` is required.
+        cancer_type: OncoTree code(s) to restrict every study to, e.g. "LUAD"
+            (resolve with search_oncotree first). Matched per sample on
+            ONCOTREE_CODE, with CANCER_TYPE_DETAILED and study-level fallbacks
+            reported per row as `cohort_key`. Without it each study is taken
+            whole, and multi-cancer studies are flagged in `warnings`.
+        include_subtypes: Expand the code(s) to their OncoTree descendants
+            (default True; "NSCLC" then covers LUAD, LUSC, ...).
+        cohort: Optional extra filter, one clinical attribute mapped to the
+            values to match, e.g. {"SAMPLE_TYPE": ["Primary"]}; applied inside
+            every study and ANDed with cancer_type.
+        alteration: One of mutation (default), amplification, deep_deletion,
+            structural_variant. Denominators use the matching profiling type.
+        unit: "sample" (default; matches cBioPortal's study view) or "patient"
+            (use for prevalence / fraction-of-patients questions). Both grains
+            are always returned per study.
+        min_profiled: Studies with fewer profiled samples/patients are shown
+            but excluded from pooling and the test (default 10).
+        pool: Set False to withhold the pooled estimate (rows, heterogeneity and
+            the test are still returned).
+
+    Returns:
+        Structured JSON: `studies[]` (study_id, name, cohort_key, samples{cohort,
+        profiled, altered}, patients{...}, frequency_pct, ci95, weight_pct, panels,
+        sample_types, status ∈ included | below_min_profiled | not_covered |
+        overlap), `studies_without_cohort[]`, `pooled` (random-effects
+        frequency_pct + ci95, fixed-effect for reference, crude n_altered /
+        n_profiled), `heterogeneity` (q, df, p_value, i2_pct, tau2),
+        `difference_test` (test, statistic, df, p_value), `overlap` (pairs,
+        excluded), `warnings`, `notes`, and `provenance` with the SQL that ran.
+        Report per-study rates with counts as the headline; the pooled value is
+        a meta-analytic summary, never a sum.
+""",
+)
+def cross_study_alteration_frequency(
+    gene: str,
+    studies: list[str] | None = None,
+    preference: str | None = None,
+    cancer_type: str | list[str] | None = None,
+    include_subtypes: bool = True,
+    cohort: dict[str, list[str]] | None = None,
+    alteration: str = "mutation",
+    unit: str = "sample",
+    min_profiled: int = CROSS_STUDY_DEFAULT_MIN_PROFILED,
+    pool: bool = True,
+) -> dict:
+    # Error returns keep the contract shape (kind + gene + empty studies) so a
+    # widget can recognize and render them consistently across host transports.
+    def _error(message: str) -> dict:
+        return {"error": message, "kind": CROSS_STUDY_KIND, "gene": gene, "studies": []}
+
+    try:
+        return _with_provenance(
+            lambda: _build_cross_study_payload(
+                gene=gene,
+                studies=studies,
+                preference=preference,
+                cancer_type=cancer_type,
+                include_subtypes=include_subtypes,
+                cohort=cohort,
+                alteration=alteration,
+                unit=unit,
+                min_profiled=min_profiled,
+                pool=pool,
+            )
+        )
+    except ValueError as e:
+        return _error(str(e))
+    except Exception as e:
+        logger.error("cross_study_alteration_frequency error: %s", e)
+        return _error(f"Unexpected error computing cross-study frequency: {e}")
 
 
 # --- Generic chart UI apps (pie / bar / line) -------------------------------
