@@ -30,6 +30,8 @@ SURVIVAL_UI_URI = "ui://cbioportal/survival"
 ONCOPRINT_UI_URI = "ui://cbioportal/oncoprint"
 LOLLIPOP_UI_URI = "ui://cbioportal/lollipop"
 COOCCURRENCE_UI_URI = "ui://cbioportal/cooccurrence"
+# Cross-study alteration-frequency forest plot (meta-analysis app).
+FOREST_UI_URI = "ui://cbioportal/forest"
 # Generic, model-driven chart widgets (data supplied by the tool caller, not a DB
 # query). One ui:// resource + AppConfig per chart type.
 PIE_UI_URI = "ui://cbioportal/pie"
