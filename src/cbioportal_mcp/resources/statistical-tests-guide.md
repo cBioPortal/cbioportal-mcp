@@ -21,17 +21,19 @@ A number you derived by hand, estimated, or recalled is a fabrication whether or
 | Log-rank test (2+ groups): chi-square, df, p-value | `survival_curve` (same call) | `stats.p_value`, `stats.chi_square`, `stats.df` |
 | **Gene-pair** co-occurrence / mutual exclusivity: two-sided Fisher's exact p, log2 odds ratio, Benjamini-Hochberg q | `alteration_cooccurrence(study_id, genes=[...])` | `pairs[].p_value`, `pairs[].log2_odds_ratio`, `pairs[].q_value`, `pairs[].tendency` |
 | Alteration frequency with panel-aware (profiled) denominators | `oncoprint(study_id, genes=[...])` | `gene_stats[]` |
+| **Study-vs-study** frequency of one gene (several studies, or one cancer type across studies): per-study Wilson 95% CIs, DerSimonian-Laird random-effects pooled frequency, Cochran's Q / I² / τ², and a k×2 chi-square (Fisher's exact for two small studies) test of whether the studies differ | `cross_study_alteration_frequency(gene, studies=[...] and/or preference=..., cancer_type=<OncoTree code>)` | `studies[].frequency_pct`, `studies[].ci95`, `pooled.frequency_pct`, `pooled.ci95`, `heterogeneity.i2_pct`, `difference_test.p_value` |
 
 `survival_curve` supports endpoints OS, PFS, DFS, DSS, and splits the cohort either by gene-alteration status or by a clinical attribute. `median_survival` is `null` when the median was not reached — report that as "not reached", never substitute a mean.
 
-**Scope limit on `alteration_cooccurrence`:** it tests **gene A vs gene B within one study cohort**. It does *not* test "cohort A vs cohort B" alteration enrichment. There is no tool for that comparison — it still takes the handoff in rule 1.
+**Scope limits.** `alteration_cooccurrence` tests **gene A vs gene B within one study cohort**. **One gene across two or more studies** is `cross_study_alteration_frequency`'s job: each study's own rate with a panel-aware denominator, the pooled random-effects estimate, the test of difference — and it refuses to pool studies that share patients. What remains uncovered is **cohort A vs cohort B inside one study** on an arbitrary clinical split (responders vs non-responders, primary vs metastatic) — that still takes the handoff in rule 1.
 
 ### The rules
 
 1. **Never invent a p-value.** Not "p < 0.001", not "p ≈ 0.05", not any p-value. Route it instead:
    - survival difference between groups → call `survival_curve` and report `stats.p_value` (log-rank), with the per-group N and event counts.
    - gene-pair co-occurrence / mutual exclusivity → call `alteration_cooccurrence` and report `pairs[].p_value` and `pairs[].q_value`.
-   - **anything else** — cohort A vs cohort B enrichment, Wilcoxon / Mann-Whitney, t-test, ANOVA, Kruskal-Wallis, general chi-squared — no tool computes it. Answer: *"I can't compute that here — here is the 2x2 contingency table (or group statistics). Run it in cBioPortal's Group Comparison tab, in R with `fisher.test(...)` / `wilcox.test(...)`, or in Python with `scipy.stats.fisher_exact(...)` / `mannwhitneyu(...)`."*
+   - one gene compared across studies ("is TP53 more common in MSK-CHORD than in TCGA?", "TP53 in all lung adenocarcinoma studies") → call `cross_study_alteration_frequency` and report `difference_test.p_value` (the test it ran is in `difference_test.test`) next to the per-study rates, and — when present — `pooled.frequency_pct` with `pooled.ci95` and `heterogeneity.i2_pct`.
+   - **anything else** — cohort A vs cohort B enrichment within one study, Wilcoxon / Mann-Whitney, t-test, ANOVA, Kruskal-Wallis, general chi-squared — no tool computes it. Answer: *"I can't compute that here — here is the 2x2 contingency table (or group statistics). Run it in cBioPortal's Group Comparison tab, in R with `fisher.test(...)` / `wilcox.test(...)`, or in Python with `scipy.stats.fisher_exact(...)` / `mannwhitneyu(...)`."*
 2. **Never claim mutual exclusivity (or co-occurrence) from a contingency table alone.** A 2x2 table is not a test. Call `alteration_cooccurrence`, which runs the two-sided Fisher's exact test and returns the direction (`tendency`, plus the sign of `log2_odds_ratio`) and the BH-corrected q-value. Do not hand-roll the test in SQL, and do not eyeball the counts. If the pair is outside that tool's scope, present the table and stop.
 3. **Never report a "median" that came from `AVG(...)` or any non-median aggregate.** "Median" and "mean" are different statistics; for skewed clinical distributions (especially survival) they differ substantially. Use ClickHouse's `quantile(0.5)(...)` for an actual median of a non-censored attribute, and label arithmetic averages as "mean", never "median". For survival specifically, neither aggregate is valid — see rule 5.
 4. **Never report a hazard ratio, risk ratio, or relative risk.** These require regression / model fitting that neither ClickHouse nor this server does — there is no tool, so the answer is a refusal plus a handoff, every time. The one odds ratio you may report is `pairs[].log2_odds_ratio` from `alteration_cooccurrence`, and only as that tool returned it.
@@ -126,27 +128,51 @@ ClickHouse does NOT have built-in statistical test functions (no Fisher's exact,
    - **R** (fisher.test, wilcox.test, t.test, kruskal.test, chisq.test)
    - **Python** (scipy.stats: fisher_exact, mannwhitneyu, ttest_ind, kruskal, chi2_contingency)
 
-Steps 2-5 apply to the tests with no tool behind them: two-cohort alteration enrichment, Wilcoxon / Mann-Whitney, Kruskal-Wallis, t-test, ANOVA, general chi-squared, and any regression-based measure (hazard ratio, relative risk).
+Steps 2-5 apply to the tests with no tool behind them: within-study two-cohort alteration enrichment (study-vs-study is covered by `cross_study_alteration_frequency`), Wilcoxon / Mann-Whitney, Kruskal-Wallis, t-test, ANOVA, general chi-squared, and any regression-based measure (hazard ratio, relative risk).
 
-### Example: Building a Contingency Table for Fisher's Exact Test
+### Example: one gene across two studies — COVERED, call the tool
 
-This is the **uncovered** shape — one gene compared across two cohorts. No tool computes it, so it takes the handoff. (The covered shape is two genes within one cohort: call `alteration_cooccurrence` instead of building this table by hand.)
+"Is TP53 mutated more often in `brca_metabric` than in `brca_tcga_pan_can_atlas_2018`?" is a **study-vs-study** comparison and is covered:
 
-```sql
--- Compare TP53 mutation frequency between two cancer types
-SELECT
-  cancer_study_identifier,
-  COUNT(DISTINCT CASE WHEN hugo_gene_symbol = 'TP53' AND variant_type = 'mutation'
-    AND mutation_status != 'GERMLINE' THEN sample_unique_id END) AS altered,
-  COUNT(DISTINCT sample_unique_id) - COUNT(DISTINCT CASE WHEN hugo_gene_symbol = 'TP53'
-    AND variant_type = 'mutation' AND mutation_status != 'GERMLINE' THEN sample_unique_id END) AS unaltered
-FROM genomic_event_derived
-WHERE cancer_study_identifier IN ('{study_1}', '{study_2}')
-  AND off_panel = FALSE
-GROUP BY cancer_study_identifier
+```
+cross_study_alteration_frequency(gene="TP53", studies=["brca_metabric", "brca_tcga_pan_can_atlas_2018"])
 ```
 
-Then state: "This is a 2-group alteration comparison. The appropriate test is Fisher's exact test (two-tailed). Here is the 2x2 contingency table — you can compute the p-value in cBioPortal's Group Comparison tab, or in R with `fisher.test(matrix(c(...), nrow=2))`."
+Report `studies[].frequency_pct` with `ci95` and counts for each study, and `difference_test.p_value` (the payload says which test ran: a k×2 chi-square, or Fisher's exact when a study is small). The tool builds each study's panel-aware denominator itself. Do not run a raw `COUNT(DISTINCT sample_unique_id)` over `genomic_event_derived` "to double-check" — that uses a study-wide denominator, which is the >100%-frequency bug the mutation-frequency guide warns about.
+
+### Example: Building a Contingency Table for a within-study comparison — UNCOVERED
+
+Two cohorts **inside one study** compared on one gene (primary vs metastatic samples, responders vs non-responders): no tool computes it, so build the table with a correct profiled denominator and hand off.
+
+```sql
+-- TP53 mutation frequency in primary vs metastatic samples of one study
+WITH cohort AS (
+  SELECT sample_unique_id, attribute_value AS sample_type
+  FROM clinical_data_derived
+  WHERE cancer_study_identifier = '{study}' AND attribute_name = 'SAMPLE_TYPE'
+),
+profiled AS (
+  SELECT sample_unique_id FROM mutation_panel_gene_coverage
+  WHERE cancer_study_identifier = '{study}' AND hugo_gene_symbol = 'TP53'
+  UNION ALL
+  SELECT sample_unique_id FROM mutation_wes_coverage WHERE cancer_study_identifier = '{study}'
+),
+altered AS (
+  SELECT DISTINCT sample_unique_id FROM genomic_event_derived
+  WHERE cancer_study_identifier = '{study}' AND hugo_gene_symbol = 'TP53'
+    AND variant_type = 'mutation' AND mutation_status != 'UNCALLED' AND off_panel = 0
+)
+SELECT c.sample_type,
+       uniqExactIf(c.sample_unique_id, p.sample_unique_id != '' AND a.sample_unique_id != '') AS altered,
+       uniqExactIf(c.sample_unique_id, p.sample_unique_id != '' AND a.sample_unique_id = '') AS unaltered
+FROM cohort c
+LEFT JOIN profiled p USING (sample_unique_id)
+LEFT JOIN altered a USING (sample_unique_id)
+WHERE c.sample_type IN ('Primary', 'Metastasis')
+GROUP BY c.sample_type
+```
+
+(`LEFT JOIN` fills non-matches with `''`, not `NULL`, hence the `!= ''` guards.) Then state: "This is a 2-group alteration comparison within one study. The appropriate test is Fisher's exact test (two-tailed). Here is the 2x2 contingency table — you can compute the p-value in cBioPortal's Group Comparison tab, or in R with `fisher.test(matrix(c(...), nrow=2))`."
 
 Approved Response Templates
 ---------------------------
@@ -173,6 +199,11 @@ Pick by whether a tool covers the request. Check the routing table first.
 >
 > Counts are over the [n_profiled] samples profiled for both genes. q-values are corrected across all tested pairs."
 
+### When asked to compare a gene across studies, or for a pooled frequency — COVERED, call the tool
+> "I ran `cross_study_alteration_frequency` for TP53 in lung adenocarcinoma (OncoTree LUAD) across `msk_chord_2024` and `luad_tcga_pan_can_atlas_2018`. TP53 is mutated in **45.2% (2,695 / 5,957 samples; 95% CI 44.0–46.5)** of MSK-CHORD LUAD samples and **52.1% (295 / 566; 48.0–56.2)** of TCGA LUAD samples — denominators are samples profiled for TP53 in each study. The difference is significant (**chi-square test of homogeneity, p = 0.0017**). The **random-effects pooled estimate is 48.4% (95% CI 41.7–55.1)** with high heterogeneity (**I² = 90%**), which reflects design differences: MSK-CHORD is targeted clinical sequencing including metastatic samples, TCGA is exome sequencing of primary tumours. The per-study rates are the headline; the pooled value summarises these two studies, it is not a population estimate. The studies share no patients."
+>
+> Counts, CIs, the p-value, the pooled estimate and I² all come from the tool payload. Never add numerators and denominators across studies yourself.
+
 ### When asked for median overall survival — COVERED, call the tool
 > "Median OS requires Kaplan-Meier estimation because survival data is censored — patients still alive at last follow-up have not yet experienced the event, and a naive `AVG()` or `quantile(0.5)` over `OS_MONTHS` ignores that. I ran `survival_curve` instead: **median OS = [groups[].median_survival] months** (KM estimate; N = ..., events = ..., censored = ...)."
 
@@ -187,7 +218,7 @@ Only if the study or endpoint isn't supported by `survival_curve`, fall back to:
 > Run KM in R (`survival::survfit(Surv(OS_MONTHS, OS_STATUS==\"1:DECEASED\") ~ group, data=...)`), Python (`lifelines.KaplanMeierFitter`), or cBioPortal's Survival comparison."
 
 ### When asked for a p-value no tool computes — UNCOVERED, hand off
-Two-cohort alteration enrichment, Wilcoxon / Mann-Whitney, t-test, ANOVA, Kruskal-Wallis, general chi-squared:
+Within-study two-cohort alteration enrichment, Wilcoxon / Mann-Whitney, t-test, ANOVA, Kruskal-Wallis, general chi-squared:
 
 > "I can't compute that test here. Here is the 2x2 contingency table:
 >
@@ -215,19 +246,23 @@ Two-cohort alteration enrichment, Wilcoxon / Mann-Whitney, t-test, ANOVA, Kruska
 - ❌ "Hazard ratio for EGFR-mutant vs wild-type LUAD is 0.67."  (regression not run — and no tool runs it)
 - ❌ "The p-value is approximately 0.03." (no test was run)
 - ❌ "Based on the contingency table, there is significant enrichment." (no test was run)
+- ❌ "TP53 is mutated in 45.8% of lung adenocarcinomas (2,990 / 6,523 across MSK-CHORD and TCGA)." (a SUM/SUM across studies — a pooled frequency is `cross_study_alteration_frequency`'s random-effects estimate, reported with its CI and I²)
+- ❌ "MSK-CHORD (45%) and TCGA (52%) differ significantly." (no `difference_test` behind it)
 
 ### Also forbidden: refusing what the server can compute
 
 - ❌ "I can't compute a p-value for that survival difference — run it in R." (`survival_curve` returns the log-rank p; call it)
 - ❌ "Mutual exclusivity needs Fisher's exact, which I can't run — try the portal's Mutual Exclusivity tab." (`alteration_cooccurrence` runs it)
 - ❌ "Median OS needs Kaplan-Meier, so I can only give you the raw `(OS_MONTHS, OS_STATUS)` pairs." (`survival_curve` computes the KM median)
+- ❌ "I can't tell you whether the frequencies differ between the two studies — run a Fisher test in R." (`cross_study_alteration_frequency` runs it)
 
 Sending a researcher to scipy for a statistic this server computes is a failure, not caution.
 
 Common Pitfalls
 ---------------
 - Do NOT hand-roll a test the server already runs. No Fisher's exact expressed in SQL, no KM assembled from `quantile()`, no p-value approximated from a chi-square you computed by hand. Call `alteration_cooccurrence` / `survival_curve`.
-- Do NOT stretch a tool past its scope. `alteration_cooccurrence` tests gene-pairs within one cohort; it is not a cohort-vs-cohort enrichment test, and its q-values are corrected only across the pairs it tested.
+- Do NOT stretch a tool past its scope. `alteration_cooccurrence` tests gene-pairs within one cohort; it is not a cohort-vs-cohort enrichment test, and its q-values are corrected only across the pairs it tested. `cross_study_alteration_frequency` compares one gene across studies; it does not compare two cohorts inside one study.
+- Do NOT pool frequencies across studies by adding counts or averaging percentages. Call `cross_study_alteration_frequency`; it pools with a random-effects model and refuses to pool studies that share patients (MSK-CHORD sits inside MSK-IMPACT-50k; the TCGA releases of one cohort overlap).
 - Do NOT use chi-squared for 2x2 tables with small expected cell counts — use Fisher's exact.
 - Do NOT use a t-test for clinical attributes like age or tumor stage — use Wilcoxon (non-parametric).
 - Do NOT compare alteration frequencies without accounting for gene panel coverage. Use profiled sample count as the denominator, not total sample count.
