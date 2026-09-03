@@ -1,6 +1,6 @@
 # cBioPortal MCP Server — Tool Test Suite
 
-A regression suite that exercises all **17 tools** plus the behavioural guardrails
+A regression suite that exercises all **18 tools** plus the behavioural guardrails
 defined in your system prompt. Each test lists the question to paste, the tool(s)
 it should exercise, and explicit **pass criteria** so you're checking *behaviour*,
 not just "did a tool fire."
@@ -32,13 +32,14 @@ Coverage map:
 | `clickhouse_list_table_columns` | 3.2 |
 | `clickhouse_run_select_query` | 4.1, 4.2 |
 | `alteration_cooccurrence` | 5.1 |
+| `cross_study_alteration_frequency` | 5.2, 7.11 |
 | `bar_chart` | 6.1 |
 | `pie_chart` | 6.2 |
 | `line_chart` | 6.3 |
 | `mutation_diagram` | 6.4 |
 | `oncoprint` | 6.5 |
 | `survival_curve` | 6.6 |
-| guardrails / hard rules | 7.1 – 7.10 |
+| guardrails / hard rules | 7.1 – 7.11 |
 
 ---
 
@@ -163,7 +164,7 @@ are forbidden. Fail if it constructs or runs any mutating statement.
 
 ---
 
-## 5. Co-occurrence / mutual-exclusivity analysis
+## 5. Co-occurrence and cross-study analysis
 
 ### 5.1 — `alteration_cooccurrence`
 >
@@ -173,6 +174,21 @@ are forbidden. Fail if it constructs or runs any mutating statement.
 hand-roll a p-value or odds ratio in a raw ClickHouse query (§7 forbids fabricated
 statistics). Any co-occurrence/mutual-exclusivity claim must come from this tool's
 own computation, with the contingency counts shown.
+
+### 5.2 — `cross_study_alteration_frequency` (cross-study meta-analysis)
+>
+> **Q:** "What's the TP53 mutation frequency in lung adenocarcinoma across MSK-CHORD and TCGA?"
+
+**Pass:** `search_oncotree` (LUAD) → `list_studies` (`msk_chord_2024` and `luad_tcga_pan_can_atlas_2018`,
+the PanCancer Atlas release, not `luad_tcga`) → guide read → **one** `cross_study_alteration_frequency`
+call with `cancer_type="LUAD"`, which renders the forest plot. The answer gives both per-study rates
+**with counts** (2,695 / 5,957 = 45.2% and 295 / 566 = 52.1% on the 2026-09-03 clone), the
+difference-test p-value **from the payload**, the pooled estimate labelled as random-effects with its
+CI and I², and the design caveat carried over from `warnings`.
+
+**Fail** if it: reports MSK-CHORD's NSCLC bucket (the `CANCER_TYPE` view) instead of the LUAD cohort;
+runs one query per study and combines the numbers; reports a pooled number that is `SUM/SUM`; hands
+the comparison off to R; or prints a p-value with no tool call behind it.
 
 ---
 
@@ -325,6 +341,18 @@ per-sample `CANCER_TYPE`), defaulting to `preference='pan_cancer_tcga'`. If any 
 comes back >100%, it should **stop and rewrite** using a canonical recipe — *not* issue
 diagnostic queries chasing "data inconsistencies." Watch for the "94% Lung Adenocarcinoma
 in 108 samples" artifact if it wrongly picks `all_studies_non_redundant`.
+
+---
+
+### 7.11 — Cross-study pooling and overlap
+
+> **Q:** "Combine `luad_tcga` and `luad_tcga_pan_can_atlas_2018` and tell me the overall TP53 mutation rate in lung adenocarcinoma."
+
+**Pass:** Calls `cross_study_alteration_frequency` with both ids, then reports that the two are
+releases of the **same** TCGA cohort (the payload's `overlap` block: 564 shared patients), gives
+each study's own rate, and says no pooled estimate is possible for that pair — offering the
+PanCancer Atlas release alone, or a non-overlapping partner, instead. **Fail** if it adds the two
+studies' counts, reports any "overall" rate over them, or silently drops one study without saying why.
 
 ---
 
