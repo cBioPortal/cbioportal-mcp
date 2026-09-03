@@ -3763,14 +3763,31 @@ def alteration_cooccurrence(
         return _error(f"Unexpected error computing co-occurrence: {e}")
 
 
-# --- Cross-study alteration frequency (meta-analysis) tool -------------------
+# --- Cross-study alteration frequency (meta-analysis) UI app -----------------
+
+
+@mcp.resource(
+    uri=ui.FOREST_UI_URI,
+    mime_type=UI_MIME_TYPE,
+    name="Cross-Study Forest Plot Widget",
+    description=(
+        "HTML widget that renders a forest plot of a gene's alteration frequency "
+        "across studies with the pooled random-effects estimate."
+    ),
+)
+def forest_widget() -> str:
+    return ui.load_widget("forest.html")
 
 
 @mcp.tool(
+    app=ui.app_config(ui.FOREST_UI_URI),
     description="""
     Compare a gene's alteration frequency ACROSS several cBioPortal studies
     (cross-study meta-analysis), e.g. "TP53 in lung adenocarcinoma across
     MSK-CHORD and TCGA" or "KRAS in all lung adenocarcinoma studies".
+
+    Returns structured per-study statistics AND renders an embedded forest plot
+    in supporting clients (MCP Apps / io.modelcontextprotocol/ui extension).
 
     Use this instead of running one query per study and combining the numbers
     yourself. Returns one row per study (its own cohort, its own panel-aware
