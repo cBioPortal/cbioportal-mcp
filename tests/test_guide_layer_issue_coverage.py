@@ -60,3 +60,26 @@ def test_existing_guides_cover_open_issue_patterns():
     assert "FLAWED PREMISE OR NONEXISTENT DATA FIELD" in pitfalls
     assert "OUT-OF-SCOPE DRIFT AFTER USER PUSHBACK" in pitfalls
     assert "MISLEADING OUTPUT PROMISES" in pitfalls
+
+
+def test_guides_and_prompt_route_cross_study_questions_to_the_tool():
+    prompt = server._load_resource("system-prompt.md")
+    stats = server._load_resource("statistical-tests-guide.md")
+    mutation = server._load_resource("mutation-frequency-guide.md")
+    resolution = server._load_resource("study-resolution-guide.md")
+    pitfalls = server._load_resource("common-pitfalls.md")
+
+    for text in (prompt, stats, mutation, resolution, pitfalls):
+        assert "cross_study_alteration_frequency" in text
+
+    # Study-vs-study used to be declared uncovered; it is now routed, and the
+    # crude cross-study sum is a forbidden shape.
+    assert "**Study-vs-study**" in stats
+    assert "random-effects" in stats
+    assert "a SUM/SUM across studies" in stats
+    assert "cohort A vs cohort B inside one study" in stats
+    assert "### Across named studies (`cross_study_alteration_frequency`)" in mutation
+    assert "never report it as 0%" in mutation
+    assert "## Same Cohort, Several Releases" in resolution
+    assert "*_tcga_pan_can_atlas_2018" in prompt
+    assert "never add counts across studies" in prompt
