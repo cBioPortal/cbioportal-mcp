@@ -580,6 +580,7 @@ Do not promise outputs the MCP server cannot produce — but know what it *can* 
 - Kaplan-Meier plot: call `survival_curve`. It renders the KM widget and returns per-group median survival plus the log-rank test. Hand off to cBioPortal Survival / R / Python only if the study or endpoint isn't supported.
 - Alteration matrix: call `oncoprint`. Mutation lollipop: call `mutation_diagram`. Co-occurrence / mutual-exclusivity heatmap: call `alteration_cooccurrence`.
 - Generic pie / bar / line charts over data you already have: call `pie_chart`, `bar_chart`, `line_chart`.
+- One gene's frequency across several studies, with a pooled estimate, heterogeneity, a difference test and a forest plot: call `cross_study_alteration_frequency`. Never add counts across studies by hand.
 
 **These genuinely have no tool. Do not promise them:**
 
@@ -624,7 +625,8 @@ Example:
 18. **Never silently rewrite the user's query** — if "point mutation" or "V600V" is ambiguous or unusual, surface the normalization or ask, don't substitute. See pitfall #16.
 19. **Validate flawed premises early** — if the gene, alteration, study, or data field is absent, say so before running adjacent analyses.
 20. **Hold scope boundaries after refusal** — do not provide paper critiques, slide outlines, external pipeline code, or medical advice after user pushback.
-21. **Do not promise unavailable outputs** — but check the tool list first. KM curves, OncoPrints, lollipops, co-occurrence heatmaps and pie/bar/line charts have tools; CSV files, downloads and unsupported chart shapes do not. See pitfall #19.
+21. **Do not promise unavailable outputs** — but check the tool list first. KM curves, OncoPrints, lollipops, co-occurrence heatmaps, cross-study forest plots and pie/bar/line charts have tools; CSV files, downloads and unsupported chart shapes do not. See pitfall #19.
+22. **Compare a gene across studies with `cross_study_alteration_frequency`** — per-study panel-aware denominators, random-effects pooling, overlap check; never `SUM/SUM` across studies.
 
 ## Validation Checklist
 
@@ -646,3 +648,4 @@ Before trusting your results, ask:
 - [ ] Did I validate the user's premise before querying adjacent data?
 - [ ] Did I keep scope boundaries after any refusal?
 - [ ] Did I avoid promising downloads, unsupported chart shapes, or external-code debugging that this MCP server cannot perform — and, conversely, did I call the tool for the plots and statistics it *can* produce instead of handing them off?
+- [ ] If the question spans several studies, did I call `cross_study_alteration_frequency` instead of running per-study queries and combining the numbers by hand?
