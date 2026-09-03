@@ -15,7 +15,7 @@ that is a sum or that pools overlapping cohorts.
 
 import pytest
 
-from cbioportal_mcp import server
+from cbioportal_mcp import server, ui
 
 TCGA = "luad_tcga_pan_can_atlas_2018"
 CHORD = "msk_chord_2024"
@@ -529,3 +529,35 @@ async def test_tool_is_registered():
     tools = await server.mcp.list_tools()
     names = {t.name for t in tools}
     assert "cross_study_alteration_frequency" in names
+
+
+# --- UI wiring ---------------------------------------------------------------
+
+
+def test_forest_app_config():
+    cfg = ui.app_config(ui.FOREST_UI_URI)
+    assert cfg.resource_uri == ui.FOREST_UI_URI == "ui://cbioportal/forest"
+    assert cfg.visibility == ["model"]
+    # Self-contained widget: no network, so no CSP connect allowlist.
+    assert cfg.csp is None
+
+
+def test_forest_widget_html_loads():
+    html = ui.load_widget("forest.html")
+    assert html.lstrip().lower().startswith("<!doctype html")
+    assert "Widget asset not found" not in html
+    # The bundle carries the baked-in preview payloads and the host bridge.
+    assert "cross_study_frequency" in html and "ui/initialize" in html
+
+
+async def test_tool_is_linked_to_the_forest_widget():
+    tool = await server.mcp.get_tool("cross_study_alteration_frequency")
+    assert tool.meta["ui"]["resourceUri"] == ui.FOREST_UI_URI
+    assert tool.meta["ui"]["visibility"] == ["model"]
+
+
+async def test_forest_resource_is_registered():
+    resources = await server.mcp.list_resources()
+    by_uri = {str(r.uri): r for r in resources}
+    assert ui.FOREST_UI_URI in by_uri
+    assert by_uri[ui.FOREST_UI_URI].mime_type == "text/html;profile=mcp-app"
