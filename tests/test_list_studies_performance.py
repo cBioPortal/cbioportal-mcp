@@ -29,8 +29,11 @@ def test_list_studies_default_uses_trimmed_sample_count_query(monkeypatch):
     assert rows[0]["cancer_study_identifier"] == "study_alpha"
     assert "description" not in rows[0]
     assert "clinical_data_derived" not in queries[0]
-    assert "LEFT JOIN sample" in queries[0]
-    assert "LEFT JOIN patient" in queries[0]
+    # sample_count is precomputed onto cancer_study by
+    # sql/6-add-study-sample-counts.sql, so the read path is a plain
+    # single-table scan -- no joins, no aggregation.
+    assert "JOIN" not in queries[0]
+    assert "cs.sample_count" in queries[0]
 
 
 def test_list_studies_refetches_after_ttl_expires(monkeypatch):

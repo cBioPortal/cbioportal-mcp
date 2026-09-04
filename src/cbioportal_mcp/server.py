@@ -996,9 +996,11 @@ def _fetch_and_store_studies() -> tuple[tuple[tuple[str, object], ...], ...]:
     """Query ClickHouse for every study's full detail and store it as the
     cache snapshot. Caller must hold _studies_cache_lock.
 
-    Use sample/patient for counts instead of clinical_data_derived. The latter
-    has many clinical-attribute rows per sample and makes first-connect study
-    discovery slower than it needs to be.
+    sample_count is precomputed onto cancer_study by
+    sql/6-add-study-sample-counts.sql as part of the daily clone pipeline, so
+    this is a plain single-table scan -- no joins, no aggregation. The
+    underlying data only changes via that daily clone, so recomputing the
+    count on every cache refresh (let alone every request) bought nothing.
     """
     global _studies_cache_rows, _studies_cache_fetched_at
     query = """
@@ -1007,12 +1009,9 @@ def _fetch_and_store_studies() -> tuple[tuple[tuple[str, object], ...], ...]:
                     cs.name,
                     cs.description,
                     cs.type_of_cancer_id,
-                    COUNT(DISTINCT s.internal_id) as sample_count
+                    cs.sample_count
                 FROM cancer_study cs
-                LEFT JOIN patient p ON p.cancer_study_id = cs.cancer_study_id
-                LEFT JOIN sample s ON s.patient_id = p.internal_id
-                GROUP BY cs.cancer_study_identifier, cs.name, cs.description, cs.type_of_cancer_id
-                ORDER BY sample_count DESC
+                ORDER BY cs.sample_count DESC
             """
     rows = run_select_query(query, query_label="list_studies.all_studies")
     _studies_cache_rows = tuple(tuple(row.items()) for row in rows)
