@@ -13,12 +13,11 @@ authors = [
     { name = "cBioPortal MCP Contributors" }
 ]
 dependencies = [
-    # mcp-clickhouse 0.1.11 passes dependencies= to FastMCP(), removed in fastmcp 2.14.
-    # Without the upper bound a fresh install resolves fastmcp 3.x and every import of
-    # cbioportal_mcp.server fails. Lift this together with the mcp-clickhouse pin below.
-    "fastmcp>=2.10,<2.14",
-    # 0.3.0 renamed run_select_query → run_query (breaking change)
-    "mcp-clickhouse==0.1.11",
+    "fastmcp>=2.12.3,<3.0.0",
+    # 0.5.0 caches clients natively (connection reuse, server-side cancellation,
+    # https://github.com/ClickHouse/mcp-clickhouse/pull/152) so cbioportal_mcp no
+    # longer needs its own pooling patch. Stay off 0.6.0, which moves to FastMCP 4.
+    "mcp-clickhouse==0.5.0",
     "clickhouse-driver>=0.2.0",
     "opentelemetry-sdk>=1.27.0",
     "opentelemetry-exporter-otlp-proto-http>=1.27.0",
