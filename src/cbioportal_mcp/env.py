@@ -144,6 +144,25 @@ class McpConfig:
         value = os.getenv("CBIOPORTAL_MCP_GOOGLE_BASE_URL")
         return value if value else None
 
+    @property
+    def redis_url(self) -> Optional[str]:
+        """Redis connection URL for OAuth client/token storage.
+
+        Example: "redis://:password@host:6379/9". When unset, OAuth client
+        registrations and tokens (see `cbioportal_mcp.auth`) fall back to
+        FastMCP's default local-disk store — fine for local dev, but that
+        disk is the pod's own ephemeral filesystem in Kubernetes, so every
+        pod restart silently invalidates every session. Point this at a
+        database index that isn't already claimed by another cBioPortal
+        Redis consumer (e.g. the HTTP session store or the persistence
+        cache, which uses index 8 in production — see
+        `redis.database`/`spring.data.redis.*` in the cBioPortal webapp).
+        Only takes effect when OAuth itself is enabled (all three
+        CBIOPORTAL_MCP_GOOGLE_* variables set).
+        """
+        value = os.getenv("REDIS_URL")
+        return value if value else None
+
 
 # Global instance placeholders for the singleton pattern
 _MCP_CONFIG_INSTANCE = None

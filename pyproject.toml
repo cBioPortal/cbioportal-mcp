@@ -22,6 +22,11 @@ dependencies = [
     "opentelemetry-sdk>=1.27.0",
     "opentelemetry-exporter-otlp-proto-http>=1.27.0",
     "ddtrace",
+    # Adds the `redis` extra to fastmcp's own py-key-value-aio pin (which only
+    # requests `disk` and `memory`) so RedisStore is importable for OAuth
+    # client/token storage. Version range mirrors fastmcp>=2.10,<2.14's pin
+    # so both requirements resolve to one shared py-key-value-aio install.
+    "py-key-value-aio[redis]>=0.2.8,<0.4.0",
 ]
 
 [project.optional-dependencies]
