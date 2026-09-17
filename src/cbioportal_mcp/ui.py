@@ -37,6 +37,9 @@ FOREST_UI_URI = "ui://cbioportal/forest"
 PIE_UI_URI = "ui://cbioportal/pie"
 BAR_UI_URI = "ui://cbioportal/bar"
 LINE_UI_URI = "ui://cbioportal/line"
+# Histogram with reference lines (generic histogram_chart and the data-backed
+# mutation_allele_frequency tool); served by the same shared charts bundle.
+HISTOGRAM_UI_URI = "ui://cbioportal/histogram"
 
 # The lollipop widget is the only app that talks to the network: it fetches the
 # canonical transcript's protein length + Pfam domains live from Genome Nexus
