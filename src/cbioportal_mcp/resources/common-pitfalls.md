@@ -258,6 +258,8 @@ WHERE cancer_study_identifier = 'coadread_mskcc_2017'
 --  Use the cBioPortal web interface with OQL DRIVER syntax (e.g., BRAF: MUT_DRIVER)"
 ```
 
+The `oncoprint`, `alteration_cooccurrence`, `survival_curve` and `alteration_enrichment` tools accept these modifiers in OQL, but return an error (not an empty track) for studies whose events carry no `driver_filter` annotation — almost all of them. Say so rather than presenting all mutations as drivers.
+
 **OQL DRIVER syntax (for reference — used in cBioPortal web UI, not SQL):**
 - `TP53: DRIVER` — all OncoKB-annotated driver alterations (mutations, fusions, CNAs)
 - `BRAF: MUT_DRIVER` — OncoKB-annotated driver mutations in BRAF
@@ -580,13 +582,18 @@ Do not promise outputs the MCP server cannot produce — but know what it *can* 
 - Kaplan-Meier plot: call `survival_curve`. It renders the KM widget and returns per-group median survival plus the log-rank test. Hand off to cBioPortal Survival / R / Python only if the study or endpoint isn't supported.
 - Alteration matrix: call `oncoprint`. Mutation lollipop: call `mutation_diagram`. Co-occurrence / mutual-exclusivity heatmap: call `alteration_cooccurrence`.
 - Generic pie / bar / line charts over data you already have: call `pie_chart`, `bar_chart`, `line_chart`.
+- Histograms with mean / median lines: `histogram_chart` for values you have, `mutation_allele_frequency` for variant allele frequencies (with a copy-number filter). A bar chart of hand-binned counts is not a histogram.
 - One gene's frequency across several studies, with a pooled estimate, heterogeneity, a difference test and a forest plot: call `cross_study_alteration_frequency`. Never add counts across studies by hand.
+- Several studies or a named study set in one OncoPrint / lollipop / survival / co-occurrence: pass `studies=[...]` or `preference=...`.
+- Merged tracks, exclusions, codon ranges, co-mutation groups: OQL via `oncoprint(oql=)`, `alteration_cooccurrence(tracks=)`, `survival_curve(groups=)`; survival by expression: `group_by_expression`.
+- Genome-wide "genes enriched in group A vs B": `alteration_enrichment`. Mutations in a protein domain: `mutation_diagram(domain=)`. Codon changes behind a protein change: `nucleotide_variants`.
 
 **These genuinely have no tool. Do not promise them:**
 
 - CSV export: provide a compact table or query; do not claim to create a downloadable file.
 - Large patient-level dumps: summarize and offer a bounded query with `LIMIT`, or point to cBioPortal/DataHub download workflows.
-- Volcano plots, expression scatter/box plots, swimmer or timeline plots, and any chart shape not in the tool list above.
+- Volcano plots, violin / box / jitter plots, expression scatter plots, swimmer or timeline plots, and any chart shape not in the tool list above.
+- OncoKB driver filtering (the `DRIVER` OQL modifier errors on studies without study-supplied annotations), OQL `EXP` / `PROT` thresholds, hazard ratios, whole-genome ploidy.
 
 ### 20. 🚨 MALFORMED TABLES AND UNCLEAR QUERY ERRORS
 
@@ -602,6 +609,29 @@ When a complex query fails:
 Example:
 
 > The mutation filter can be run, but the expression-profile join failed because I could not identify a MYC expression profile for this study. I can first list available expression profiles, then intersect mutation-positive samples with expression values.
+
+### 21. 🚨 CLAIMING AN ADJUSTMENT, FILTER OR MERGE THE TOOL DID NOT APPLY
+
+A documented incident: a user asked "did you normalise for tumour type?" after a pan-cancer mutual-exclusivity answer, and the assistant replied that it had re-run with tumour type as a confounder and supplied new p-values — with no stratified analysis behind them. The same failure shape covers "excluded T790M and L858R", "merged into a pathway track", "restricted to the kinase domain", "only breast cancer patients", "driver mutations only".
+
+#### ✅ Correct: the payload is the only evidence
+
+| Claim | Payload field that must support it |
+|---|---|
+| adjusted / stratified / normalised for tumour type | `stratification` is non-null and names the attribute (null = NOT adjusted) |
+| restricted to a cohort or cancer type | `cohort.filter`, `cohort.n_samples` / `n_patients` |
+| several studies / study set | `scope.label`, `scope.n_studies` |
+| exclusions applied | `exclusions[]` with `events_removed` / `samples_removed` (quote them; 0 means nothing was removed) |
+| merged / pathway tracks, mutation classes | `query`, `tracks[]` |
+| custom survival groups, expression cut-offs | `grouping` |
+| protein domain / codon range | `region` (with `n_samples_in_region`) |
+| copy-number or other filters | `filters`, `counts` |
+
+If the field is missing or null, say the step was not done and re-run with the argument that does it (or state that it cannot be done). When the adjusted and crude results differ, report both.
+
+### 22. 🚨 PASSING A STUDY SET AS A STUDY ID
+
+`pan_cancer_tcga` and `all_studies_non_redundant` are named study sets (`cancer_study_query_preferences`), not studies. Pass them as `preference=...`; passing one as `study_id` returns an error naming the right argument. Report the `scope` block (how many studies) with the result, and the overlap warning when studies share patients.
 
 ## Best Practices Summary
 
@@ -627,6 +657,8 @@ Example:
 20. **Hold scope boundaries after refusal** — do not provide paper critiques, slide outlines, external pipeline code, or medical advice after user pushback.
 21. **Do not promise unavailable outputs** — but check the tool list first. KM curves, OncoPrints, lollipops, co-occurrence heatmaps, cross-study forest plots and pie/bar/line charts have tools; CSV files, downloads and unsupported chart shapes do not. See pitfall #19.
 22. **Compare a gene across studies with `cross_study_alteration_frequency`** — per-study panel-aware denominators, random-effects pooling, overlap check; never `SUM/SUM` across studies.
+23. **Only claim what the payload shows** — adjustment (`stratification`), exclusions (`exclusions`), merges (`query`/`tracks`), regions and filters. See pitfall #21.
+24. **Stratify pooled cancer types** — `stratify_by="CANCER_TYPE"` before interpreting co-occurrence, enrichment or survival differences across tumour types.
 
 ## Validation Checklist
 
@@ -649,3 +681,5 @@ Before trusting your results, ask:
 - [ ] Did I keep scope boundaries after any refusal?
 - [ ] Did I avoid promising downloads, unsupported chart shapes, or external-code debugging that this MCP server cannot perform — and, conversely, did I call the tool for the plots and statistics it *can* produce instead of handing them off?
 - [ ] If the question spans several studies, did I call `cross_study_alteration_frequency` instead of running per-study queries and combining the numbers by hand?
+- [ ] Is every adjustment, exclusion, merge, region or filter I describe visible in the payload (`stratification`, `exclusions`, `query`, `region`, `filters`, `cohort`)?
+- [ ] Did I compare groups across cancer types without `stratify_by`, and if so, did I say the result is not adjusted?
