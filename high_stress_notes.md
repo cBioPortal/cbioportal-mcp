@@ -22,7 +22,7 @@ T1 passed, T2–T14 failed. After: all 14 pass at the tool level. Per-test evide
 | `tests/_fakedb.py` | **new** — shared in-memory fake ClickHouse, dispatching on the first `FROM` table. |
 | `tests/test_alteration_query.py` | **new**, 95 — parser, evaluation, and Python-vs-SQL parity through sqlite3 over 23 queries. |
 | `tests/test_stratified_stats.py` | **new**, 26 — R `mantelhaen.test` Rabbits example (CMH X² = 3.9286, p = 0.04747; exact S = 16, p = 0.03994; MH OR = 7), stratified log-rank properties (K = 1 equals unstratified, O−E balances when the last patient dies alone, group-order invariance), quantiles / histograms. |
-| `tests/test_study_scope.py`, `test_survival_groups.py`, `test_oql_apps.py`, `test_new_analysis_tools.py` | **new**, 19 / 24 / 11 / 32 — scopes, custom and expression groups, OQL tracks in the three apps, enrichment / domain / nucleotide / VAF / histogram. |
+| `tests/test_study_scope.py`, `test_survival_groups.py`, `test_oql_apps.py`, `test_analysis_tools.py` | **new**, 19 / 24 / 11 / 32 — scopes, custom and expression groups, OQL tracks in the three apps, enrichment / domain / nucleotide / VAF / histogram. |
 | `tests/test_stress_guidance.py` | **new**, 5 — guidance routes each STRESS shape and keeps the "don't claim unapplied steps" rules. |
 | `tests/test_high_stress_live.py` | **new**, 14 live — T1–T14 with exact TCGA numbers; skipped without `CLICKHOUSE_HOST`. |
 | `tests/MANUAL_TOOL_TESTS.md`, `docs/mcp-apps-gap-analysis.md` | 22 tools / 12 guides; new §8 STRESS table; "Status after the STRESS fixes" section. |
