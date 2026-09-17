@@ -8,6 +8,9 @@ it can be unit-tested in isolation, with no cBioPortal/ClickHouse knowledge.
   median survival, censor marks, pointwise confidence band).
 - ``logrank_test`` — the multivariate log-rank test for 2+ groups
   (chi-square statistic, degrees of freedom, p-value).
+- ``stratified_logrank_test`` — the same test with observed-minus-expected
+  events and their covariance summed within strata (e.g. cancer type), so a
+  comparison across a mixed cohort is not driven by differences between strata.
 - ``chi_square_sf`` — the chi-square survival function (upper-tail p-value),
   via the regularized upper incomplete gamma function.
 - ``normal_ppf`` — the standard normal quantile function, for the band's
@@ -23,8 +26,9 @@ and ``event`` is ``1`` if the event (e.g. death) was observed at ``time`` or
 from __future__ import annotations
 
 import math
-from collections import defaultdict
-from typing import Iterable, Sequence
+from bisect import bisect_left
+from collections import Counter, defaultdict
+from typing import Iterable, Mapping, Sequence
 
 Observation = tuple[float, int]
 
@@ -377,6 +381,72 @@ def _solve_quadratic_form(cov: list[list[float]], z: list[float]) -> float | Non
     return sum(z[i] * x[i] for i in range(k))
 
 
+def _logrank_components(
+    groups: Sequence[Sequence[Observation]],
+) -> tuple[list[float], list[float], list[list[float]]]:
+    """Observed events, expected events and the (k-1)x(k-1) covariance of O - E.
+
+    ``groups`` are cleaned observation lists in a fixed order; an empty group simply
+    contributes nothing. Swept over the distinct event times with each group's times
+    sorted once, so the cost is O(T * k * log n) rather than a scan of every
+    observation at every event time.
+    """
+    k = len(groups)
+    dim = max(k - 1, 0)
+    observed = [0.0] * k
+    expected = [0.0] * k
+    cov = [[0.0 for _ in range(dim)] for _ in range(dim)]
+    sorted_times = [sorted(t for t, _ in obs) for obs in groups]
+    events_at = [Counter(t for t, e in obs if e) for obs in groups]
+    event_times = sorted(set().union(*(set(c) for c in events_at))) if groups else []
+    for t in event_times:
+        n_g = [len(times) - bisect_left(times, t) for times in sorted_times]
+        d_g = [events_at[g].get(t, 0) for g in range(k)]
+        n = sum(n_g)
+        d = sum(d_g)
+        if d == 0:
+            continue
+        for g in range(k):
+            observed[g] += d_g[g]
+            # E = d * n_g / n is defined whenever someone is at risk -- including the
+            # last patient dying alone (n == 1), where it equals O. Skipping it there
+            # left O - E unbalanced, which small strata hit constantly.
+            expected[g] += d * n_g[g] / n
+        if n <= 1:
+            continue  # the variance term d(n-d)/(n-1) is 0 when n == d == 1
+        var_factor = d * (n - d) / (n - 1)
+        for g in range(dim):
+            frac_g = n_g[g] / n
+            cov[g][g] += var_factor * frac_g * (1.0 - frac_g)
+            for h in range(g + 1, dim):
+                frac_h = n_g[h] / n
+                cov[g][h] -= var_factor * frac_g * frac_h
+                cov[h][g] = cov[g][h]
+    return observed, expected, cov
+
+
+def _logrank_statistic(
+    names: Sequence[str],
+    observed: Sequence[float],
+    expected: Sequence[float],
+    cov: Sequence[Sequence[float]],
+    result: dict,
+) -> dict:
+    k = len(names)
+    result["group_observed_expected"] = [
+        {"group": names[g], "observed": observed[g], "expected": expected[g]} for g in range(k)
+    ]
+    z = [observed[g] - expected[g] for g in range(k - 1)]
+    chi_square = _solve_quadratic_form([list(row) for row in cov], z)
+    if chi_square is None or chi_square < 0.0:
+        result["reason"] = "Covariance matrix is singular; log-rank statistic is undefined."
+        return result
+    result["chi_square"] = chi_square
+    result["df"] = k - 1
+    result["p_value"] = chi_square_sf(chi_square, k - 1)
+    return result
+
+
 def logrank_test(
     groups: "dict[str, Iterable[Observation]] | Sequence[Iterable[Observation]]",
 ) -> dict:
@@ -409,58 +479,83 @@ def logrank_test(
     if len(named) < 2:
         result["reason"] = "Log-rank test requires at least two non-empty groups."
         return result
-
-    k = len(named)
-    # Pooled distinct event times.
-    event_times: set[float] = set()
-    for _, obs in named:
-        for t, e in obs:
-            if e:
-                event_times.add(t)
-    if not event_times:
+    if not any(e for _, obs in named for _, e in obs):
         result["reason"] = "No events observed in any group; log-rank is undefined."
         return result
 
-    observed = [0.0] * k
-    expected = [0.0] * k
-    # Reduced covariance over the first k-1 groups (full matrix is rank k-1).
-    dim = k - 1
-    cov = [[0.0 for _ in range(dim)] for _ in range(dim)]
+    observed, expected, cov = _logrank_components([obs for _, obs in named])
+    return _logrank_statistic([name for name, _ in named], observed, expected, cov, result)
 
-    for t in sorted(event_times):
-        n_g = [sum(1 for ot, _ in obs if ot >= t) for _, obs in named]
-        d_g = [sum(1 for ot, oe in obs if ot == t and oe) for _, obs in named]
-        n = sum(n_g)
-        d = sum(d_g)
-        if n <= 1 or d == 0:
-            # Still accumulate observed events for reporting.
-            for g in range(k):
-                observed[g] += d_g[g]
-            continue
-        for g in range(k):
-            observed[g] += d_g[g]
-            expected[g] += d * n_g[g] / n
-        var_factor = d * (n - d) / (n - 1)
-        for g in range(dim):
-            frac_g = n_g[g] / n
-            cov[g][g] += var_factor * frac_g * (1.0 - frac_g)
-            for h in range(g + 1, dim):
-                frac_h = n_g[h] / n
-                cov[g][h] -= var_factor * frac_g * frac_h
-                cov[h][g] = cov[g][h]
 
-    result["group_observed_expected"] = [
-        {"group": named[g][0], "observed": observed[g], "expected": expected[g]} for g in range(k)
-    ]
+def stratified_logrank_test(
+    strata: "Mapping[str, Mapping[str, Iterable[Observation]]]",
+    order: Sequence[str] | None = None,
+) -> dict:
+    """Log-rank test of 2+ groups stratified by a nuisance factor.
 
-    z = [observed[g] - expected[g] for g in range(dim)]
-    chi_square = _solve_quadratic_form(cov, z)
-    if chi_square is None or chi_square < 0.0:
-        result["reason"] = "Covariance matrix is singular; log-rank statistic is undefined."
+    ``strata`` maps ``stratum -> {group_name: observations}``. Within each stratum the
+    usual log-rank observed and expected event counts and covariance are computed over
+    that stratum's own risk sets; they are then summed across strata and the chi-square
+    ``(O - E)' V^-1 (O - E)`` is formed on the totals (R's
+    ``survdiff(Surv(t, e) ~ group + strata(s))``). Groups compare only with patients in
+    the same stratum, so a group that is merely over-represented in a good-prognosis
+    stratum does not look protective.
+
+    Returns the ``logrank_test`` keys plus ``test`` = 'stratified log-rank',
+    ``n_strata`` and ``n_informative_strata`` (strata where at least two groups have
+    patients and an event occurred). ``order`` fixes the group order of
+    ``group_observed_expected`` (default: order of first appearance).
+    """
+    cleaned: dict[str, dict[str, list[Observation]]] = {}
+    for stratum, groups in strata.items():
+        cleaned[str(stratum)] = {
+            str(name): _clean_observations(obs) for name, obs in groups.items()
+        }
+    names: list[str] = []
+    for groups in cleaned.values():
+        for name, obs in groups.items():
+            if obs and name not in names:
+                names.append(name)
+    if order is not None:
+        names = [str(n) for n in order if str(n) in names] + [
+            n for n in names if n not in {str(o) for o in order}
+        ]
+
+    result: dict = {
+        "test": "stratified log-rank",
+        "chi_square": None,
+        "df": None,
+        "p_value": None,
+        "group_observed_expected": [],
+        "n_strata": len(cleaned),
+        "n_informative_strata": 0,
+    }
+    if len(names) < 2:
+        result["reason"] = "Log-rank test requires at least two non-empty groups."
         return result
 
-    df = k - 1
-    result["chi_square"] = chi_square
-    result["df"] = df
-    result["p_value"] = chi_square_sf(chi_square, df)
-    return result
+    k = len(names)
+    observed = [0.0] * k
+    expected = [0.0] * k
+    cov = [[0.0 for _ in range(k - 1)] for _ in range(k - 1)]
+    for groups in cleaned.values():
+        ordered = [groups.get(name, []) for name in names]
+        if sum(1 for obs in ordered if obs) >= 2 and any(e for obs in ordered for _, e in obs):
+            result["n_informative_strata"] += 1
+        o, e, v = _logrank_components(ordered)
+        for g in range(k):
+            observed[g] += o[g]
+            expected[g] += e[g]
+        for g in range(k - 1):
+            for h in range(k - 1):
+                cov[g][h] += v[g][h]
+    if not result["n_informative_strata"]:
+        result["reason"] = (
+            "No stratum contains two groups with an event; the stratified log-rank test is "
+            "undefined."
+        )
+        result["group_observed_expected"] = [
+            {"group": names[g], "observed": observed[g], "expected": expected[g]} for g in range(k)
+        ]
+        return result
+    return _logrank_statistic(names, observed, expected, cov, result)
