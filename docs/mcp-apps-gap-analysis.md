@@ -347,3 +347,25 @@ Suggested scoring dimensions, in rough order of signal per unit of grading effor
 Blind the grader to arm identity — tool-call traces leak it — and use deterministic checks
 against the verified figures above for numeric items, reserving judgement calls for
 interpretation quality.
+
+## Status after the STRESS fixes (2026-09-13)
+
+The 14 STRESS questions above were re-run against the live clone before and after a round of
+changes (`HIGH_STRESS_TEST_RESULTS.md` has the graded evidence; `tests/test_high_stress_live.py`
+pins it). The coverage table now reads:
+
+| Capability | survival | oncoprint | lollipop | co-occur | charts |
+|---|:--:|:--:|:--:|:--:|:--:|
+| Multi-study / pan-cancer cohort (`studies` / `preference`) | ✅ | ✅ | ✅ | ✅ | — |
+| Cohort filter within a study | ✅ | ✅ | ✅ | ✅ | — |
+| Multi-gene / co-mutation groups (OQL) | ✅ | ✅ merged tracks | ◐ one gene | ✅ pathway tracks | — |
+| Protein-change granularity / codon range | ✅ | ✅ | ✅ | ✅ | — |
+| Protein domain | via codon range | via codon range | ✅ Pfam, counted | via codon range | — |
+| Expression as a variable | ✅ quantile groups | ❌ | ❌ | ❌ | — |
+| Confounder stratification | ✅ stratified log-rank | — | — | ✅ exact / CMH | — |
+| Driver / OncoKB filtering | ❌ refused explicitly (no annotations stored) | ❌ refused | — | ❌ refused | — |
+| Distribution chart | — | — | — | — | ✅ histogram |
+
+New tools: `alteration_enrichment` (the P2 group-comparison roadmap item, without a volcano
+widget yet), `nucleotide_variants`, `mutation_allele_frequency`, `histogram_chart`. Still open from
+the roadmap: an expression scatter/box app, a volcano plot, treatment timelines, and deep links.
