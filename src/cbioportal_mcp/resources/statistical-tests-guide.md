@@ -22,10 +22,19 @@ A number you derived by hand, estimated, or recalled is a fabrication whether or
 | **Gene-pair** co-occurrence / mutual exclusivity: two-sided Fisher's exact p, log2 odds ratio, Benjamini-Hochberg q | `alteration_cooccurrence(study_id, genes=[...])` | `pairs[].p_value`, `pairs[].log2_odds_ratio`, `pairs[].q_value`, `pairs[].tendency` |
 | Alteration frequency with panel-aware (profiled) denominators | `oncoprint(study_id, genes=[...])` | `gene_stats[]` |
 | **Study-vs-study** frequency of one gene (several studies, or one cancer type across studies): per-study Wilson 95% CIs, DerSimonian-Laird random-effects pooled frequency, Cochran's Q / I² / τ², and a k×2 chi-square (Fisher's exact for two small studies) test of whether the studies differ | `cross_study_alteration_frequency(gene, studies=[...] and/or preference=..., cancer_type=<OncoTree code>)` | `studies[].frequency_pct`, `studies[].ci95`, `pooled.frequency_pct`, `pooled.ci95`, `heterogeneity.i2_pct`, `difference_test.p_value` |
+| Survival for **custom groups** (co-mutation, wild-type, codon ranges, exclusions) or **expression quantiles** | `survival_curve(groups=[...])` / `survival_curve(group_by_expression={"gene", "split"})` | `grouping` (definitions, cut-offs), `groups[]`, `stats` |
+| **Stratified** log-rank test (adjusted for cancer type or study) | `survival_curve(..., stratify_by="CANCER_TYPE")` | `stats` (test "stratified log-rank"), `stats_unstratified`, `stratification` |
+| Gene-pair or **pathway** co-occurrence **adjusted for tumour type**: exact conditional test (Fisher's test across strata) or Cochran-Mantel-Haenszel, Mantel-Haenszel odds ratio, BH q | `alteration_cooccurrence(..., tracks=[...], stratify_by="CANCER_TYPE")` | `pairs[].p_value`, `pairs[].q_value`, `pairs[].log2_odds_ratio`, `pairs[].test`, `pairs[].crude`, `stratification` |
+| **Group-vs-group** alteration enrichment for every gene (or named genes): per-gene Fisher's exact test (stratified with `stratify_by`), log2 odds ratio, BH q | `alteration_enrichment(group_a=..., group_b=..., genes=[...], stratify_by=...)` | `genes[]`, `n_genes_tested`, `n_significant`, `alteration_burden`, `stratification` |
+| Distribution summary (n, mean, median, quartiles) and histogram, e.g. variant allele frequency | `mutation_allele_frequency(alteration, copy_number=...)` / `histogram_chart(values)` | `stats`, `bins`, `reference_lines`, `counts` |
 
 `survival_curve` supports endpoints OS, PFS, DFS, DSS, and splits the cohort either by gene-alteration status or by a clinical attribute. `median_survival` is `null` when the median was not reached — report that as "not reached", never substitute a mean.
 
-**Scope limits.** `alteration_cooccurrence` tests **gene A vs gene B within one study cohort**. **One gene across two or more studies** is `cross_study_alteration_frequency`'s job: each study's own rate with a panel-aware denominator, the pooled random-effects estimate, the test of difference — and it refuses to pool studies that share patients. What remains uncovered is **cohort A vs cohort B inside one study** on an arbitrary clinical split (responders vs non-responders, primary vs metastatic) — that still takes the handoff in rule 1.
+**Scope limits.** `alteration_cooccurrence` tests **gene A vs gene B (or pathway A vs pathway B) within one cohort**. **One gene across two or more studies** is `cross_study_alteration_frequency`'s job: each study's own rate with a panel-aware denominator, the pooled random-effects estimate, the test of difference — and it refuses to pool studies that share patients. Comparing **cohort A vs cohort B inside one study** (primary vs metastatic, TP53-mutant vs wild-type) is `alteration_enrichment`'s job when the outcome is alteration frequency — every gene, or the genes you name. Comparisons of continuous values (Wilcoxon, t-test, ANOVA) still take the handoff in rule 1.
+
+### Confounding: pooled cancer types
+
+A cohort that mixes tumour types (a pan-cancer registry, `preference="pan_cancer_tcga"`, several studies) confounds every comparison: two genes common in the same cancer type look co-occurring, genes common in different cancer types look mutually exclusive, and a survival difference can come from the groups' cancer-type mix. For such cohorts pass `stratify_by="CANCER_TYPE"` (or `"STUDY"`), which compares groups only within each stratum. Report the adjusted result as the headline and the crude one for contrast (they can disagree in direction). The payload's `stratification` block is the only evidence of adjustment: when it is `null`, the numbers are NOT adjusted, and you must not describe them as normalised or controlled for tumour type — re-run with `stratify_by` instead.
 
 ### The rules
 
@@ -33,7 +42,9 @@ A number you derived by hand, estimated, or recalled is a fabrication whether or
    - survival difference between groups → call `survival_curve` and report `stats.p_value` (log-rank), with the per-group N and event counts.
    - gene-pair co-occurrence / mutual exclusivity → call `alteration_cooccurrence` and report `pairs[].p_value` and `pairs[].q_value`.
    - one gene compared across studies ("is TP53 more common in MSK-CHORD than in TCGA?", "TP53 in all lung adenocarcinoma studies") → call `cross_study_alteration_frequency` and report `difference_test.p_value` (the test it ran is in `difference_test.test`) next to the per-study rates, and — when present — `pooled.frequency_pct` with `pooled.ci95` and `heterogeneity.i2_pct`.
-   - **anything else** — cohort A vs cohort B enrichment within one study, Wilcoxon / Mann-Whitney, t-test, ANOVA, Kruskal-Wallis, general chi-squared — no tool computes it. Answer: *"I can't compute that here — here is the 2x2 contingency table (or group statistics). Run it in cBioPortal's Group Comparison tab, in R with `fisher.test(...)` / `wilcox.test(...)`, or in Python with `scipy.stats.fisher_exact(...)` / `mannwhitneyu(...)`."*
+   - cohort A vs cohort B alteration frequency within one study (or genome-wide: "which genes are enriched in TP53 wild-type tumours") → call `alteration_enrichment` and report `genes[].p_value` / `q_value` with both groups' counts.
+   - the same comparisons adjusted for tumour type → the tool above with `stratify_by="CANCER_TYPE"`; report the payload's `stratification`.
+   - **anything else** — Wilcoxon / Mann-Whitney, t-test, ANOVA, Kruskal-Wallis, general chi-squared — no tool computes it. Answer: *"I can't compute that here — here is the 2x2 contingency table (or group statistics). Run it in cBioPortal's Group Comparison tab, in R with `fisher.test(...)` / `wilcox.test(...)`, or in Python with `scipy.stats.fisher_exact(...)` / `mannwhitneyu(...)`."*
 2. **Never claim mutual exclusivity (or co-occurrence) from a contingency table alone.** A 2x2 table is not a test. Call `alteration_cooccurrence`, which runs the two-sided Fisher's exact test and returns the direction (`tendency`, plus the sign of `log2_odds_ratio`) and the BH-corrected q-value. Do not hand-roll the test in SQL, and do not eyeball the counts. If the pair is outside that tool's scope, present the table and stop.
 3. **Never report a "median" that came from `AVG(...)` or any non-median aggregate.** "Median" and "mean" are different statistics; for skewed clinical distributions (especially survival) they differ substantially. Use ClickHouse's `quantile(0.5)(...)` for an actual median of a non-censored attribute, and label arithmetic averages as "mean", never "median". For survival specifically, neither aggregate is valid — see rule 5.
 4. **Never report a hazard ratio, risk ratio, or relative risk.** These require regression / model fitting that neither ClickHouse nor this server does — there is no tool, so the answer is a refusal plus a handoff, every time. The one odds ratio you may report is `pairs[].log2_odds_ratio` from `alteration_cooccurrence`, and only as that tool returned it.
@@ -128,7 +139,7 @@ ClickHouse does NOT have built-in statistical test functions (no Fisher's exact,
    - **R** (fisher.test, wilcox.test, t.test, kruskal.test, chisq.test)
    - **Python** (scipy.stats: fisher_exact, mannwhitneyu, ttest_ind, kruskal, chi2_contingency)
 
-Steps 2-5 apply to the tests with no tool behind them: within-study two-cohort alteration enrichment (study-vs-study is covered by `cross_study_alteration_frequency`), Wilcoxon / Mann-Whitney, Kruskal-Wallis, t-test, ANOVA, general chi-squared, and any regression-based measure (hazard ratio, relative risk).
+Steps 2-5 apply to the tests with no tool behind them: Wilcoxon / Mann-Whitney, Kruskal-Wallis, t-test, ANOVA, general chi-squared, and any regression-based measure (hazard ratio, relative risk). Two-cohort alteration enrichment is covered by `alteration_enrichment`, study-vs-study by `cross_study_alteration_frequency`.
 
 ### Example: one gene across two studies — COVERED, call the tool
 
@@ -140,9 +151,20 @@ cross_study_alteration_frequency(gene="TP53", studies=["brca_metabric", "brca_tc
 
 Report `studies[].frequency_pct` with `ci95` and counts for each study, and `difference_test.p_value` (the payload says which test ran: a k×2 chi-square, or Fisher's exact when a study is small). The tool builds each study's panel-aware denominator itself. Do not run a raw `COUNT(DISTINCT sample_unique_id)` over `genomic_event_derived` "to double-check" — that uses a study-wide denominator, which is the >100%-frequency bug the mutation-frequency guide warns about.
 
-### Example: Building a Contingency Table for a within-study comparison — UNCOVERED
+### Example: a within-study comparison of one gene — COVERED, call the tool
 
-Two cohorts **inside one study** compared on one gene (primary vs metastatic samples, responders vs non-responders): no tool computes it, so build the table with a correct profiled denominator and hand off.
+Two cohorts **inside one study** compared on one gene (primary vs metastatic samples): call
+
+```
+alteration_enrichment(group_a={"SAMPLE_TYPE": ["Metastasis"]}, group_b={"SAMPLE_TYPE": ["Primary"]},
+                      study_id="msk_impact_2017", genes=["TP53"])
+```
+
+and report both groups' `altered` / `profiled` counts, `pct_a` / `pct_b`, `p_value`. If the split is not expressible as one clinical attribute or an OQL alteration, fall back to the SQL below.
+
+### Example: Building a Contingency Table by hand — only when no tool fits
+
+A split the tools cannot express: build the table with a correct profiled denominator and hand off.
 
 ```sql
 -- TP53 mutation frequency in primary vs metastatic samples of one study
@@ -217,8 +239,13 @@ Only if the study or endpoint isn't supported by `survival_curve`, fall back to:
 >
 > Run KM in R (`survival::survfit(Surv(OS_MONTHS, OS_STATUS==\"1:DECEASED\") ~ group, data=...)`), Python (`lifelines.KaplanMeierFitter`), or cBioPortal's Survival comparison."
 
+### When asked whether results were adjusted for tumour type
+> "The p-values I reported earlier were **not** adjusted for tumour type — that run pooled [n] cancer types (its `stratification` was null). I've re-run `alteration_cooccurrence` with `stratify_by="CANCER_TYPE"`: [pair] is now [tendency], stratified [test] p = [pairs[].p_value], q = [pairs[].q_value] (crude p was [pairs[].crude.p_value])."
+
+Never answer "yes, I normalised for tumour type" unless the payload you are quoting has a `stratification` block.
+
 ### When asked for a p-value no tool computes — UNCOVERED, hand off
-Within-study two-cohort alteration enrichment, Wilcoxon / Mann-Whitney, t-test, ANOVA, Kruskal-Wallis, general chi-squared:
+Wilcoxon / Mann-Whitney, t-test, ANOVA, Kruskal-Wallis, general chi-squared:
 
 > "I can't compute that test here. Here is the 2x2 contingency table:
 >
@@ -248,6 +275,9 @@ Within-study two-cohort alteration enrichment, Wilcoxon / Mann-Whitney, t-test, 
 - ❌ "Based on the contingency table, there is significant enrichment." (no test was run)
 - ❌ "TP53 is mutated in 45.8% of lung adenocarcinomas (2,990 / 6,523 across MSK-CHORD and TCGA)." (a SUM/SUM across studies — a pooled frequency is `cross_study_alteration_frequency`'s random-effects estimate, reported with its CI and I²)
 - ❌ "MSK-CHORD (45%) and TCGA (52%) differ significantly." (no `difference_test` behind it)
+- ❌ "After adjusting for tumour type, TP53 and KRAS remain co-occurring (p = 1e-5)." (the payload quoted has `stratification: null` — nothing was adjusted)
+- ❌ "Genes mutated mostly in TP53 wild-type tumours: PTEN, ARID1A, CTNNB1 …" (no `alteration_enrichment` call behind the list — a recalled or guessed hit list is a fabrication)
+- ❌ "Cell cycle and HR repair pathways are mutually exclusive (p = 0.01)" from gene-by-gene pairs (a pathway statistic needs merged `tracks`)
 
 ### Also forbidden: refusing what the server can compute
 
@@ -261,7 +291,8 @@ Sending a researcher to scipy for a statistic this server computes is a failure,
 Common Pitfalls
 ---------------
 - Do NOT hand-roll a test the server already runs. No Fisher's exact expressed in SQL, no KM assembled from `quantile()`, no p-value approximated from a chi-square you computed by hand. Call `alteration_cooccurrence` / `survival_curve`.
-- Do NOT stretch a tool past its scope. `alteration_cooccurrence` tests gene-pairs within one cohort; it is not a cohort-vs-cohort enrichment test, and its q-values are corrected only across the pairs it tested. `cross_study_alteration_frequency` compares one gene across studies; it does not compare two cohorts inside one study.
+- Do NOT stretch a tool past its scope. `alteration_cooccurrence` tests gene (or track) pairs within one cohort; it is not a cohort-vs-cohort enrichment test — that is `alteration_enrichment` — and its q-values are corrected only across the pairs it tested. `cross_study_alteration_frequency` compares one gene across studies; it does not compare two cohorts inside one study.
+- Do NOT read pooled pan-cancer associations as biology. Stratify by cancer type first (see "Confounding: pooled cancer types").
 - Do NOT pool frequencies across studies by adding counts or averaging percentages. Call `cross_study_alteration_frequency`; it pools with a random-effects model and refuses to pool studies that share patients (MSK-CHORD sits inside MSK-IMPACT-50k; the TCGA releases of one cohort overlap).
 - Do NOT use chi-squared for 2x2 tables with small expected cell counts — use Fisher's exact.
 - Do NOT use a t-test for clinical attributes like age or tumor stage — use Wilcoxon (non-parametric).
