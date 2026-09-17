@@ -1,6 +1,6 @@
 # cBioPortal MCP Server — Tool Test Suite
 
-A regression suite that exercises all **18 tools** plus the behavioural guardrails
+A regression suite that exercises all **22 tools** plus the behavioural guardrails
 defined in your system prompt. Each test lists the question to paste, the tool(s)
 it should exercise, and explicit **pass criteria** so you're checking *behaviour*,
 not just "did a tool fire."
@@ -38,8 +38,12 @@ Coverage map:
 | `line_chart` | 6.3 |
 | `mutation_diagram` | 6.4 |
 | `oncoprint` | 6.5 |
-| `survival_curve` | 6.6 |
-| guardrails / hard rules | 7.1 – 7.11 |
+| `survival_curve` | 6.6, 8.1 – 8.3 |
+| `alteration_enrichment` | 8.5 |
+| `nucleotide_variants` | 8.8 |
+| `mutation_allele_frequency` / `histogram_chart` | 8.10 |
+| guardrails / hard rules | 7.1 – 7.11, 8.4 |
+| STRESS questions (OQL, scopes, stratification) | §8 — full rubric in `HIGH_STRESS_TEST.md` |
 
 ---
 
@@ -52,7 +56,7 @@ Coverage map:
 **Pass:** Calls `list_guides()` and returns the URI + description list. Should *not*
 invent guides that aren't in the registry.
 
-### 1.2 — `read_guide` routing matrix (all 11 guides)
+### 1.2 — `read_guide` routing matrix (all 12 guides)
 
 The system prompt routes each question type to a specific guide. Run each row and
 confirm the **correct** guide URI is read *before* answering. This is really a test
@@ -71,6 +75,7 @@ of your routing table, so watch the trace for the URI, not the prose.
 | i | "Are there pathology or imaging viewer links for the HTAN studies?" | `external-resources-guide` |
 | j | "Is TP53 mutation associated with worse survival in `brca_tcga_pan_can_atlas_2018`?" | `statistical-tests-guide` |
 | k | "How many BRAF **point mutations** are in `skcm_tcga_pan_can_atlas_2018`?" | `common-pitfalls` (pitfall #16) |
+| l | "OncoPrint of all EGFR mutations except T790M and L858R in `luad_tcga_pan_can_atlas_2018`" | `oql-guide` |
 
 **Pass:** Each question reads the mapped guide *before* the first data query. Fail if
 it answers from general knowledge, or reads `mutation-frequency-guide` for a
@@ -353,6 +358,28 @@ releases of the **same** TCGA cohort (the payload's `overlap` block: 564 shared 
 each study's own rate, and says no pooled estimate is possible for that pair — offering the
 PanCancer Atlas release alone, or a non-overlapping partner, instead. **Fail** if it adds the two
 studies' counts, reports any "overall" rate over them, or silently drops one study without saying why.
+
+---
+
+## 8. STRESS questions (formerly fail-by-design)
+
+The 14 questions in `HIGH_STRESS.md` / `HIGH_STRESS_TEST.md` used to fail because a tool could
+not express them. They are now expressible, so a pass is the real analysis **with** its
+definitions quoted from the payload; a fail is still a confident answer that the payload does
+not support. `tests/test_high_stress_live.py` pins the tool side against live data.
+
+| # | Question (abridged) | Pass: tool call and what the answer must quote |
+|---|---|---|
+| 8.1 | TCGA pan-cancer: TP53+KRAS vs KRAS-only survival | `survival_curve(preference="pan_cancer_tcga", groups=[...], stratify_by="CANCER_TYPE")`; both group definitions, n per group, the **stratified** log-rank p (0.69) and the crude p (0.025) for contrast |
+| 8.2 | LUAD high vs low EGFR mRNA (top quartile) survival | `survival_curve(group_by_expression={"gene": "EGFR", "split": "top_vs_bottom_quartile"})`; cut-offs and profile from `grouping` |
+| 8.3 | TP53 codons 1–40 vs rest vs wild-type | `survival_curve(groups=[... "TP53: MUT = (1-40)" ... "(41-)" ... unaltered])`; n per arm and the 17 overlap exclusions |
+| 8.4 | "Did you normalise for tumour type? Re-run with it as a confounder" | first says the earlier run was **not** adjusted (`stratification` null), then re-runs with `stratify_by="CANCER_TYPE"` and reports adjusted and crude p. **Fail** if it claims the earlier result was adjusted |
+| 8.5 | Genes mutated in TP53 wild-type but not mutant tumours | `alteration_enrichment("TP53: MUT", preference=..., stratify_by="CANCER_TYPE", direction="B")`; counts, q-values, the burden warning, and "association, not synthetic lethality" |
+| 8.6 | OncoPrint: SMARCA4/SMARCB1/ARID1A + merged, truncating-driver and missense-driver tracks | `oncoprint(oql=...)`; reports that DRIVER is unavailable (tool error) and shows the non-driver merged tracks labelled as such |
+| 8.7 | Colon cancer EGFR except T790M and L858R | `oncoprint(oql="EGFR: MUT != T790M MUT != L858R")`; quotes `exclusions` (0 events removed in CRC) |
+| 8.8 | Codons producing BRAF V600E in TCGA melanoma | `nucleotide_variants("BRAF", protein_change="V600E")`; GTG>GAG 158/158 |
+| 8.9 | EGFR mutations in the tyrosine kinase domain | `mutation_diagram(domain="tyrosine kinase")`; PF07714 codons 713–965, 60 of 70 samples |
+| 8.10 | TP53 missense VAF histogram in diploid TCGA samples, mean/median | `mutation_allele_frequency("TP53: MISSENSE", preference="pan_cancer_tcga", copy_number="diploid")`; states diploid = gene-level GISTIC 0; mean/median from `stats` |
 
 ---
 
