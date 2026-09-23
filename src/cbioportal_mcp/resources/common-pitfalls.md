@@ -533,25 +533,23 @@ WHERE attribute_name = 'TUMOR_GRADE' AND cancer_study_identifier = 'brca_tcga';
 
 **Key rule:** Never assume a table or column exists. Always check with `clickhouse_list_tables` and `clickhouse_list_table_columns` first.
 
-#### ❌ Wrong: `cancer_study.sample_count` — this column doesn't exist
+#### ❌ Wrong: counting a study's samples through patient/sample joins
 ```sql
--- INCORRECT - cancer_study has no sample_count column
-SELECT cancer_study_identifier, sample_count
-FROM cancer_study
-WHERE cancer_study_identifier = 'brca_metabric';
-```
-
-#### ✅ Correct: derive the count from patient/sample, or call list_studies()
-```sql
--- CORRECT - count via cancer_study -> patient -> sample
+-- INCORRECT - can differ from the portal's study list by a few samples
 SELECT cs.cancer_study_identifier, COUNT(DISTINCT s.internal_id) as sample_count
 FROM cancer_study cs
 JOIN patient p ON p.cancer_study_id = cs.cancer_study_id
 JOIN sample s ON s.patient_id = p.internal_id
 WHERE cs.cancer_study_identifier = 'brca_metabric'
 GROUP BY cs.cancer_study_identifier;
+```
 
--- OR simply call the list_studies() tool, which already returns sample_count
+#### ✅ Correct: read the precomputed columns on cancer_study
+```sql
+-- CORRECT - the same numbers the portal shows; see sample-filtering-guide §4 for the other data-type columns
+SELECT cancer_study_identifier, sample_count, mutation_sample_count, cna_sample_count
+FROM cancer_study
+WHERE cancer_study_identifier = 'brca_metabric';
 ```
 
 #### ❌ Wrong: `corrSpearman(...)` — not a real ClickHouse function

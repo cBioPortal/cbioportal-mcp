@@ -38,14 +38,13 @@ SELECT
     cs.cancer_study_identifier,
     cs.name as study_name,
     cs.description,
-    COUNT(DISTINCT p.internal_id) as patient_count,
-    COUNT(DISTINCT s.internal_id) as sample_count
+    cs.sample_count,
+    COUNT(DISTINCT p.internal_id) as patient_count
 FROM cancer_study cs
 LEFT JOIN patient p ON cs.cancer_study_id = p.cancer_study_id
-LEFT JOIN sample s ON p.internal_id = s.patient_id
 WHERE
     cs.cancer_study_identifier = 'your_study_id'
-GROUP BY cs.cancer_study_identifier, cs.name, cs.description;
+GROUP BY cs.cancer_study_identifier, cs.name, cs.description, cs.sample_count;
 ```
 
 ### 4. Find Studies by Available Data Types
