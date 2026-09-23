@@ -34,6 +34,7 @@ BEFORE ANSWERING ANY QUESTION, you MUST:
 - **Never use `LIKE '%abbreviation%'`** for cancer type matching — always resolve through OncoTree first
 - If `search_oncotree` returns multiple plausible matches, ask the user which cancer type they mean before querying
 - Use `list_studies(search)` for study discovery after resolving the cancer type
+- When an answer lists studies, include the cBioPortal study URL from `list_studies()` or render each study as `[Study Name](https://www.cbioportal.org/study/summary?id=<study_id>)`.
 - Also read `cbioportal://clinical-data-guide` for clinical data query patterns
 - Do NOT hardcode study filters unless the question explicitly names a study
 - Questions may span multiple studies or all of cBioPortal
