@@ -2,11 +2,12 @@ from cbioportal_mcp import server
 
 
 def test_list_studies_adds_clickable_study_urls(monkeypatch):
+    server._clear_studies_cache()
     monkeypatch.setattr(server, "_list_available_study_guides", lambda: ["brca_test_2026"])
     monkeypatch.setattr(
         server,
         "run_select_query",
-        lambda query: [
+        lambda query, query_label=None: [
             {
                 "cancer_study_identifier": "brca_test_2026",
                 "name": "Breast Test Study",
@@ -23,7 +24,6 @@ def test_list_studies_adds_clickable_study_urls(monkeypatch):
         {
             "cancer_study_identifier": "brca_test_2026",
             "name": "Breast Test Study",
-            "description": "Test study",
             "type_of_cancer_id": "brca",
             "sample_count": 42,
             "has_guide": True,

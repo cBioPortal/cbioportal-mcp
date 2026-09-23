@@ -494,6 +494,43 @@ WHERE attribute_name = 'TUMOR_GRADE' AND cancer_study_identifier = 'brca_tcga';
 
 **Key rule:** Never assume a table or column exists. Always check with `clickhouse_list_tables` and `clickhouse_list_table_columns` first.
 
+#### ❌ Wrong: `cancer_study.sample_count` — this column doesn't exist
+```sql
+-- INCORRECT - cancer_study has no sample_count column
+SELECT cancer_study_identifier, sample_count
+FROM cancer_study
+WHERE cancer_study_identifier = 'brca_metabric';
+```
+
+#### ✅ Correct: derive the count from patient/sample, or call list_studies()
+```sql
+-- CORRECT - count via cancer_study -> patient -> sample
+SELECT cs.cancer_study_identifier, COUNT(DISTINCT s.internal_id) as sample_count
+FROM cancer_study cs
+JOIN patient p ON p.cancer_study_id = cs.cancer_study_id
+JOIN sample s ON s.patient_id = p.internal_id
+WHERE cs.cancer_study_identifier = 'brca_metabric'
+GROUP BY cs.cancer_study_identifier;
+
+-- OR simply call the list_studies() tool, which already returns sample_count
+```
+
+#### ❌ Wrong: `corrSpearman(...)` — not a real ClickHouse function
+```sql
+-- INCORRECT - ClickHouse has no corrSpearman function; this errors
+SELECT corrSpearman(a.v, b.v) AS spearman_correlation
+FROM a JOIN b USING (sample_unique_id);
+```
+
+#### ✅ Correct: `rankCorr(...)` is ClickHouse's Spearman-correlation function
+```sql
+-- CORRECT - rankCorr computes Spearman's rank correlation
+SELECT rankCorr(a.v, b.v) AS spearman_correlation
+FROM a JOIN b USING (sample_unique_id);
+-- See gene_pair_coexpression in sql/5-gene-expression-views.sql for the
+-- full working pattern, or cbioportal://gene-expression-guide.
+```
+
 ### 16. 🚨 SILENT QUERY SUBSTITUTION ("did you mean...")
 
 When the user's wording differs from canonical terminology (e.g. "V600V" looks like "V600E" with a typo, or "point mutation" sounds like "missense"), it is forbidden to silently rewrite the question and answer the rewritten version. Doing so produces an answer that looks confident but is for a different question — the user cannot tell what was changed.
