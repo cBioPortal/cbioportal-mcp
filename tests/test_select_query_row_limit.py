@@ -1,3 +1,5 @@
+import json
+
 import mcp_clickhouse.mcp_server as ch_mcp_server
 
 from cbioportal_mcp import server
@@ -5,22 +7,6 @@ from cbioportal_mcp import server
 
 def _rows(n):
     return [{"i": i} for i in range(n)]
-
-
-class _FakeClickHouseResult:
-    def __init__(self, column_names, result_rows):
-        self.column_names = column_names
-        self.result_rows = result_rows
-
-
-class _FakeClickHouseClient:
-    def __init__(self, result_rows):
-        self._result_rows = result_rows
-        self.queries = []
-
-    def query(self, query, settings=None):
-        self.queries.append({"query": query, "settings": settings})
-        return _FakeClickHouseResult(["i"], [(i,) for i in range(self._result_rows)])
 
 
 def test_select_query_under_default_limit_is_not_truncated(monkeypatch):
@@ -94,32 +80,29 @@ def test_select_query_max_rows_is_clamped_to_hard_cap(monkeypatch):
     assert result["returned_rows"] == server.MAX_SELECT_MAX_ROWS
 
 
-def test_run_select_query_with_max_rows_passes_clickhouse_settings(monkeypatch):
-    fake_client = _FakeClickHouseClient(result_rows=3)
-    monkeypatch.setattr(ch_mcp_server, "create_clickhouse_client", lambda: fake_client)
-    monkeypatch.setattr(ch_mcp_server, "get_readonly_setting", lambda client: "1")
+def _fake_run_query(calls, rows):
+    def fake_run_query(query):
+        calls.append(query)
+        return json.dumps({"columns": ["i"], "rows": [[i] for i in range(rows)]})
 
-    result = server.run_select_query("SELECT 1", query_label="test", max_rows=50)
+    return fake_run_query
+
+
+def test_run_select_query_with_max_rows_limits_rows_in_clickhouse(monkeypatch):
+    calls = []
+    monkeypatch.setattr(ch_mcp_server, "run_query", _fake_run_query(calls, rows=3))
+
+    result = server.run_select_query("SELECT 1;", query_label="test", max_rows=50)
 
     assert result == [{"i": i} for i in range(3)]
-    assert len(fake_client.queries) == 1
-    assert fake_client.queries[0]["settings"] == {
-        "readonly": "1",
-        "max_result_rows": 50,
-        "result_overflow_mode": "break",
-    }
+    assert calls == ["SELECT * FROM (SELECT 1) LIMIT 51"]
 
 
-def test_run_select_query_without_max_rows_uses_vendored_wrapper(monkeypatch):
+def test_run_select_query_without_max_rows_runs_query_unchanged(monkeypatch):
     calls = []
-
-    def fake_ch_run_select_query(query):
-        calls.append(query)
-        return {"columns": ["i"], "rows": [(1,), (2,)]}
-
-    monkeypatch.setattr(ch_mcp_server, "run_select_query", fake_ch_run_select_query)
+    monkeypatch.setattr(ch_mcp_server, "run_query", _fake_run_query(calls, rows=2))
 
     result = server.run_select_query("SELECT 1", query_label="test")
 
     assert calls == ["SELECT 1"]
-    assert result == [{"i": 1}, {"i": 2}]
+    assert result == [{"i": 0}, {"i": 1}]
