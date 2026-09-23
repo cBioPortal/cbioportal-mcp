@@ -432,8 +432,15 @@ def study_resolution_guide() -> str:
     return _study_resolution_guide_text()
 
 
+# Default and maximum rows clickhouse_run_select_query will return. A missing
+# or overly broad LIMIT in agent-written SQL should not be able to flood the
+# agent's context with an unbounded result set (mirrors MAX_LIST_LIMIT below).
+DEFAULT_SELECT_MAX_ROWS = 100
+MAX_SELECT_MAX_ROWS = 10000
+
+
 @mcp.tool(
-    description="""
+    description=f"""
     Execute a ClickHouse SQL SELECT query.
 
     For complex analysis patterns, consult these query guides:
@@ -445,15 +452,43 @@ def study_resolution_guide() -> str:
     - cbioportal://study-resolution-guide - Missing studies, external portals, and substitute cohorts
     - cbioportal://common-pitfalls - Common query mistakes and how to avoid them
 
+    Args:
+        max_rows: Maximum rows to return (default {DEFAULT_SELECT_MAX_ROWS}, max {MAX_SELECT_MAX_ROWS}).
+            Prefer narrowing the query itself (add a LIMIT, aggregate, or filter) over raising this.
+
     Returns:
-        - On success: an object with a single field "rows" containing an array of result rows.
+        - On success: an object with field "rows" containing an array of result rows. If the
+          query produced more rows than max_rows, "rows" is truncated and "truncated": true,
+          "returned_rows", and a "note" are included.
         - On failure: an object with a single field "error_message" containing a string describing the error.
 """
 )
-def clickhouse_run_select_query(query: str) -> dict[str, list[dict] | str]:
+def clickhouse_run_select_query(
+    query: str, max_rows: int = DEFAULT_SELECT_MAX_ROWS
+) -> dict[str, list[dict] | str | bool | int]:
     try:
-        result = run_select_query(query, query_label="clickhouse_run_select_query")
+        safe_max_rows = max(1, min(int(max_rows), MAX_SELECT_MAX_ROWS))
+        # run_select_query returns at most safe_max_rows + 1 rows (capped in
+        # ClickHouse), so one extra row signals that the result was truncated.
+        result = run_select_query(
+            query, query_label="clickhouse_run_select_query", max_rows=safe_max_rows
+        )
         logger.debug(f"clickhouse_run_select_query returns {result}")
+        if len(result) > safe_max_rows:
+            return {
+                "rows": result[:safe_max_rows],
+                "truncated": True,
+                "returned_rows": safe_max_rows,
+                # No total_rows here: once ClickHouse stops scanning early, the
+                # true total is unknown without a separate full COUNT(*), which
+                # would defeat the point of stopping early.
+                "note": (
+                    f"Result truncated to {safe_max_rows} rows; more rows matched but the "
+                    f"exact total is unknown because the query was capped during execution "
+                    f"for efficiency. Narrow the query (add a LIMIT, aggregate, or filter) or "
+                    f"pass a larger max_rows (up to {MAX_SELECT_MAX_ROWS}) to see more."
+                ),
+            }
         return {"rows": result}
     except Exception as e:
         error_message = str(e)
@@ -530,7 +565,7 @@ def clickhouse_list_table_columns(table: str) -> dict[str, list[dict] | str]:
         return {"error_message": error_message}
 
 
-def run_select_query(query: str, *, query_label: str) -> list[dict]:
+def run_select_query(query: str, *, query_label: str, max_rows: int | None = None) -> list[dict]:
     """
     Execute arbitrary ClickHouse SQL SELECT query.
 
@@ -544,6 +579,9 @@ def run_select_query(query: str, *, query_label: str) -> list[dict]:
             per-call-site label its own latency metric would average a cheap
             lookup together with an expensive multi-table aggregate. Use
             "area.purpose", not the raw SQL text.
+        max_rows: When given, ClickHouse returns at most max_rows + 1 rows (see
+            _with_row_cap), so callers can detect truncation without fetching
+            the full result.
 
     Returns:
         list: A list of rows, where each row is a dictionary with column names as keys and corresponding values.
@@ -552,11 +590,24 @@ def run_select_query(query: str, *, query_label: str) -> list[dict]:
 
     # DB-level read-only permissions (enforced on startup) prevent non-SELECT queries,
     # so we don't need application-level query filtering. This allows CTEs (WITH ... AS).
+    if max_rows is not None:
+        query = _with_row_cap(query, max_rows)
     logger.debug("run_select_query: delegate the query to run_query tool of ClickHouse MCP")
     with traced_db_query(query_label):
         ch_query_result = json.loads(run_query(query))
         result = zip_select_query_result(ch_query_result)
     return result
+
+
+def _with_row_cap(query: str, max_rows: int) -> str:
+    """Wrap a SELECT so ClickHouse returns at most max_rows + 1 rows.
+
+    A LIMIT on an outer query works for any SELECT (CTEs, UNIONs, queries that already have their own
+    LIMIT) and lets the engine stop early. Query-level settings such as max_result_rows can't be used
+    here: mcp-clickhouse runs queries with readonly=1, which forbids changing settings.
+    """
+    inner = query.strip().rstrip(";").strip()
+    return f"SELECT * FROM ({inner}) LIMIT {int(max_rows) + 1}"
 
 
 def zip_select_query_result(ch_query_result) -> list[dict]:
