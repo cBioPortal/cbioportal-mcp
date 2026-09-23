@@ -29,8 +29,8 @@ def test_list_studies_default_uses_trimmed_sample_count_query(monkeypatch):
     assert rows[0]["cancer_study_identifier"] == "study_alpha"
     assert "description" not in rows[0]
     assert "clinical_data_derived" not in queries[0]
-    assert "LEFT JOIN sample" in queries[0]
-    assert "LEFT JOIN patient" in queries[0]
+    assert "JOIN" not in queries[0]
+    assert "cs.sample_count" in queries[0]
 
 
 def test_list_studies_refetches_after_ttl_expires(monkeypatch):
@@ -168,3 +168,28 @@ def test_list_studies_search_filters_in_python(monkeypatch):
     rows = server.list_studies.fn(search="beta")
 
     assert [row["cancer_study_identifier"] for row in rows] == ["study_beta"]
+
+
+def test_study_count_columns_are_created_by_the_clone_sql():
+    """Every column the guides and list_studies read must be created by sql/6."""
+    from pathlib import Path
+
+    sql = (Path(__file__).parent.parent / "sql" / "6-add-study-data-type-counts.sql").read_text()
+    guide = (
+        Path(__file__).parent.parent / "src" / "cbioportal_mcp" / "resources" / "sample-filtering-guide.md"
+    ).read_text()
+    for column in (
+        "sample_count",
+        "mutation_sample_count",
+        "cna_sample_count",
+        "structural_variant_sample_count",
+        "rna_seq_sample_count",
+        "mrna_microarray_sample_count",
+        "mirna_sample_count",
+        "rppa_sample_count",
+        "mass_spectrometry_sample_count",
+        "treatment_patient_count",
+        "resource_sample_counts",
+    ):
+        assert f"ADD COLUMN {column} " in sql, f"{column} not created by sql/6"
+        assert column in guide, f"{column} not documented in sample-filtering-guide §4"
