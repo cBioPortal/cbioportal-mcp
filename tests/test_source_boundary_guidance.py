@@ -23,3 +23,14 @@ def test_system_prompt_labels_general_knowledge_even_after_tool_calls():
     assert "explicitly state which portion is not from cBioPortal data" in prompt
     assert "The label depends on the source of the claim" in prompt
     assert "not merely whether a tool was called" in prompt
+
+
+def test_system_prompt_calibrates_response_depth_for_researcher_queries():
+    prompt = server._load_resource("system-prompt.md")
+
+    assert "## Response Depth Calibration" in prompt
+    assert "researcher-grade detail" in prompt
+    assert "specific gene symbols" in prompt
+    assert "raw counts and denominators" in prompt
+    assert "selected cohort/study and counting unit" in prompt
+    assert "Avoid pop-science summaries" in prompt
