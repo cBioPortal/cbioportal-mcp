@@ -49,7 +49,7 @@ ALTER TABLE clinical_data_derived MODIFY COLUMN patient_unique_id
   COMMENT 'Globally unique patient ID: cancer_study_identifier + "_" + patient.stable_id. Present for both sample and patient-level attributes.';
 
 ALTER TABLE clinical_data_derived MODIFY COLUMN attribute_name
-  COMMENT 'Clinical attribute name (e.g., SAMPLE_TYPE, CANCER_TYPE, AGE, OS_MONTHS). Use with attribute_value for filtering. AGE may be floored or capped for de-identification (e.g. all children recorded as 18): before age statistics check for a pile-up at the min/max, and if present compute age from DAYS_TO_BIRTH (-days / 365.25).';
+  COMMENT 'Clinical attribute name (e.g., SAMPLE_TYPE, CANCER_TYPE, AGE, OS_MONTHS). Use with attribute_value for filtering. AGE may be floored or capped for de-identification (e.g. all children recorded as 18, or everyone 89+ recorded as 89 or 90): before age statistics check for a pile-up at the min/max, and if present compute age from DAYS_TO_BIRTH (-days / 365.25).';
 
 ALTER TABLE clinical_data_derived MODIFY COLUMN attribute_value
   COMMENT 'Value of the clinical attribute (String). For SAMPLE_TYPE: Primary, Metastasis, Local Recurrence, Unknown. Missing values are empty strings, so use toFloat64OrNull(attribute_value) for numeric comparisons — CAST fails on them.';
