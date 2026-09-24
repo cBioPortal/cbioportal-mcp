@@ -169,7 +169,7 @@ ORDER BY name;
 - `CANCER_TYPE`: Broad cancer category
 - `CANCER_TYPE_DETAILED`: Specific cancer subtype
 - `SEX`: Patient gender
-- `AGE`: Age at diagnosis
+- `AGE`: Age at diagnosis — can be floored or capped for de-identification (see "Age statistics" below)
 - `OS_MONTHS`: Overall survival time in months
 - `OS_STATUS`: Overall survival status (0:LIVING, 1:DECEASED or similar)
 
@@ -254,12 +254,13 @@ ORDER BY sample_count DESC;
 WITH patient_data AS (
     SELECT DISTINCT
         patient_unique_id,
-        CASE WHEN attribute_name = 'SEX' THEN attribute_value END as sex,
-        CASE WHEN attribute_name = 'AGE' THEN CAST(attribute_value AS Float64) END as age
+        anyIf(attribute_value, attribute_name = 'SEX') as sex,
+        anyIf(toFloat64OrNull(attribute_value), attribute_name = 'AGE') as age
     FROM clinical_data_derived
     WHERE
         cancer_study_identifier = 'your_study_id'
         AND attribute_name IN ('SEX', 'AGE')
+    GROUP BY patient_unique_id
 )
 SELECT
     sex,
@@ -271,6 +272,24 @@ FROM patient_data
 WHERE sex IS NOT NULL AND age IS NOT NULL
 GROUP BY sex;
 ```
+
+### Age statistics: check for a floor or cap first
+
+Some studies floor or cap `AGE` for de-identification — e.g. every child recorded as 18, or everyone over 89 as 89. A median or mean over such a column is wrong. Before reporting age statistics, check how many patients sit exactly at the minimum or maximum:
+
+```sql
+SELECT
+    arrayMin(ages) AS min_age, arrayMax(ages) AS max_age,
+    countEqual(ages, min_age) AS at_min, countEqual(ages, max_age) AS at_max, length(ages) AS patients
+FROM (
+    SELECT groupArray(toFloat64OrNull(attribute_value)) AS ages
+    FROM clinical_data_derived
+    WHERE cancer_study_identifier = 'your_study_id' AND attribute_name = 'AGE'
+      AND toFloat64OrNull(attribute_value) IS NOT NULL
+);
+```
+
+If a large share of patients sits at one boundary, compute age from `DAYS_TO_BIRTH` instead (negative days from birth to diagnosis): age in years = `-toFloat64OrNull(attribute_value) / 365.25`. Tell the user which attribute you used and why. Check the study guide too — it may already name the right attribute. All TARGET GDC studies (`*_target_gdc`) floor `AGE` at 18 — use `DAYS_TO_BIRTH` for them.
 
 ## Raw Table Queries (Advanced)
 
