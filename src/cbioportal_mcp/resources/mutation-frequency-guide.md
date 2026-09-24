@@ -212,6 +212,21 @@ FROM top_mutated_genes_in_cohort(
 
 Returns `(hugo_gene_symbol, altered_samples, profiled_samples, frequency_pct, total_mutation_events)`, sorted by `altered_samples DESC` then gene symbol ASC (matching the backend's tiebreaker). Per-gene `profiled_samples` correctly reflects which samples were assayed for that gene — for targeted-panel cohorts (`large_genomic_cohort` = msk_impact_50k_2026), the denominator is samples on a panel that includes the gene; for WES cohorts (`pan_cancer_tcga`), every gene gets the same WES-sample denominator.
 
+`top_mutated_genes_in_cohort` spans the whole preference cohort — with `pan_cancer_tcga` that is all 32 TCGA studies, not one cancer type. For one study use `top_mutated_genes_in_study`.
+
+### Variant: top-N most-mutated genes in one study (`top_mutated_genes_in_study`)
+
+For "top N mutated genes in study X", use this view. Same columns, ordering and WES-aware denominator as the cohort view; do not compute your own denominator.
+
+```sql
+SELECT *
+FROM top_mutated_genes_in_study(
+    study = 'brca_tcga_pan_can_atlas_2018',
+    top_n = 5
+);
+-- PIK3CA 347/1066, TP53 347/1066, TTN 187, CDH1 130, GATA3 127
+```
+
 ### Variant: Spearman correlation between two genes
 
 Gene expression / copy-number correlation questions ("are TP53 and MYC expression correlated in METABRIC?") belong in `cbioportal://gene-expression-guide`, which covers the `genetic_alteration_derived` table and the `gene_pair_coexpression(study, gene_a, gene_b, profile_type)` view. Don't try to express expression queries through the mutation-frequency views.
@@ -397,47 +412,13 @@ WHERE alteration_type = 'MUTATION_EXTENDED'
 
 ## Complete Analysis Example
 
-### Method 1: Automated Query (If Supported)
+### Method 1: Automated Query
+Use the `top_mutated_genes_in_study` view. It adds WES samples (`gene_panel_id = 'WES'`, profiled for every gene) to the per-gene panel coverage; a denominator built only through `gene_panel` / `gene_panel_list` drops them.
+
 ```sql
--- Complete mutation frequency analysis with gene-specific denominators
-WITH mutation_counts AS (
-    SELECT
-        hugo_gene_symbol,
-        entrez_gene_id,
-        COUNT(DISTINCT sample_unique_id) AS numberOfAlteredSamples,
-        COUNT(DISTINCT CASE WHEN off_panel = 0 THEN sample_unique_id END) AS numberOfAlteredSamplesOnPanel,
-        COUNT(*) AS totalMutationEvents
-    FROM genomic_event_derived
-    WHERE
-        variant_type = 'mutation'
-        AND mutation_status != 'UNCALLED'
-        AND cancer_study_identifier = 'your_study_id'
-    GROUP BY entrez_gene_id, hugo_gene_symbol
-),
--- Gene-specific profiled samples
-profiled_counts AS (
-    SELECT
-        g.hugo_gene_symbol,
-        COUNT(DISTINCT stgp.sample_unique_id) as gene_profiled_samples
-    FROM sample_to_gene_panel_derived stgp
-    JOIN gene_panel gp ON stgp.gene_panel_id = gp.stable_id
-    JOIN gene_panel_list gpl ON gp.internal_id = gpl.internal_id
-    JOIN gene g ON gpl.gene_id = g.entrez_gene_id
-    WHERE
-        stgp.alteration_type = 'MUTATION_EXTENDED'
-        AND stgp.cancer_study_identifier = 'your_study_id'
-    GROUP BY g.hugo_gene_symbol
-)
--- Calculate frequencies with proper denominators
-SELECT
-    m.hugo_gene_symbol,
-    m.totalMutationEvents as mutations,
-    m.numberOfAlteredSamplesOnPanel as altered_samples,
-    p.gene_profiled_samples as profiled_samples,
-    ROUND((m.numberOfAlteredSamplesOnPanel * 100.0) / p.gene_profiled_samples, 1) as sample_frequency_percent
-FROM mutation_counts m
-JOIN profiled_counts p ON m.hugo_gene_symbol = p.hugo_gene_symbol
-ORDER BY sample_frequency_percent DESC;
+SELECT hugo_gene_symbol, total_mutation_events AS mutations, altered_samples, profiled_samples, frequency_pct
+FROM top_mutated_genes_in_study(study = 'your_study_id', top_n = 20);
+-- os_target_gdc (WES): TP53 32/143 = 22.4%, MUC16 16/143, TTN 16/143
 ```
 
 ### Method 2: Manual Per-Gene Queries (More Reliable)
@@ -470,6 +451,18 @@ GROUP BY hugo_gene_symbol
 ORDER BY amp_count DESC;
 ```
 
+**`genomic_event_derived` stores only AMP (2) and HOMDEL (-2).** Shallow deletion / HETLOSS (-1), diploid (0) and gain (1) are only in `genetic_alteration_derived` with `profile_type = 'gistic'`, where `alteration_value` is a String. Never conclude "no shallow deletions" from `cna_alteration = -1` returning 0 rows.
+
+```sql
+-- Full GISTIC distribution for one gene (all values -2..2)
+SELECT alteration_value, count() AS samples
+FROM genetic_alteration_derived
+WHERE cancer_study_identifier = 'gbm_tcga_pan_can_atlas_2018' AND hugo_gene_symbol = 'CDKN2A'
+  AND profile_type = 'gistic' AND alteration_value NOT IN ('', 'NA')
+GROUP BY alteration_value;
+-- -2: 322, -1: 114, 0: 119, 1: 20  (575 profiled)
+```
+
 ## Key Column Names in genomic_event_derived
 
 | Column | Description |
@@ -479,7 +472,7 @@ ORDER BY amp_count DESC;
 | `mutation_type` | Mutation type (Missense_Mutation, Nonsense_Mutation, etc.) |
 | `mutation_status` | SOMATIC, UNKNOWN, UNCALLED |
 | `variant_type` | mutation, cna, structural_variant |
-| `cna_alteration` | 2 (AMP) or -2 (HOMDEL) |
+| `cna_alteration` | 2 (AMP) or -2 (HOMDEL) only; -1/0/1 are in `genetic_alteration_derived` (`profile_type = 'gistic'`) |
 | `off_panel` | 0 (on-panel) or 1 (off-panel) |
 
 ## Common Mistakes to Avoid
