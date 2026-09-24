@@ -7,14 +7,19 @@ See `_tcga_pancan_template.md` for common TCGA clinical attributes.
 ## Study-Specific Attributes
 
 ### Molecular Classification (TCGA)
-| Attribute | Description | Values |
+| Attribute | Description | Values (patients) |
 |-----------|-------------|--------|
-| `SUBTYPE` | TCGA molecular subtype | POLE (ultramutated), MSI (hypermutated), CN-low, CN-high |
+| `SUBTYPE` | TCGA molecular subtype | `UCEC_CN_HIGH` 163, `UCEC_MSI` 148, `UCEC_CN_LOW` 147, `UCEC_POLE` 49, blank 22 |
 
 ### Histology
-| Attribute | Description | Values |
-|-----------|-------------|--------|
-| `HISTOLOGICAL_TYPE` | Histological subtype | Endometrioid, Serous, Mixed |
+There is no `HISTOLOGICAL_TYPE` attribute; use `CANCER_TYPE_DETAILED`, plus `GRADE` for grade.
+
+| Attribute | Values (samples) |
+|-----------|--------|
+| `CANCER_TYPE_DETAILED` | Uterine Endometrioid Carcinoma 399, Uterine Serous Carcinoma/Uterine Papillary Serous Carcinoma 109, Uterine Mixed Endometrial Carcinoma 21 |
+| `GRADE` | G3 302, G2 119, G1 97, High Grade 11 |
+
+`AJCC_PATHOLOGIC_TUMOR_STAGE` is blank for all samples.
 
 ## Molecular Subtypes
 | Subtype | Characteristics | Prognosis |
