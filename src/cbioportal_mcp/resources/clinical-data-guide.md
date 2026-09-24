@@ -247,6 +247,58 @@ GROUP BY group_name;
 - **Decision**: Match the attribute to the level of detail requested in the question
 - **When unsure**: start with CANCER_TYPE for broader matching
 
+## Study-View Chart Counts (views)
+
+To reproduce a cBioPortal study-view pie/bar chart for one study, use these parameterized views instead of hand-writing the aggregation. They apply the portal's counting unit, NA rules and "patients with samples only" scope.
+
+### Categorical attribute: `clinical_attribute_counts(study, attribute)`
+
+```sql
+SELECT * FROM clinical_attribute_counts(study='msk_chord_2024', attribute='SAMPLE_TYPE')
+ORDER BY count DESC;
+-- Primary 15,928 | Metastasis 8,878 | Unknown 136 | Local Recurrence 98  (level = sample)
+```
+
+- `value` — attribute value as stored; `'NA'` row = study patients/samples with no value or a value of `''`, `NA`, `NAN`, `N/A` (portal rule). `Unknown` stays its own value.
+- `count` — distinct patients for a patient attribute, distinct samples for a sample attribute (`level` says which, from `clinical_attribute_meta.patient_attribute`).
+- `pct_of_study` — `count` / all patients (or samples) in the study.
+- `attribute` is the exact `attr_id` (case-sensitive). No rows = attribute not in this study.
+- Patients without samples are not counted, as in the portal: `os_target_gdc` has `SEX` for 383 patients but only 153 have samples, so the view returns Male 87, Female 66.
+
+### Treatments: `treatment_counts_in_study(study)` and `treatment_regimens_in_study(study)`
+
+```sql
+SELECT agent, treatment_subtypes, patients
+FROM treatment_counts_in_study(study='msk_chord_2024')
+ORDER BY patients DESC LIMIT 10;
+-- FLUOROURACIL ['Chemo'] 6,319 | LEUCOVORIN 5,573 | OXALIPLATIN 5,489 | ...
+```
+
+- One row per `AGENT` = the portal's Treatment (patient) chart. `patients` = distinct patients who received the agent.
+- `treatment_types` / `treatment_subtypes` — arrays of the type/subtype values on that agent's events (keys differ by study: MSK-CHORD uses `SUBTYPE` = Chemo, Targeted, Immuno, Investigational…; TCGA uses `TREATMENT_TYPE` = Chemotherapy, Radiation Therapy…).
+- `pct_of_treated_patients` — share of patients with any treatment event. Never divide by all study patients (see `cbioportal://treatment-guide`).
+- For systemic therapy only, drop investigational and radiation rows: `WHERE agent != 'INVESTIGATIONAL' AND NOT arrayExists(t -> t ILIKE '%radiation%' OR t = 'Investigational', arrayConcat(treatment_types, treatment_subtypes))`. In TCGA studies radiation is recorded as an agent (e.g. `Radiation 1` in `brca_tcga_pan_can_atlas_2018`).
+- `treatment_regimens_in_study` groups agents a patient started on the same day into one regimen (`CARBOPLATIN + PEMETREXED`), already excluding investigational, prior-medication and radiation events. A patient is counted under every regimen they received. Needs real start dates: studies where all `start_date` = 0 collapse into one regimen per patient.
+
+The views are study-wide. For a subgroup (e.g. one cancer type in a multi-cancer study), filter the event table directly:
+
+```sql
+SELECT value AS agent, count(DISTINCT patient_unique_id) AS patients
+FROM clinical_event_data_derived
+WHERE cancer_study_identifier = 'msk_chord_2024'
+  AND lower(event_type) = 'treatment'
+  AND key = 'AGENT'
+  AND patient_unique_id IN (
+      SELECT patient_unique_id FROM clinical_data_derived
+      WHERE cancer_study_identifier = 'msk_chord_2024'
+        AND attribute_name = 'CANCER_TYPE'
+        AND attribute_value = 'Non-Small Cell Lung Cancer')
+GROUP BY agent
+ORDER BY patients DESC
+LIMIT 10;
+-- CARBOPLATIN 3,371 | PEMETREXED 3,347 | PEMBROLIZUMAB 1,569 | INVESTIGATIONAL 1,479 | ...
+```
+
 ## Query Patterns
 
 ### 1. Filter Samples by Clinical Criteria
@@ -362,7 +414,7 @@ WHERE
 
 ## Treatment and Clinical Events Data
 
-Treatment data is stored separately from clinical attributes, in the clinical events tables:
+Treatment data is stored separately from clinical attributes, in the clinical events tables. For per-agent or per-regimen patient counts in one study, use `treatment_counts_in_study` / `treatment_regimens_in_study` (see Study-View Chart Counts above). Details: `cbioportal://treatment-guide`.
 
 ### Key Tables for Treatment Data
 - `clinical_event`: Contains event records (Treatment, Diagnosis, Surgery, etc.)
