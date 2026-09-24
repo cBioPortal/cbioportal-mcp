@@ -19,6 +19,9 @@ import json
 import logging
 import re
 import sys
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 from importlib import resources as importlib_resources
 from pathlib import Path
@@ -31,7 +34,12 @@ import mcp.types as mt
 from cbioportal_mcp.env import get_mcp_config, TransportType
 from cbioportal_mcp.authentication.permissions import ensure_db_permissions
 from cbioportal_mcp.auth import _build_auth_provider
-from cbioportal_mcp.telemetry import configure_telemetry, TelemetryMiddleware
+from cbioportal_mcp.telemetry import (
+    TelemetryMiddleware,
+    configure_telemetry,
+    dogstatsd_metrics_configured,
+    traced_db_query,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -81,24 +89,6 @@ def _validate_table_name(table: str) -> str:
             "Table names may only contain alphanumeric characters and underscores."
         )
     return table
-
-def _sanitize_search_term(search: str) -> str:
-    """Sanitize a search term by escaping SQL special characters.
-    
-    Args:
-        search: The search term to sanitize
-        
-    Returns:
-        The sanitized search term safe for use in LIKE clauses
-    """
-    if not search:
-        return ""
-    # Escape single quotes by doubling them (SQL standard)
-    # Also escape % and _ which are LIKE wildcards
-    sanitized = search.replace("'", "''")
-    sanitized = sanitized.replace("%", "\\%")
-    sanitized = sanitized.replace("_", "\\_")
-    return sanitized
 
 # Resource loading using importlib.resources for proper package support
 def _get_resources_path() -> Path:
@@ -255,9 +245,23 @@ def main():
         logger.critical("❌ ClickHouse permission check failed: %s", e)
         sys.exit(2)
 
-    # Set up OpenTelemetry → Datadog agent (no-op if env vars not set or agent unreachable)
+    # Warm the list_studies cache immediately, without blocking server
+    # startup on the ClickHouse round trip, then keep it proactively
+    # refreshed on the same background thread for the life of the process
+    # (see STUDIES_CACHE_REFRESH_INTERVAL_SECONDS) -- so it's not just the
+    # first caller after startup that benefits, but every caller, since a
+    # live request should almost never be the one paying for the refetch.
+    def _warm_then_keep_studies_cache_fresh():
+        _refresh_studies_cache_once()
+        _refresh_studies_cache_forever()
+
+    threading.Thread(target=_warm_then_keep_studies_cache_fresh, daemon=True).start()
+
+    # Set up OpenTelemetry → Datadog agent (no-op if env vars not set or agent unreachable).
+    # DogStatsD tool metrics can still use the same middleware when only the
+    # Datadog agent's UDP endpoint is configured.
     provider = configure_telemetry()
-    if provider is not None:
+    if provider is not None or dogstatsd_metrics_configured():
         mcp.add_middleware(TelemetryMiddleware())
 
     transport = config.mcp_server_transport
@@ -312,6 +316,54 @@ def _sample_filtering_guide_text() -> str:
 
 def _common_pitfalls_guide_text() -> str:
     return _load_resource("common-pitfalls.md")
+
+# Pitfall headers look like "### 1. 🚨 TITLE" or "### 5b. 🚨 TITLE".
+_PITFALL_HEADER_RE = re.compile(r'^### (\d+[a-z]?)\.\s*.*$', re.MULTILINE)
+
+def _pitfall_sort_key(number: str) -> tuple[int, str]:
+    m = re.match(r'(\d+)(.*)', number)
+    return (int(m.group(1)), m.group(2))
+
+@lru_cache(maxsize=1)
+def _common_pitfall_sections() -> dict[str, str]:
+    """Split common-pitfalls.md into individually addressable sections by
+    pitfall number.
+
+    The full guide is ~4,300 words (~5,700 tokens), but callers that already
+    know which pitfall applies — including system-prompt.md's own routing
+    rules — only need one ~100-400 token section. Cached because the file is
+    baked into the image and doesn't change at runtime.
+    """
+    text = _common_pitfalls_guide_text()
+    headers = list(_PITFALL_HEADER_RE.finditer(text))
+    sections: dict[str, str] = {}
+    for i, m in enumerate(headers):
+        start = m.start()
+        end = headers[i + 1].start() if i + 1 < len(headers) else len(text)
+        sections[m.group(1)] = text[start:end].rstrip()
+    return sections
+
+def _common_pitfall_fragment(number: str) -> str | None:
+    """Return one pitfall's section text plus a short footer, or None if unknown."""
+    section = _common_pitfall_sections().get(number)
+    if section is None:
+        return None
+    return (
+        f"{section}\n\n"
+        f"---\n"
+        f"(Excerpt of pitfall #{number} from cbioportal://common-pitfalls. "
+        f"Read the full guide for the others.)"
+    )
+
+def _unknown_pitfall_message(number: str) -> str:
+    available = ", ".join(
+        sorted(_common_pitfall_sections().keys(), key=_pitfall_sort_key)
+    )
+    return (
+        f"No pitfall numbered '{number}' in cbioportal://common-pitfalls.\n"
+        f"Available pitfall numbers: {available}\n\n"
+        'Use read_guide("cbioportal://common-pitfalls") for the full guide.'
+    )
 
 def _treatment_guide_text() -> str:
     return _load_resource("treatment-guide.md")
@@ -380,8 +432,15 @@ def study_resolution_guide() -> str:
     return _study_resolution_guide_text()
 
 
+# Default and maximum rows clickhouse_run_select_query will return. A missing
+# or overly broad LIMIT in agent-written SQL should not be able to flood the
+# agent's context with an unbounded result set (mirrors MAX_LIST_LIMIT below).
+DEFAULT_SELECT_MAX_ROWS = 100
+MAX_SELECT_MAX_ROWS = 10000
+
+
 @mcp.tool(
-    description="""
+    description=f"""
     Execute a ClickHouse SQL SELECT query.
 
     For complex analysis patterns, consult these query guides:
@@ -393,15 +452,43 @@ def study_resolution_guide() -> str:
     - cbioportal://study-resolution-guide - Missing studies, external portals, and substitute cohorts
     - cbioportal://common-pitfalls - Common query mistakes and how to avoid them
 
+    Args:
+        max_rows: Maximum rows to return (default {DEFAULT_SELECT_MAX_ROWS}, max {MAX_SELECT_MAX_ROWS}).
+            Prefer narrowing the query itself (add a LIMIT, aggregate, or filter) over raising this.
+
     Returns:
-        - On success: an object with a single field "rows" containing an array of result rows.
+        - On success: an object with field "rows" containing an array of result rows. If the
+          query produced more rows than max_rows, "rows" is truncated and "truncated": true,
+          "returned_rows", and a "note" are included.
         - On failure: an object with a single field "error_message" containing a string describing the error.
 """
 )
-def clickhouse_run_select_query(query: str) -> dict[str, list[dict] | str]:
+def clickhouse_run_select_query(
+    query: str, max_rows: int = DEFAULT_SELECT_MAX_ROWS
+) -> dict[str, list[dict] | str | bool | int]:
     try:
-        result = run_select_query(query)
+        safe_max_rows = max(1, min(int(max_rows), MAX_SELECT_MAX_ROWS))
+        # run_select_query returns at most safe_max_rows + 1 rows (capped in
+        # ClickHouse), so one extra row signals that the result was truncated.
+        result = run_select_query(
+            query, query_label="clickhouse_run_select_query", max_rows=safe_max_rows
+        )
         logger.debug(f"clickhouse_run_select_query returns {result}")
+        if len(result) > safe_max_rows:
+            return {
+                "rows": result[:safe_max_rows],
+                "truncated": True,
+                "returned_rows": safe_max_rows,
+                # No total_rows here: once ClickHouse stops scanning early, the
+                # true total is unknown without a separate full COUNT(*), which
+                # would defeat the point of stopping early.
+                "note": (
+                    f"Result truncated to {safe_max_rows} rows; more rows matched but the "
+                    f"exact total is unknown because the query was capped during execution "
+                    f"for efficiency. Narrow the query (add a LIMIT, aggregate, or filter) or "
+                    f"pass a larger max_rows (up to {MAX_SELECT_MAX_ROWS}) to see more."
+                ),
+            }
         return {"rows": result}
     except Exception as e:
         error_message = str(e)
@@ -423,8 +510,8 @@ def clickhouse_list_tables() -> dict[str, list[dict] | str]:
     logger.info(f"clickhouse_list_tables: called")
 
     try:
-        from mcp_clickhouse.mcp_server import execute_query
-        raw = execute_query("SHOW TABLES")
+        from mcp_clickhouse.mcp_server import run_query
+        raw = json.loads(run_query("SHOW TABLES"))
         rows = raw.get("rows", [])
         result = [{"name": row[0]} for row in rows if row]
         logger.debug(f"clickhouse_list_tables result: {result}")
@@ -452,8 +539,8 @@ def clickhouse_list_table_columns(table: str) -> dict[str, list[dict] | str]:
 
     try:
         table = _validate_table_name(table)
-        from mcp_clickhouse.mcp_server import execute_query
-        raw = execute_query(f"DESCRIBE TABLE {table}")
+        from mcp_clickhouse.mcp_server import run_query
+        raw = json.loads(run_query(f"DESCRIBE TABLE {table}"))
         columns_list = raw.get("columns", [])
         rows = raw.get("rows", [])
         # DESCRIBE TABLE returns: name, type, default_type, default_expression, comment, ...
@@ -478,24 +565,49 @@ def clickhouse_list_table_columns(table: str) -> dict[str, list[dict] | str]:
         return {"error_message": error_message}
 
 
-def run_select_query(query: str) -> list[dict]:
+def run_select_query(query: str, *, query_label: str, max_rows: int | None = None) -> list[dict]:
     """
     Execute arbitrary ClickHouse SQL SELECT query.
-    
+
     Note: CTEs (WITH ... AS) are supported. Query validation is handled at the
     database level via read-only user permissions (see authentication/permissions.py).
+
+    Args:
+        query_label: Identifies the call site for telemetry (a Datadog span +
+            metric tag), e.g. "study_guide.counts". run_select_query() is a
+            single funnel for every SELECT this server runs, so without a
+            per-call-site label its own latency metric would average a cheap
+            lookup together with an expensive multi-table aggregate. Use
+            "area.purpose", not the raw SQL text.
+        max_rows: When given, ClickHouse returns at most max_rows + 1 rows (see
+            _with_row_cap), so callers can detect truncation without fetching
+            the full result.
 
     Returns:
         list: A list of rows, where each row is a dictionary with column names as keys and corresponding values.
     """
-    from mcp_clickhouse.mcp_server import run_select_query
+    from mcp_clickhouse.mcp_server import run_query
 
     # DB-level read-only permissions (enforced on startup) prevent non-SELECT queries,
     # so we don't need application-level query filtering. This allows CTEs (WITH ... AS).
-    logger.debug("run_select_query: delegate the query to run_select_query tool of ClickHouse MCP")
-    ch_query_result = run_select_query(query)
-    result = zip_select_query_result(ch_query_result)
+    if max_rows is not None:
+        query = _with_row_cap(query, max_rows)
+    logger.debug("run_select_query: delegate the query to run_query tool of ClickHouse MCP")
+    with traced_db_query(query_label):
+        ch_query_result = json.loads(run_query(query))
+        result = zip_select_query_result(ch_query_result)
     return result
+
+
+def _with_row_cap(query: str, max_rows: int) -> str:
+    """Wrap a SELECT so ClickHouse returns at most max_rows + 1 rows.
+
+    A LIMIT on an outer query works for any SELECT (CTEs, UNIONs, queries that already have their own
+    LIMIT) and lets the engine stop early. Query-level settings such as max_result_rows can't be used
+    here: mcp-clickhouse runs queries with readonly=1, which forbids changing settings.
+    """
+    inner = query.strip().rstrip(";").strip()
+    return f"SELECT * FROM ({inner}) LIMIT {int(max_rows) + 1}"
 
 
 def zip_select_query_result(ch_query_result) -> list[dict]:
@@ -547,7 +659,7 @@ def list_guides() -> list[dict]:
         },
         {
             "uri": "cbioportal://common-pitfalls",
-            "description": "Guide to avoid common mistakes when querying cBioPortal data"
+            "description": "Guide to avoid common mistakes when querying cBioPortal data. If you already know which numbered pitfall applies, fetch just that section via read_guide(\"cbioportal://common-pitfalls#<number>\") (e.g. #16) instead of the full guide"
         },
         {
             "uri": "cbioportal://treatment-guide",
@@ -591,8 +703,16 @@ def read_guide(uri: str) -> str:
     Use this after calling list_guides() to read the detailed content of guides.
 
     Args:
-        uri: The guide URI (e.g., "cbioportal://mutation-frequency-guide")
+        uri: The guide URI (e.g., "cbioportal://mutation-frequency-guide"). For
+            cbioportal://common-pitfalls, append "#<number>" (e.g.
+            "cbioportal://common-pitfalls#16") to fetch a single pitfall
+            instead of the full guide, when you already know which one applies.
     """
+    if uri.startswith("cbioportal://common-pitfalls#"):
+        number = uri.split("#", 1)[1]
+        fragment = _common_pitfall_fragment(number)
+        return fragment if fragment is not None else _unknown_pitfall_message(number)
+
     # Resource content mapping
     resources = {
         "cbioportal://mutation-frequency-guide": _mutation_frequency_guide_text(),
@@ -662,7 +782,7 @@ def _similar_study_identifiers(study_id: str, limit: int = 10) -> list[dict]:
             FROM cancer_study
             WHERE {clauses}
             LIMIT {int(limit)}
-        """) or []
+        """, query_label="similar_study_identifiers") or []
     except Exception as e:
         logger.error(f"Error looking up studies similar to {study_id}: {e}")
         return []
@@ -757,7 +877,7 @@ def get_study_guide(study_id: str) -> str:
                 type_of_cancer_id
             FROM cancer_study
             WHERE lower(cancer_study_identifier) = lower('{study_id}')
-        """)
+        """, query_label="study_guide.study_info")
 
         if not study_info:
             return _study_not_in_deployment_message(study_id)
@@ -772,15 +892,95 @@ def get_study_guide(study_id: str) -> str:
 **Cancer Type:** {info.get('type_of_cancer_id', 'N/A')}
 **Description:** {info.get('description', 'N/A')}
 """)
-        
-        # 2. Patient and sample counts
-        counts = run_select_query(f"""
-            SELECT 
-                COUNT(DISTINCT patient_unique_id) as patient_count,
-                COUNT(DISTINCT sample_unique_id) as sample_count
-            FROM clinical_data_derived 
-            WHERE cancer_study_identifier = '{study_id}'
-        """)
+
+        # Sections 2-7 below only depend on study_id, not on each other or on
+        # section order, so they're fired concurrently here instead of one
+        # ClickHouse round trip at a time -- each pays the same fixed
+        # per-call connection overhead (see run_select_query), so six
+        # sequential calls cost roughly six times that overhead in wall
+        # clock, while six concurrent ones cost roughly one. Results are
+        # still consumed in the original section order below, so the guide's
+        # output is unchanged regardless of which query finishes first.
+        with ThreadPoolExecutor(max_workers=6) as executor:
+            counts_future = executor.submit(
+                run_select_query,
+                f"""
+                    SELECT
+                        COUNT(DISTINCT patient_unique_id) as patient_count,
+                        COUNT(DISTINCT sample_unique_id) as sample_count
+                    FROM clinical_data_derived
+                    WHERE cancer_study_identifier = '{study_id}'
+                """,
+                query_label="study_guide.counts",
+            )
+            profiles_future = executor.submit(
+                run_select_query,
+                f"""
+                    SELECT DISTINCT
+                        gp.genetic_alteration_type,
+                        gp.datatype,
+                        gp.name
+                    FROM genetic_profile gp
+                    JOIN cancer_study cs ON gp.cancer_study_id = cs.cancer_study_id
+                    WHERE cs.cancer_study_identifier = '{study_id}'
+                """,
+                query_label="study_guide.profiles",
+            )
+            panels_future = executor.submit(
+                run_select_query,
+                f"""
+                    SELECT DISTINCT gene_panel_id, COUNT(DISTINCT sample_unique_id) as sample_count
+                    FROM sample_to_gene_panel_derived
+                    WHERE cancer_study_identifier = '{study_id}'
+                    GROUP BY gene_panel_id
+                    ORDER BY sample_count DESC
+                    LIMIT 10
+                """,
+                query_label="study_guide.panels",
+            )
+            attrs_future = executor.submit(
+                run_select_query,
+                f"""
+                    SELECT DISTINCT attribute_name, COUNT(DISTINCT sample_unique_id) as coverage
+                    FROM clinical_data_derived
+                    WHERE cancer_study_identifier = '{study_id}'
+                    GROUP BY attribute_name
+                    ORDER BY coverage DESC
+                    LIMIT 20
+                """,
+                query_label="study_guide.attrs",
+            )
+            top_genes_future = executor.submit(
+                run_select_query,
+                f"""
+                    SELECT
+                        hugo_gene_symbol,
+                        COUNT(DISTINCT sample_unique_id) as altered_samples
+                    FROM genomic_event_derived
+                    WHERE cancer_study_identifier = '{study_id}'
+                        AND variant_type = 'mutation'
+                        AND mutation_status != 'UNCALLED'
+                    GROUP BY hugo_gene_symbol
+                    ORDER BY altered_samples DESC
+                    LIMIT 10
+                """,
+                query_label="study_guide.top_genes",
+            )
+            sample_types_future = executor.submit(
+                run_select_query,
+                f"""
+                    SELECT attribute_value as sample_type, COUNT(DISTINCT sample_unique_id) as count
+                    FROM clinical_data_derived
+                    WHERE cancer_study_identifier = '{study_id}'
+                        AND attribute_name = 'SAMPLE_TYPE'
+                    GROUP BY attribute_value
+                    ORDER BY count DESC
+                """,
+                query_label="study_guide.sample_types",
+            )
+
+            # 2. Patient and sample counts
+            counts = counts_future.result()
         if counts:
             c = counts[0]
             guide_sections.append(f"""## Cohort Statistics
@@ -789,15 +989,7 @@ def get_study_guide(study_id: str) -> str:
 """)
         
         # 3. Available data types
-        profiles = run_select_query(f"""
-            SELECT DISTINCT 
-                gp.genetic_alteration_type,
-                gp.datatype,
-                gp.name
-            FROM genetic_profile gp
-            JOIN cancer_study cs ON gp.cancer_study_id = cs.cancer_study_id
-            WHERE cs.cancer_study_identifier = '{study_id}'
-        """)
+        profiles = profiles_future.result()
         if profiles:
             guide_sections.append("## Available Data Types\n")
             for p in profiles:
@@ -805,14 +997,7 @@ def get_study_guide(study_id: str) -> str:
             guide_sections.append("")
         
         # 4. Gene panels used
-        panels = run_select_query(f"""
-            SELECT DISTINCT gene_panel_id, COUNT(DISTINCT sample_unique_id) as sample_count
-            FROM sample_to_gene_panel_derived
-            WHERE cancer_study_identifier = '{study_id}'
-            GROUP BY gene_panel_id
-            ORDER BY sample_count DESC
-            LIMIT 10
-        """)
+        panels = panels_future.result()
         if panels:
             guide_sections.append("## Gene Panels\n")
             for p in panels:
@@ -825,14 +1010,7 @@ def get_study_guide(study_id: str) -> str:
             guide_sections.append("")
         
         # 5. Clinical attributes available
-        attrs = run_select_query(f"""
-            SELECT DISTINCT attribute_name, COUNT(DISTINCT sample_unique_id) as coverage
-            FROM clinical_data_derived
-            WHERE cancer_study_identifier = '{study_id}'
-            GROUP BY attribute_name
-            ORDER BY coverage DESC
-            LIMIT 20
-        """)
+        attrs = attrs_future.result()
         if attrs:
             guide_sections.append("## Available Clinical Attributes\n")
             guide_sections.append("| Attribute | Samples with Data |")
@@ -842,18 +1020,7 @@ def get_study_guide(study_id: str) -> str:
             guide_sections.append("")
         
         # 6. Top mutated genes (if mutation data exists)
-        top_genes = run_select_query(f"""
-            SELECT 
-                hugo_gene_symbol,
-                COUNT(DISTINCT sample_unique_id) as altered_samples
-            FROM genomic_event_derived
-            WHERE cancer_study_identifier = '{study_id}'
-                AND variant_type = 'mutation'
-                AND mutation_status != 'UNCALLED'
-            GROUP BY hugo_gene_symbol
-            ORDER BY altered_samples DESC
-            LIMIT 10
-        """)
+        top_genes = top_genes_future.result()
         if top_genes:
             guide_sections.append("## Top Mutated Genes\n")
             guide_sections.append("| Gene | Altered Samples |")
@@ -863,14 +1030,7 @@ def get_study_guide(study_id: str) -> str:
             guide_sections.append("")
         
         # 7. Sample type distribution
-        sample_types = run_select_query(f"""
-            SELECT attribute_value as sample_type, COUNT(DISTINCT sample_unique_id) as count
-            FROM clinical_data_derived
-            WHERE cancer_study_identifier = '{study_id}'
-                AND attribute_name = 'SAMPLE_TYPE'
-            GROUP BY attribute_value
-            ORDER BY count DESC
-        """)
+        sample_types = sample_types_future.result()
         if sample_types:
             guide_sections.append("## Sample Types\n")
             for st in sample_types:
@@ -910,9 +1070,143 @@ WHERE cancer_study_identifier = '{study_id}'
 
 # Maximum allowed limit for list queries to prevent expensive unbounded queries
 MAX_LIST_LIMIT = 100
+CBIOPORTAL_STUDY_SUMMARY_URL_TEMPLATE = "https://www.cbioportal.org/study/summary?id={study_id}"
+
+
+def _study_summary_url(study_id: str) -> str:
+    return CBIOPORTAL_STUDY_SUMMARY_URL_TEMPLATE.format(study_id=study_id)
+
+
+# How long a cached study snapshot is served before an on-demand call
+# refetches it. The underlying data only changes via the daily clone job, so
+# this is a fallback staleness bound, not the primary refresh mechanism: see
+# STUDIES_CACHE_REFRESH_INTERVAL_SECONDS below for that.
+STUDIES_CACHE_TTL_SECONDS = 900
+
+# How often the background loop started in main() proactively refetches,
+# well ahead of STUDIES_CACHE_TTL_SECONDS expiry, so a live list_studies()
+# call almost never lands on the request that pays for the ClickHouse round
+# trip -- only the periodic background refresh does. Kept with headroom
+# below the TTL so a slow or delayed refresh cycle doesn't still let the
+# cache go stale before the next one lands.
+STUDIES_CACHE_REFRESH_INTERVAL_SECONDS = 600
+
+_studies_cache_lock = threading.Lock()
+_studies_cache_rows: tuple[tuple[tuple[str, object], ...], ...] | None = None
+_studies_cache_fetched_at: float = 0.0
+
+
+def _clear_studies_cache() -> None:
+    """Reset the cached study snapshot. Test hook; not used at runtime."""
+    global _studies_cache_rows, _studies_cache_fetched_at
+    with _studies_cache_lock:
+        _studies_cache_rows = None
+        _studies_cache_fetched_at = 0.0
+
+
+def _fetch_and_store_studies() -> tuple[tuple[tuple[str, object], ...], ...]:
+    """Query ClickHouse for every study's full detail and store it as the
+    cache snapshot. Caller must hold _studies_cache_lock.
+
+    sample_count is precomputed onto cancer_study by
+    sql/6-add-study-data-type-counts.sql in the daily clone pipeline, so this
+    is a single-table scan with no joins or aggregation.
+    """
+    global _studies_cache_rows, _studies_cache_fetched_at
+    query = """
+                SELECT
+                    cs.cancer_study_identifier,
+                    cs.name,
+                    cs.description,
+                    cs.type_of_cancer_id,
+                    cs.sample_count
+                FROM cancer_study cs
+                ORDER BY cs.sample_count DESC
+            """
+    rows = run_select_query(query, query_label="list_studies.all_studies")
+    _studies_cache_rows = tuple(tuple(row.items()) for row in rows)
+    _studies_cache_fetched_at = time.monotonic()
+    return _studies_cache_rows
+
+
+def _all_studies_query() -> tuple[tuple[tuple[str, object], ...], ...]:
+    """Return every study's full detail, refetched on-demand if the cache is
+    missing or older than STUDIES_CACHE_TTL_SECONDS.
+
+    Mirrors cbioportal's own /api/studies?projection=DETAILED, which caches
+    the entire study list rather than one entry per distinct query shape.
+    list_studies() filters this single snapshot in Python by search/limit/
+    verbose, so every call is a cache hit regardless of the search term used.
+
+    In steady state the background loop in main() keeps this fresh before
+    TTL ever expires (see STUDIES_CACHE_REFRESH_INTERVAL_SECONDS), so this
+    on-demand path is normally only exercised on the very first call after a
+    cold start, or if that background loop has stalled.
+
+    Holds the lock across the refetch (not just the cache read) so concurrent
+    callers past TTL expiry queue behind one refresh instead of each firing
+    their own identical ClickHouse query.
+    """
+    with _studies_cache_lock:
+        now = time.monotonic()
+        if (
+            _studies_cache_rows is not None
+            and (now - _studies_cache_fetched_at) < STUDIES_CACHE_TTL_SECONDS
+        ):
+            return _studies_cache_rows
+
+        return _fetch_and_store_studies()
+
+
+def _refresh_studies_cache_once() -> None:
+    """Run a single proactive background refresh cycle. Best-effort: a
+    failed fetch is logged and left for the next cycle rather than raised,
+    so one bad refresh doesn't take down the background loop.
+    """
+    try:
+        with _studies_cache_lock:
+            _fetch_and_store_studies()
+    except Exception as e:
+        logger.warning(f"Background list_studies cache refresh failed: {e}")
+
+
+def _refresh_studies_cache_forever() -> None:
+    """Background loop: proactively refetch the study cache every
+    STUDIES_CACHE_REFRESH_INTERVAL_SECONDS for the life of the process. Runs
+    on a daemon thread started from main(); see that call site for how this
+    combines with the initial startup warm-up.
+    """
+    while True:
+        time.sleep(STUDIES_CACHE_REFRESH_INTERVAL_SECONDS)
+        _refresh_studies_cache_once()
+
+
+def _filter_studies(search: str | None, limit: int, verbose: bool) -> list[dict]:
+    """Filter, limit, and shape the cached full study list for list_studies()."""
+    rows = [dict(row) for row in _all_studies_query()]
+
+    if search:
+        needle = search.lower()
+        rows = [
+            row
+            for row in rows
+            if needle in row["cancer_study_identifier"].lower()
+            or needle in row["name"].lower()
+            or needle in row["type_of_cancer_id"].lower()
+            or needle in (row["description"] or "").lower()
+        ]
+
+    rows = rows[:limit]
+
+    if not verbose:
+        for row in rows:
+            row.pop("description", None)
+
+    return rows
+
 
 @mcp.tool()
-def list_studies(search: str = None, limit: int = 20) -> list[dict]:
+def list_studies(search: str = None, limit: int = 20, verbose: bool = False) -> list[dict]:
     """List available cBioPortal studies.
 
     Studies with pre-generated guides (in resources/study-guides/) will have has_guide=True.
@@ -920,9 +1214,11 @@ def list_studies(search: str = None, limit: int = 20) -> list[dict]:
     Args:
         search: Optional search term to filter studies by name, identifier, cancer type, or description
         limit: Maximum number of studies to return (default 20, max 100)
+        verbose: Include longer study description text. Defaults to false for faster first-connect discovery.
 
     Returns:
-        List of studies with their identifiers, names, descriptions, sample counts, and guide availability
+        List of studies with identifiers, names, cancer types, sample counts, cBioPortal URLs,
+        and guide availability. Descriptions are included only when verbose=true.
     """
     available_guides = set(_list_available_study_guides())
     
@@ -930,47 +1226,14 @@ def list_studies(search: str = None, limit: int = 20) -> list[dict]:
     safe_limit = max(1, min(int(limit), MAX_LIST_LIMIT))
     
     try:
-        if search:
-            # Sanitize search term to prevent SQL injection
-            safe_search = _sanitize_search_term(search)
-            query = f"""
-                SELECT
-                    cs.cancer_study_identifier,
-                    cs.name,
-                    cs.description,
-                    cs.type_of_cancer_id,
-                    COUNT(DISTINCT cd.sample_unique_id) as sample_count
-                FROM cancer_study cs
-                LEFT JOIN clinical_data_derived cd ON cs.cancer_study_identifier = cd.cancer_study_identifier
-                WHERE cs.cancer_study_identifier ILIKE '%{safe_search}%'
-                    OR cs.name ILIKE '%{safe_search}%'
-                    OR cs.type_of_cancer_id ILIKE '%{safe_search}%'
-                    OR cs.description ILIKE '%{safe_search}%'
-                GROUP BY cs.cancer_study_identifier, cs.name, cs.description, cs.type_of_cancer_id
-                ORDER BY sample_count DESC
-                LIMIT {safe_limit}
-            """
-        else:
-            query = f"""
-                SELECT
-                    cs.cancer_study_identifier,
-                    cs.name,
-                    cs.description,
-                    cs.type_of_cancer_id,
-                    COUNT(DISTINCT cd.sample_unique_id) as sample_count
-                FROM cancer_study cs
-                LEFT JOIN clinical_data_derived cd ON cs.cancer_study_identifier = cd.cancer_study_identifier
-                GROUP BY cs.cancer_study_identifier, cs.name, cs.description, cs.type_of_cancer_id
-                ORDER BY sample_count DESC
-                LIMIT {safe_limit}
-            """
-        
-        results = run_select_query(query)
-        
+        results = _filter_studies(search, safe_limit, bool(verbose))
+
         # Add has_guide field
         for study in results:
             study_id = study.get('cancer_study_identifier', '')
             study['has_guide'] = study_id in available_guides
+            if study_id:
+                study['url'] = _study_summary_url(study_id)
         
         return results
         

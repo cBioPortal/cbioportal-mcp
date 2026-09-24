@@ -132,7 +132,7 @@ When searching for studies on a specific topic, use `list_studies(search=...)` w
 
 ### Study Links
 
-- **View a study:** `https://www.cbioportal.org/study?id={study_id}` (e.g., `https://www.cbioportal.org/study?id=msk_ch_2020`)
+- **View a study:** `https://www.cbioportal.org/study/summary?id={study_id}` (e.g., `https://www.cbioportal.org/study/summary?id=msk_ch_2020`)
 - **Download study data:** `https://datahub.assets.cbioportal.org/{study_id}.tar.gz`
 
 ## Copy Number (GISTIC) Thresholds
@@ -155,6 +155,8 @@ cBioPortal imports some GDC data and presents it in a user-friendly interface fo
 ## API Access
 
 cBioPortal provides a REST API (Swagger-documented), as well as R and MATLAB interfaces for programmatic access. The public API is available at https://www.cbioportal.org/api.
+
+When writing code for regular cBioPortal users, default to the REST API. Do not provide ClickHouse connection code, backend credentials, or direct SQL driver setup unless the user explicitly says they have backend database access. If a workflow is not available through the REST API, explain the limitation and point to cBioPortal UI/download options or DataHub rather than assuming the user can query ClickHouse.
 
 ## Combined and Virtual Studies
 

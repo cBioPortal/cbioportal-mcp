@@ -1,0 +1,16 @@
+# Compares this PR's server against the released image on a fixed set of tool calls.
+# Tests and workflow: https://github.com/cBioPortal/cbioportal-mcp-qa (mcp_tests/calls/mcp.yaml).
+# Label a PR `mcp-behavior-change` when the difference is intended; diffs are then report-only.
+name: MCP regression
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+jobs:
+  mcp-regression:
+    uses: cBioPortal/cbioportal-mcp-qa/.github/workflows/mcp-regression.yml@v1
+    with:
+      server: mcp
+      qa-ref: v1
+    secrets: inherit
