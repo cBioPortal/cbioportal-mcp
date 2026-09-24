@@ -13,11 +13,13 @@ from typing import Any, NamedTuple
 
 import mcp.types as mt
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
+from opentelemetry import context as otel_context
 from opentelemetry import trace
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 from opentelemetry.sdk.resources import SERVICE_NAME, Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry.trace import Status, StatusCode
 
 logger = logging.getLogger(__name__)
 
@@ -677,11 +679,46 @@ class TelemetryMiddleware(Middleware):
         These are MCP methods a client calls during connector setup /
         capability negotiation, right after ``initialize`` and before any tool
         call — see the class docstring for why they need their own hooks.
+
+        Telemetry is best-effort here: a failure while starting, tagging, or
+        ending the span (e.g. a span processor raising in on_start/on_end) is
+        logged and swallowed, so it can never fail the discovery request or
+        replace its result. ``call_next`` runs exactly once on every path, and
+        exceptions it raises propagate unchanged.
         """
-        caller = _resolve_caller_context(context)
-        with self._tracer.start_as_current_span(span_name) as span:
-            _tag_caller_attributes(span, caller)
+        span = None
+        context_token = None
+        try:
+            span = self._tracer.start_span(span_name)
+            context_token = otel_context.attach(trace.set_span_in_context(span))
+            _tag_caller_attributes(span, _resolve_caller_context(context))
+        except Exception as exc:
+            logger.debug("Discovery span setup failed for %s: %s", span_name, exc)
+
+        try:
             return await call_next(context)
+        except Exception as exc:
+            if span is not None:
+                try:
+                    span.set_attribute("error.type", type(exc).__name__)
+                    span.record_exception(exc)
+                    span.set_status(Status(StatusCode.ERROR, str(exc)))
+                except Exception as telemetry_exc:
+                    logger.debug(
+                        "Discovery span error tagging failed for %s: %s", span_name, telemetry_exc
+                    )
+            raise
+        finally:
+            if context_token is not None:
+                try:
+                    otel_context.detach(context_token)
+                except Exception as exc:
+                    logger.debug("Discovery span context detach failed for %s: %s", span_name, exc)
+            if span is not None:
+                try:
+                    span.end()
+                except Exception as exc:
+                    logger.debug("Discovery span end failed for %s: %s", span_name, exc)
 
     async def on_list_tools(
         self,

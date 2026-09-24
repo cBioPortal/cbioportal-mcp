@@ -14,13 +14,19 @@ No live Datadog connection or DD_API_KEY is required.
 from __future__ import annotations
 
 import base64
+import json
 from unittest.mock import patch
+
+import pytest
 
 from fastmcp import FastMCP
 from fastmcp.server.auth import AccessToken
-from opentelemetry.sdk.trace import TracerProvider
+from fastmcp.server.middleware import Middleware
+from opentelemetry.sdk.trace import SpanProcessor, TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from opentelemetry.trace import StatusCode
+from sse_starlette.sse import AppStatus
 from starlette.testclient import TestClient
 
 from cbioportal_mcp.telemetry import TelemetryMiddleware
@@ -29,6 +35,19 @@ from cbioportal_mcp.telemetry import TelemetryMiddleware
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _reset_sse_exit_event():
+    """sse_starlette caches a process-global ``anyio.Event`` bound to the first
+    event loop that streams a response. Each TestClient runs its own loop, so
+    without this reset every test after the first gets an empty SSE body (the
+    stream errors with "bound to a different event loop") while still returning
+    HTTP 200 — hiding the actual JSON-RPC response from assertions."""
+    AppStatus.should_exit_event = None
+    yield
+    AppStatus.should_exit_event = None
+
 
 def _make_app(extra_middleware=None, *, stateless: bool = True):
     """Create a minimal FastMCP app with TelemetryMiddleware and a no-op tool.
@@ -115,11 +134,28 @@ def _mcp_call(
     return tool_resp
 
 
+def _parse_jsonrpc_response(resp) -> dict:
+    """Parse a Streamable HTTP response body (plain JSON or SSE) into the JSON-RPC
+    message. JSON-RPC errors are also delivered with HTTP 200, so callers must
+    inspect the payload rather than the status code alone."""
+    if resp.headers.get("content-type", "").startswith("text/event-stream"):
+        data_lines = [
+            line[len("data:"):].strip()
+            for line in resp.text.splitlines()
+            if line.startswith("data:")
+        ]
+        assert data_lines, f"No SSE data line in response: {resp.text!r}"
+        return json.loads(data_lines[-1])
+    return resp.json()
+
+
 def _mcp_discovery_call(
     client: TestClient,
     method: str,
     headers: dict,
     client_info: dict | None = None,
+    *,
+    expect_success: bool = True,
 ) -> dict:
     """Initialize an MCP session and send one discovery-only request
     (``tools/list`` / ``resources/list`` / ``prompts/list``), *without* ever
@@ -129,6 +165,9 @@ def _mcp_discovery_call(
     right after ``initialize`` — the population the discovery hooks
     (on_list_tools/on_list_resources/on_list_prompts) exist to make visible,
     since it never reaches on_call_tool.
+
+    Returns the parsed JSON-RPC response. With ``expect_success`` (the default)
+    asserts it is a successful ``result`` with no ``error``.
     """
     default_headers = {
         "Content-Type": "application/json",
@@ -170,7 +209,11 @@ def _mcp_discovery_call(
         headers=merged,
     )
     assert list_resp.status_code == 200, f"{method} failed: {list_resp.text}"
-    return list_resp
+    payload = _parse_jsonrpc_response(list_resp)
+    if expect_success:
+        assert "error" not in payload, f"{method} returned a JSON-RPC error: {payload}"
+        assert "result" in payload, f"{method} returned no JSON-RPC result: {payload}"
+    return payload
 
 
 # ---------------------------------------------------------------------------
@@ -223,7 +266,13 @@ def test_usr_id_tag_set_on_llmobs_span_when_header_present():
     assert captured_calls[0]["tool_name"] == "ping"
 
 
-def _run_with_span_capture(call, *, stateless: bool = True):
+def _run_with_span_capture(
+    call,
+    *,
+    stateless: bool = True,
+    extra_processors: tuple[SpanProcessor, ...] = (),
+    extra_middleware: list | None = None,
+):
     """Run ``call`` (taking a TestClient) with a real OTel pipeline wired to an
     in-memory exporter, and return the finished spans it produced.
 
@@ -232,14 +281,19 @@ def _run_with_span_capture(call, *, stateless: bool = True):
     TracerProvider to be set once per process — a second test calling
     ``set_tracer_provider`` would be silently ignored, leaving its exporter dark.
     ``mock.patch`` scopes the override to this call and restores it after.
+
+    ``extra_processors`` are registered before the capturing exporter (e.g. a
+    processor that raises); ``extra_middleware`` runs inside TelemetryMiddleware.
     """
     exporter = InMemorySpanExporter()
     provider = TracerProvider()
+    for processor in extra_processors:
+        provider.add_span_processor(processor)
     provider.add_span_processor(SimpleSpanProcessor(exporter))
     tracer = provider.get_tracer(__name__)
 
     with patch("cbioportal_mcp.telemetry.trace.get_tracer", return_value=tracer):
-        app = _make_app(stateless=stateless)
+        app = _make_app(extra_middleware, stateless=stateless)
         with patch("cbioportal_mcp.telemetry._llmobs_tool_span", return_value=None):
             with TestClient(app) as client:
                 call(client)
@@ -506,3 +560,103 @@ def test_discovery_requests_do_not_start_llmobs_span():
                 _mcp_discovery_call(client, method, headers={})
 
     llmobs_span.assert_not_called()
+
+
+_DISCOVERY_METHODS = ("tools/list", "resources/list", "prompts/list")
+
+
+class _RaisingSpanProcessor(SpanProcessor):
+    """Span processor that fails in on_start and/or on_end, simulating a broken
+    telemetry pipeline."""
+
+    def __init__(self, *, fail_on_start: bool, fail_on_end: bool) -> None:
+        self._fail_on_start = fail_on_start
+        self._fail_on_end = fail_on_end
+
+    def on_start(self, span, parent_context=None) -> None:
+        if self._fail_on_start:
+            raise RuntimeError("telemetry processor unavailable")
+
+    def on_end(self, span) -> None:
+        if self._fail_on_end:
+            raise RuntimeError("telemetry processor unavailable")
+
+
+class _DiscoveryCallCounter(Middleware):
+    """Inner middleware recording each discovery request that reaches the handler."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    async def on_list_tools(self, context, call_next):
+        self.calls.append("tools/list")
+        return await call_next(context)
+
+    async def on_list_resources(self, context, call_next):
+        self.calls.append("resources/list")
+        return await call_next(context)
+
+    async def on_list_prompts(self, context, call_next):
+        self.calls.append("prompts/list")
+        return await call_next(context)
+
+
+class _FailingToolsList(Middleware):
+    """Inner middleware whose tools/list handler raises."""
+
+    async def on_list_tools(self, context, call_next):
+        raise ValueError("downstream tools/list failure")
+
+
+@pytest.mark.parametrize(
+    "fail_on_start, fail_on_end",
+    [(True, False), (False, True), (True, True)],
+    ids=["on_start", "on_end", "on_start_and_on_end"],
+)
+def test_discovery_requests_survive_failing_span_processor(fail_on_start, fail_on_end):
+    """
+    Telemetry is best-effort: a span processor that raises must never fail a
+    discovery request or replace its result, and the downstream handler must
+    run exactly once per request.
+    """
+    counter = _DiscoveryCallCounter()
+    payloads: list[dict] = []
+
+    def run(client):
+        for method in _DISCOVERY_METHODS:
+            payloads.append(_mcp_discovery_call(client, method, headers={}))
+
+    _run_with_span_capture(
+        run,
+        extra_processors=(
+            _RaisingSpanProcessor(fail_on_start=fail_on_start, fail_on_end=fail_on_end),
+        ),
+        extra_middleware=[counter],
+    )
+
+    assert len(payloads) == len(_DISCOVERY_METHODS)
+    assert any(t["name"] == "ping" for t in payloads[0]["result"]["tools"])
+    assert counter.calls == list(_DISCOVERY_METHODS)
+
+
+def test_discovery_handler_exception_still_propagates():
+    """
+    An exception from the downstream handler is not swallowed by the telemetry
+    guarding: the client gets a JSON-RPC error and the span is marked as failed.
+    """
+    payloads: list[dict] = []
+    spans = _run_with_span_capture(
+        lambda client: payloads.append(
+            _mcp_discovery_call(client, "tools/list", headers={}, expect_success=False)
+        ),
+        extra_middleware=[_FailingToolsList()],
+    )
+
+    assert "error" in payloads[0], f"Expected a JSON-RPC error, got {payloads[0]}"
+    assert "result" not in payloads[0]
+
+    discovery_spans = [s for s in spans if s.name == "mcp.discovery/tools_list"]
+    assert discovery_spans, "Expected an mcp.discovery/tools_list span"
+    span = discovery_spans[0]
+    assert span.status.status_code == StatusCode.ERROR
+    assert span.attributes["error.type"] == "ValueError"
