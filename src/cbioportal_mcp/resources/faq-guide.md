@@ -145,6 +145,8 @@ When searching for studies on a specific topic, use `list_studies(search=...)` w
 | +1 | Gain | Low-level gain (few extra copies) |
 | +2 | Amplification (AMP) | High-level amplification |
 
+`genomic_event_derived.cna_alteration` holds only -2 and +2. All five values are in `genetic_alteration_derived` with `profile_type = 'gistic'`.
+
 ## cBioPortal vs. GDC (Genomic Data Commons)
 
 - **cBioPortal** is an exploratory analysis tool for interactive visualization and querying of processed cancer genomics data.

@@ -5,7 +5,7 @@
 --   - Two coverage building-block views (`mutation_panel_gene_coverage`,
 --     `mutation_wes_coverage`).
 --   - Parameterized "frequency by cancer type for cohort Y" recipe.
---   - Parameterized "top-N most-mutated genes in cohort" recipe.
+--   - Parameterized "top-N most-mutated genes" recipes (cohort, single study).
 --
 -- Sibling files in this directory:
 --   sql/5-gene-expression-views.sql — gene_pair_coexpression and any
@@ -498,3 +498,60 @@ LEFT JOIN panel_profiled_per_gene p USING (hugo_gene_symbol)
 ORDER BY altered_samples DESC, hugo_gene_symbol ASC
 LIMIT {top_n:UInt32};
 
+
+-- ============================================================================
+-- top_mutated_genes_in_study — top-N most-mutated genes in one study
+-- ============================================================================
+-- Same recipe as top_mutated_genes_in_cohort, scoped to a single
+-- cancer_study_identifier instead of a preference cohort. Use this for
+-- "top N mutated genes in study X" — top_mutated_genes_in_cohort with
+-- 'pan_cancer_tcga' spans all 32 TCGA studies, not one cancer type.
+--
+-- Parameters:
+--   study  — cancer_study_identifier (e.g. 'brca_tcga_pan_can_atlas_2018')
+--   top_n  — UInt32, max number of genes to return
+--
+-- Usage:
+--   SELECT *
+--   FROM top_mutated_genes_in_study(
+--       study='brca_tcga_pan_can_atlas_2018',
+--       top_n=5
+--   );
+--
+-- Returns the same columns and ordering as top_mutated_genes_in_cohort.
+-- ============================================================================
+
+DROP VIEW IF EXISTS top_mutated_genes_in_study;
+
+CREATE VIEW top_mutated_genes_in_study AS
+WITH wes_profiled_count AS (
+    SELECT COUNT(DISTINCT sample_unique_id) AS n
+    FROM mutation_wes_coverage
+    WHERE cancer_study_identifier = {study:String}
+),
+panel_profiled_per_gene AS (
+    SELECT hugo_gene_symbol, COUNT(DISTINCT sample_unique_id) AS n
+    FROM mutation_panel_gene_coverage
+    WHERE cancer_study_identifier = {study:String}
+    GROUP BY hugo_gene_symbol
+),
+altered_per_gene AS (
+    SELECT hugo_gene_symbol,
+           COUNT(DISTINCT sample_unique_id) AS altered_samples,
+           COUNT(*) AS total_mutation_events
+    FROM genomic_event_derived
+    WHERE cancer_study_identifier = {study:String}
+      AND variant_type = 'mutation'
+      AND mutation_status != 'UNCALLED'
+      AND off_panel = 0
+    GROUP BY hugo_gene_symbol
+)
+SELECT a.hugo_gene_symbol,
+       a.altered_samples,
+       (SELECT n FROM wes_profiled_count) + COALESCE(p.n, 0) AS profiled_samples,
+       ROUND(a.altered_samples * 100.0 / NULLIF((SELECT n FROM wes_profiled_count) + COALESCE(p.n, 0), 0), 1) AS frequency_pct,
+       a.total_mutation_events
+FROM altered_per_gene a
+LEFT JOIN panel_profiled_per_gene p USING (hugo_gene_symbol)
+ORDER BY altered_samples DESC, hugo_gene_symbol ASC
+LIMIT {top_n:UInt32};

@@ -74,7 +74,7 @@ ALTER TABLE genomic_event_derived MODIFY COLUMN off_panel
   COMMENT 'Boolean: 1 = mutation outside gene panel coverage (off-panel), 0 = within panel (on-panel). Filter off_panel = 0 for reliable frequency calculations.';
 
 ALTER TABLE genomic_event_derived MODIFY COLUMN cna_alteration
-  COMMENT 'Copy number alteration: -2 = deep deletion (HOMDEL), -1 = shallow deletion, 0 = diploid, 1 = gain, 2 = amplification (AMP). NULL for non-CNA events.';
+  COMMENT 'Copy number alteration: only 2 = amplification (AMP) and -2 = deep deletion (HOMDEL) are stored. Shallow deletion (-1), diploid (0) and gain (1) are not in this table; query genetic_alteration_derived WHERE profile_type = ''gistic'' (alteration_value is a String, e.g. ''-1''). NULL for non-CNA events.';
 
 ALTER TABLE genomic_event_derived MODIFY COLUMN mutation_variant
   COMMENT 'Protein change notation (e.g., p.V600E, p.R175H). Use for specific variant queries. "NA" for non-mutation events.';

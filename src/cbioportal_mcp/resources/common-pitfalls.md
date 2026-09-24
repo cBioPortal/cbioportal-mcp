@@ -431,6 +431,8 @@ WHERE cna_alteration = 2;   -- 2 = Amplification
 WHERE cna_alteration = -2;  -- -2 = Homozygous Deletion
 ```
 
+`genomic_event_derived` stores only 2 and -2. For shallow deletion (-1), gain (1) or diploid (0), query `genetic_alteration_derived WHERE profile_type = 'gistic'` — see the CNA section of `cbioportal://mutation-frequency-guide`. Zero rows for `cna_alteration = -1` does not mean no shallow deletions.
+
 ### 12. 🚨 WRONG COLUMN NAMES
 
 #### ❌ Wrong: Using non-existent column names
