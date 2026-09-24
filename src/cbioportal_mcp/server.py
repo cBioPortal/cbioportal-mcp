@@ -1199,15 +1199,19 @@ def _filter_studies(search: str | None, limit: int, verbose: bool) -> list[dict]
     rows = [dict(row) for row in _all_studies_query()]
 
     if search:
-        needle = search.lower()
-        rows = [
-            row
-            for row in rows
-            if needle in row["cancer_study_identifier"].lower()
-            or needle in row["name"].lower()
-            or needle in row["type_of_cancer_id"].lower()
-            or needle in (row["description"] or "").lower()
-        ]
+        # Every word must appear somewhere ("TARGET neuroblastoma" matches "Pediatric
+        # Neuroblastoma (TARGET, 2018)"); rows containing the whole phrase come first.
+        needle = search.lower().strip()
+        tokens = re.findall(r"[a-z0-9]+", needle)
+
+        def haystack(row: dict) -> str:
+            return " ".join(
+                [row["cancer_study_identifier"], row["name"], row["type_of_cancer_id"], row["description"] or ""]
+            ).lower()
+
+        phrase = [row for row in rows if needle in haystack(row)]
+        words = [row for row in rows if needle not in haystack(row) and all(t in haystack(row) for t in tokens)]
+        rows = phrase + words
 
     rows = rows[:limit]
 
@@ -1225,7 +1229,7 @@ def list_studies(search: str = None, limit: int = 20, verbose: bool = False) -> 
     Studies with pre-generated guides (in resources/study-guides/) will have has_guide=True.
 
     Args:
-        search: Optional search term to filter studies by name, identifier, cancer type, or description
+        search: Optional words to filter studies by; every word must appear in the name, identifier, cancer type, or description (any order). Search one study at a time.
         limit: Maximum number of studies to return (default 20, max 100)
         verbose: Include longer study description text. Defaults to false for faster first-connect discovery.
 
