@@ -25,6 +25,20 @@ def test_system_prompt_labels_general_knowledge_even_after_tool_calls():
     assert "not merely whether a tool was called" in prompt
 
 
+def test_user_facing_code_samples_default_to_public_rest_api():
+    prompt = server._load_resource("system-prompt.md")
+    faq = server._faq_guide_text()
+
+    assert "## User-Facing Code Samples" in prompt
+    assert "default to public cBioPortal interfaces" in prompt
+    assert "https://www.cbioportal.org/api" in prompt
+    assert "Do not write ClickHouse-driver code" in prompt
+    assert "unless the user explicitly says they administer" in prompt
+
+    assert "default to the REST API" in faq
+    assert "Do not provide ClickHouse connection code" in faq
+
+
 def test_system_prompt_calibrates_response_depth_for_researcher_queries():
     prompt = server._load_resource("system-prompt.md")
 
