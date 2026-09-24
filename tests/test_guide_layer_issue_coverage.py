@@ -38,6 +38,15 @@ def test_system_prompt_routes_to_targeted_guides():
     assert "Minerva" in prompt
 
 
+def test_system_prompt_routes_clinical_marker_status_to_attribute_guide():
+    prompt = server._load_resource("system-prompt.md")
+
+    assert "Clinical marker/status questions" in prompt
+    assert "HER2-negative" in prompt
+    assert "Do not infer marker status from molecular subtype" in prompt
+    assert "Query the Requested Attribute, Not a Proxy" in prompt
+
+
 def test_existing_guides_cover_open_issue_patterns():
     clinical = server._clinical_data_guide_text()
     mutation = server._mutation_frequency_guide_text()
@@ -60,6 +69,22 @@ def test_existing_guides_cover_open_issue_patterns():
     assert "FLAWED PREMISE OR NONEXISTENT DATA FIELD" in pitfalls
     assert "OUT-OF-SCOPE DRIFT AFTER USER PUSHBACK" in pitfalls
     assert "MISLEADING OUTPUT PROMISES" in pitfalls
+
+
+def test_common_pitfalls_cover_ambiguous_acc_scope():
+    pitfalls = server._common_pitfalls_guide_text()
+
+    assert "AMBIGUOUS ACC / ADENOID CYSTIC CARCINOMA SCOPES" in pitfalls
+    assert "salivary gland adenoid cystic carcinoma (`ACYC`)" in pitfalls
+    assert "not every cancer abbreviated ACC" in pitfalls
+    assert "do not mix in breast/lung/adrenal ACC rows" in pitfalls
+
+
+def test_search_oncotree_matches_site_plus_histology_terms():
+    results = server.search_oncotree.fn("salivary adenoid cystic carcinoma")
+
+    assert results[0]["code"] == "ACYC"
+    assert results[0]["mainType"] == "Salivary Gland Cancer"
 
 
 def test_common_pitfalls_cover_crc_sidedness_not_colon_vs_rectum():
