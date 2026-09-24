@@ -78,6 +78,12 @@ The checked-in dashboard definition at
 can be imported into Datadog or used as the source for updating the existing
 cBioAgent dashboard.
 
+[cbioportal-navigator](https://github.com/cBioPortal/cbioportal-navigator)
+emits the same `cbioportal_mcp.tool.*` metrics tagged
+`service:cbioportal-navigator`, so the dashboard breaks each widget down by
+`service` to compare the two MCP servers directly. Use the `$service`
+template variable to look at one server alone.
+
 ## Preparing the database
 
 **We strongly recommend pointing the MCP at a *separate* ClickHouse database, not your production cBioPortal database directly.** Two reasons:
