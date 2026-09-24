@@ -17,6 +17,7 @@ from opentelemetry import context as otel_context
 from opentelemetry import trace
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 from opentelemetry.sdk.resources import SERVICE_NAME, Resource
+from opentelemetry.sdk.trace import Span as SdkSpan
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.trace import Status, StatusCode
@@ -478,6 +479,46 @@ def _tag_caller_attributes(span, caller: _CallerContext) -> None:
         span.set_attribute("network.client.ip", client_ip)
 
 
+def _span_from_failed_start(exc: BaseException) -> SdkSpan | None:
+    """Recover the span a failed ``start_span()`` call already created.
+
+    The OTel SDK's ``Tracer.start_span`` constructs the span and then calls
+    ``Span.start()``, which sets the start time and invokes every registered
+    processor's ``on_start`` through ``SynchronousMultiSpanProcessor``, which
+    does not guard them. A processor raising there propagates out of
+    ``start_span``, so the caller never receives the span — yet it is already
+    started, and processors registered earlier have seen it and will wait
+    for an ``on_end`` that never comes. The span is still the ``self`` of the
+    ``Span.start`` frame on the exception's traceback; return it so it can be
+    ended, or None when the failure didn't happen inside ``Span.start``.
+    """
+    tb = exc.__traceback__
+    while tb is not None:
+        frame = tb.tb_frame
+        if frame.f_code is SdkSpan.start.__code__:
+            candidate = frame.f_locals.get("self")
+            if isinstance(candidate, SdkSpan):
+                return candidate
+        tb = tb.tb_next
+    return None
+
+
+def _start_span_isolated(tracer: trace.Tracer, name: str) -> trace.Span:
+    """``tracer.start_span(name)``, tolerating a span processor that raises in
+    ``on_start``: the already-started span is recovered and returned so its
+    lifecycle can still be closed (see ``_span_from_failed_start``). Any other
+    failure is re-raised.
+    """
+    try:
+        return tracer.start_span(name)
+    except Exception as exc:
+        span = _span_from_failed_start(exc)
+        if span is None:
+            raise
+        logger.debug("Span processor on_start failed for %s: %s", name, exc)
+        return span
+
+
 def _llmobs_tool_span(
     tool_name: str,
     arguments: dict,
@@ -683,13 +724,15 @@ class TelemetryMiddleware(Middleware):
         Telemetry is best-effort here: a failure while starting, tagging, or
         ending the span (e.g. a span processor raising in on_start/on_end) is
         logged and swallowed, so it can never fail the discovery request or
-        replace its result. ``call_next`` runs exactly once on every path, and
-        exceptions it raises propagate unchanged.
+        replace its result. A span whose start was interrupted by a raising
+        processor is still recovered and ended (see ``_start_span_isolated``).
+        ``call_next`` runs exactly once on every path, and exceptions it raises
+        propagate unchanged.
         """
         span = None
         context_token = None
         try:
-            span = self._tracer.start_span(span_name)
+            span = _start_span_isolated(self._tracer, span_name)
             context_token = otel_context.attach(trace.set_span_in_context(span))
             _tag_caller_attributes(span, _resolve_caller_context(context))
         except Exception as exc:

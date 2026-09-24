@@ -582,6 +582,16 @@ class _RaisingSpanProcessor(SpanProcessor):
             raise RuntimeError("telemetry processor unavailable")
 
 
+class _TrackingSpanProcessor(SpanProcessor):
+    """Span processor that records every span it sees start."""
+
+    def __init__(self) -> None:
+        self.started: list = []
+
+    def on_start(self, span, parent_context=None) -> None:
+        self.started.append(span)
+
+
 class _DiscoveryCallCounter(Middleware):
     """Inner middleware recording each discovery request that reaches the handler."""
 
@@ -660,3 +670,34 @@ def test_discovery_handler_exception_still_propagates():
     span = discovery_spans[0]
     assert span.status.status_code == StatusCode.ERROR
     assert span.attributes["error.type"] == "ValueError"
+
+
+def test_discovery_span_is_ended_when_later_processor_fails_on_start():
+    """
+    The SDK starts the span and then runs processor on_start hooks in order; a
+    processor raising there means start_span() never returns the span. Every
+    span a processor registered earlier saw start must still be ended, or it
+    stays recording forever (end_time=None).
+    """
+    tracker = _TrackingSpanProcessor()
+    payloads: list[dict] = []
+
+    def run(client):
+        for method in _DISCOVERY_METHODS:
+            payloads.append(_mcp_discovery_call(client, method, headers={}))
+
+    _run_with_span_capture(
+        run,
+        extra_processors=(
+            tracker,
+            _RaisingSpanProcessor(fail_on_start=True, fail_on_end=False),
+        ),
+    )
+
+    assert len(payloads) == len(_DISCOVERY_METHODS)
+    assert sorted(s.name for s in tracker.started) == sorted(
+        f"mcp.discovery/{m.replace('/', '_')}" for m in _DISCOVERY_METHODS
+    )
+    unended = [s.name for s in tracker.started if s.end_time is None]
+    assert not unended, f"Spans left recording after on_start failure: {unended}"
+    assert all(s.attributes.get("mcp.client_kind") == "direct" for s in tracker.started)
