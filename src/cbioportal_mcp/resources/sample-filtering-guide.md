@@ -75,8 +75,9 @@ ORDER BY sample_count DESC;
 | mutation / mutations | `mutation_sample_count` ("Mutations") |
 | copy-number / CNA / amplification / deletion | `cna_sample_count` ("CNA") |
 | structural variant / fusion | `structural_variant_sample_count` |
-| RNA-Seq / mRNA expression | `rna_seq_sample_count` ("RNA-Seq") |
-| microarray expression | `mrna_microarray_sample_count` ("RNA (microarray)") |
+| RNA / mRNA / gene expression (any platform) | `mrna_expression_sample_count` — use this for "which studies have expression data" |
+| specifically the portal's "RNA-Seq" filter | `rna_seq_sample_count` ("RNA-Seq") — counts only the `<study>_rna_seq_v2_mrna` list; 0 for many GDC and iAtlas studies that do have RNA-Seq |
+| specifically the portal's "RNA (microarray)" filter | `mrna_microarray_sample_count` ("RNA (microarray)") — counts only the `<study>_mrna` list |
 | microRNA | `mirna_sample_count` ("miRNA") |
 | protein / RPPA | `rppa_sample_count` ("RPPA") |
 | mass-spectrometry proteomics | `mass_spectrometry_sample_count` ("Protein Mass-Spectrometry") |

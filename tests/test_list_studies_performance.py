@@ -185,6 +185,7 @@ def test_study_count_columns_are_created_by_the_clone_sql():
         "structural_variant_sample_count",
         "rna_seq_sample_count",
         "mrna_microarray_sample_count",
+        "mrna_expression_sample_count",
         "mirna_sample_count",
         "rppa_sample_count",
         "mass_spectrometry_sample_count",

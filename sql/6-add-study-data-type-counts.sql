@@ -24,7 +24,7 @@
 -- ============================================================================
 
 -- Re-runnable: drop count columns left from an earlier run
-ALTER TABLE cancer_study DROP COLUMN IF EXISTS sample_count, DROP COLUMN IF EXISTS mutation_sample_count, DROP COLUMN IF EXISTS cna_sample_count, DROP COLUMN IF EXISTS structural_variant_sample_count, DROP COLUMN IF EXISTS rna_seq_sample_count, DROP COLUMN IF EXISTS mrna_microarray_sample_count, DROP COLUMN IF EXISTS mirna_sample_count, DROP COLUMN IF EXISTS rppa_sample_count, DROP COLUMN IF EXISTS mass_spectrometry_sample_count, DROP COLUMN IF EXISTS treatment_patient_count, DROP COLUMN IF EXISTS resource_sample_counts;
+ALTER TABLE cancer_study DROP COLUMN IF EXISTS sample_count, DROP COLUMN IF EXISTS mutation_sample_count, DROP COLUMN IF EXISTS cna_sample_count, DROP COLUMN IF EXISTS structural_variant_sample_count, DROP COLUMN IF EXISTS rna_seq_sample_count, DROP COLUMN IF EXISTS mrna_microarray_sample_count, DROP COLUMN IF EXISTS mirna_sample_count, DROP COLUMN IF EXISTS rppa_sample_count, DROP COLUMN IF EXISTS mass_spectrometry_sample_count, DROP COLUMN IF EXISTS treatment_patient_count, DROP COLUMN IF EXISTS resource_sample_counts, DROP COLUMN IF EXISTS mrna_expression_sample_count;
 
 DROP TABLE IF EXISTS cancer_study_with_counts;
 CREATE TABLE cancer_study_with_counts AS cancer_study;
@@ -41,7 +41,8 @@ ALTER TABLE cancer_study_with_counts
     ADD COLUMN rppa_sample_count UInt32 COMMENT 'Samples with RPPA protein levels (<study>_rppa) — "RPPA".',
     ADD COLUMN mass_spectrometry_sample_count UInt32 COMMENT 'Samples with mass-spectrometry protein quantification (<study>_protein_quantification) — "Protein Mass-Spectrometry".',
     ADD COLUMN treatment_patient_count UInt32 COMMENT 'PATIENTS (not samples) with treatment clinical events — "Treatment". 0 = no treatment data.',
-    ADD COLUMN resource_sample_counts Map(String, UInt32) COMMENT 'Samples with each linked resource, keyed by display name: imaging and pathology such as ''Slide Microscopy'', ''Computed Tomography'', ''Magnetic Resonance'', ''H&E Slide'', ''MxIF Image''. Query with mapKeys(resource_sample_counts) or resource_sample_counts[''Slide Microscopy''] > 0.';
+    ADD COLUMN resource_sample_counts Map(String, UInt32) COMMENT 'Samples with each linked resource, keyed by display name: imaging and pathology such as ''Slide Microscopy'', ''Computed Tomography'', ''Magnetic Resonance'', ''H&E Slide'', ''MxIF Image''. Query with mapKeys(resource_sample_counts) or resource_sample_counts[''Slide Microscopy''] > 0.',
+    ADD COLUMN mrna_expression_sample_count UInt32 COMMENT 'Samples in any mRNA expression profile (RNA-Seq, microarray, TPM, z-scores; from sample_profile). Use this for "does the study have expression data" — rna_seq_sample_count and mrna_microarray_sample_count only count the <study>_rna_seq_v2_mrna / <study>_mrna lists and are 0 for many GDC, iAtlas and other studies.';
 
 INSERT INTO cancer_study_with_counts
 WITH
@@ -88,6 +89,13 @@ WITH
         INNER JOIN resource_definition AS rd ON rd.resource_id = rp.resource_id
         GROUP BY p.cancer_study_id, rd.display_name
     ),
+    mrna AS (
+        SELECT gp.cancer_study_id AS cancer_study_id, uniqExact(sp.sample_id) AS n
+        FROM genetic_profile AS gp
+        INNER JOIN sample_profile AS sp ON sp.genetic_profile_id = gp.genetic_profile_id
+        WHERE gp.genetic_alteration_type = 'MRNA_EXPRESSION'
+        GROUP BY gp.cancer_study_id
+    ),
     resources AS (
         SELECT cancer_study_id, CAST(mapFromArrays(groupArray(display_name), groupArray(n)), 'Map(String, UInt32)') AS counts
         FROM (
@@ -110,12 +118,14 @@ SELECT
     lists.rppa_sample_count,
     lists.mass_spectrometry_sample_count,
     ifNull(treatment.n, 0),
-    resources.counts
+    resources.counts,
+    ifNull(mrna.n, 0)
 FROM cancer_study AS cs
 LEFT JOIN lists ON lists.cancer_study_id = cs.cancer_study_id
 LEFT JOIN treatment ON treatment.cancer_study_identifier = cs.cancer_study_identifier
 LEFT JOIN sv ON sv.cancer_study_identifier = cs.cancer_study_identifier
 LEFT JOIN resources ON resources.cancer_study_id = cs.cancer_study_id
+LEFT JOIN mrna ON mrna.cancer_study_id = cs.cancer_study_id
 SETTINGS join_use_nulls = 0;
 
 EXCHANGE TABLES cancer_study AND cancer_study_with_counts;
