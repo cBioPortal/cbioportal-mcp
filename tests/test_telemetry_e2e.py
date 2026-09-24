@@ -25,6 +25,7 @@ from fastmcp.server.middleware import Middleware
 from opentelemetry.sdk.trace import SpanProcessor, TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from opentelemetry.sdk.trace.sampling import ALWAYS_ON, Sampler
 from opentelemetry.trace import StatusCode
 from sse_starlette.sse import AppStatus
 from starlette.testclient import TestClient
@@ -272,6 +273,7 @@ def _run_with_span_capture(
     stateless: bool = True,
     extra_processors: tuple[SpanProcessor, ...] = (),
     extra_middleware: list | None = None,
+    sampler: Sampler | None = None,
 ):
     """Run ``call`` (taking a TestClient) with a real OTel pipeline wired to an
     in-memory exporter, and return the finished spans it produced.
@@ -283,10 +285,11 @@ def _run_with_span_capture(
     ``mock.patch`` scopes the override to this call and restores it after.
 
     ``extra_processors`` are registered before the capturing exporter (e.g. a
-    processor that raises); ``extra_middleware`` runs inside TelemetryMiddleware.
+    processor that raises); ``extra_middleware`` runs inside TelemetryMiddleware;
+    ``sampler`` overrides the provider's default sampler.
     """
     exporter = InMemorySpanExporter()
-    provider = TracerProvider()
+    provider = TracerProvider(sampler=sampler) if sampler else TracerProvider()
     for processor in extra_processors:
         provider.add_span_processor(processor)
     provider.add_span_processor(SimpleSpanProcessor(exporter))
@@ -701,3 +704,53 @@ def test_discovery_span_is_ended_when_later_processor_fails_on_start():
     unended = [s.name for s in tracker.started if s.end_time is None]
     assert not unended, f"Spans left recording after on_start failure: {unended}"
     assert all(s.attributes.get("mcp.client_kind") == "direct" for s in tracker.started)
+
+
+class _SamplerStartingUnrelatedSpan(Sampler):
+    """Sampler that, while deciding on a span, starts an *unrelated* span on a
+    separate provider whose processor raises in on_start — so the exception
+    escaping our start_span() carries a Span.start frame for a span the
+    discovery code never created."""
+
+    def __init__(self, unrelated_tracker: _TrackingSpanProcessor) -> None:
+        provider = TracerProvider()
+        provider.add_span_processor(unrelated_tracker)
+        provider.add_span_processor(_RaisingSpanProcessor(fail_on_start=True, fail_on_end=False))
+        self._unrelated_tracer = provider.get_tracer("unrelated")
+
+    def should_sample(self, *args, **kwargs):
+        self._unrelated_tracer.start_span("unrelated-sampler-span")
+        return ALWAYS_ON.should_sample(*args, **kwargs)
+
+    def get_description(self) -> str:
+        return "SamplerStartingUnrelatedSpan"
+
+
+def test_discovery_does_not_adopt_unrelated_span_from_failed_start():
+    """
+    Span recovery must only adopt the span *this* start_span() call created.
+    When the failure comes from an unrelated span started inside the sampler,
+    discovery must not attach, tag, or end that span; the request still
+    succeeds, and no discovery span is emitted since none was created.
+    """
+    unrelated_tracker = _TrackingSpanProcessor()
+    payloads: list[dict] = []
+
+    def run(client):
+        for method in _DISCOVERY_METHODS:
+            payloads.append(_mcp_discovery_call(client, method, headers={}))
+
+    spans = _run_with_span_capture(
+        run, sampler=_SamplerStartingUnrelatedSpan(unrelated_tracker)
+    )
+
+    assert len(payloads) == len(_DISCOVERY_METHODS)
+    assert any(t["name"] == "ping" for t in payloads[0]["result"]["tools"])
+
+    assert len(unrelated_tracker.started) == len(_DISCOVERY_METHODS)
+    for span in unrelated_tracker.started:
+        assert span.name == "unrelated-sampler-span"
+        assert "mcp.client_kind" not in span.attributes, "Unrelated span was tagged"
+        assert span.end_time is None, "Unrelated span was ended by discovery code"
+
+    assert not [s for s in spans if s.name.startswith("mcp.discovery/")]

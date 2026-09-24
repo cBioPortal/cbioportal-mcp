@@ -18,6 +18,7 @@ from opentelemetry import trace
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 from opentelemetry.sdk.resources import SERVICE_NAME, Resource
 from opentelemetry.sdk.trace import Span as SdkSpan
+from opentelemetry.sdk.trace import Tracer as SdkTracer
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.trace import Status, StatusCode
@@ -479,8 +480,9 @@ def _tag_caller_attributes(span, caller: _CallerContext) -> None:
         span.set_attribute("network.client.ip", client_ip)
 
 
-def _span_from_failed_start(exc: BaseException) -> SdkSpan | None:
-    """Recover the span a failed ``start_span()`` call already created.
+def _span_from_failed_start(exc: BaseException, tracer: trace.Tracer) -> SdkSpan | None:
+    """Recover the span that ``tracer.start_span()`` had already created
+    before a span processor raised in ``on_start``.
 
     The OTel SDK's ``Tracer.start_span`` constructs the span and then calls
     ``Span.start()``, which sets the start time and invokes every registered
@@ -488,17 +490,39 @@ def _span_from_failed_start(exc: BaseException) -> SdkSpan | None:
     does not guard them. A processor raising there propagates out of
     ``start_span``, so the caller never receives the span — yet it is already
     started, and processors registered earlier have seen it and will wait
-    for an ``on_end`` that never comes. The span is still the ``self`` of the
-    ``Span.start`` frame on the exception's traceback; return it so it can be
-    ended, or None when the failure didn't happen inside ``Span.start``.
+    for an ``on_end`` that never comes.
+
+    Recovery is anchored to *this* call: the outermost ``Tracer.start_span``
+    frame on the traceback whose ``self`` is ``tracer``, whose local ``span``
+    has been assigned, and whose directly-called next frame is ``Span.start``
+    on that same span object. Anything else — e.g. a sampler that starts some
+    unrelated span which then fails — returns None rather than adopting a span
+    this call never created.
+
+    Depends on OTel SDK internals (the ``Tracer.start_span`` / ``Span.start``
+    code objects and the ``span`` local; verified against
+    opentelemetry-sdk 1.42.1). If those change, the frames stop matching and
+    this returns None, falling back to the caller's best-effort handling.
     """
+    # trace.get_tracer() may return a ProxyTracer that delegates to the real
+    # SDK tracer, which is the ``self`` actually seen on the traceback.
+    owners = {id(tracer), id(getattr(tracer, "_real_tracer", None) or tracer)}
     tb = exc.__traceback__
     while tb is not None:
         frame = tb.tb_frame
-        if frame.f_code is SdkSpan.start.__code__:
-            candidate = frame.f_locals.get("self")
-            if isinstance(candidate, SdkSpan):
-                return candidate
+        if frame.f_code is SdkTracer.start_span.__code__ and id(
+            frame.f_locals.get("self")
+        ) in owners:
+            span = frame.f_locals.get("span")
+            callee = tb.tb_next
+            if (
+                isinstance(span, SdkSpan)
+                and callee is not None
+                and callee.tb_frame.f_code is SdkSpan.start.__code__
+                and callee.tb_frame.f_locals.get("self") is span
+            ):
+                return span
+            return None
         tb = tb.tb_next
     return None
 
@@ -512,7 +536,7 @@ def _start_span_isolated(tracer: trace.Tracer, name: str) -> trace.Span:
     try:
         return tracer.start_span(name)
     except Exception as exc:
-        span = _span_from_failed_start(exc)
+        span = _span_from_failed_start(exc, tracer)
         if span is None:
             raise
         logger.debug("Span processor on_start failed for %s: %s", name, exc)
