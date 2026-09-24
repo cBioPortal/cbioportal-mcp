@@ -361,7 +361,7 @@ GROUP BY sex;
 
 ### Age statistics: check for a floor or cap first
 
-Some studies floor or cap `AGE` for de-identification — e.g. every child recorded as 18, or everyone over 89 as 89. A median or mean over such a column is wrong. Before reporting age statistics, check how many patients sit exactly at the minimum or maximum:
+Some studies floor or cap `AGE` for de-identification — e.g. every child recorded as 18, or everyone 89+ as 89 or 90. A median or mean over such a column is wrong. Before reporting age statistics, check how many patients sit exactly at the minimum or maximum:
 
 ```sql
 SELECT
