@@ -1,17 +1,23 @@
 -- ============================================================================
 -- Mutation-frequency views (coverage building blocks + frequency recipes)
 -- ============================================================================
--- This file is the mutation side of the agent's gene-frequency API:
---   - Two coverage building-block views (`mutation_panel_gene_coverage`,
---     `mutation_wes_coverage`).
+-- This file is the agent's gene-frequency API (mutation, CNA, SV):
+--   - Coverage building-block views: `mutation_panel_gene_coverage`,
+--     `mutation_wes_coverage`, and the CNA / SV counterparts
+--     (`cna_*_coverage`, `sv_*_coverage`).
 --   - Parameterized "frequency by cancer type for cohort Y" recipe.
 --   - Parameterized "top-N most-mutated genes" recipes (cohort, single study).
+--   - Single-study views mirroring the portal's study-view charts/tables:
+--     `gene_mutation_variants_in_study`, `co_altered_genes_in_study`,
+--     `top_cna_genes_in_study`, `gene_cna_distribution_in_study`,
+--     `top_sv_genes_in_study`.
 --
 -- Sibling files in this directory:
 --   sql/5-gene-expression-views.sql — gene_pair_coexpression and any
 --     other expression / copy-number-value / methylation correlation
---     views. Anything backed by `genetic_alteration_derived` lives
---     there, not here.
+--     views. Expression / continuous-value data backed by
+--     `genetic_alteration_derived` lives there; the discrete CNA
+--     distribution (`gene_cna_distribution_in_study`) lives here.
 --
 -- The agent-facing docs are at `cbioportal://mutation-frequency-guide`.
 -- ============================================================================
@@ -551,6 +557,466 @@ SELECT a.hugo_gene_symbol,
        (SELECT n FROM wes_profiled_count) + COALESCE(p.n, 0) AS profiled_samples,
        ROUND(a.altered_samples * 100.0 / NULLIF((SELECT n FROM wes_profiled_count) + COALESCE(p.n, 0), 0), 1) AS frequency_pct,
        a.total_mutation_events
+FROM altered_per_gene a
+LEFT JOIN panel_profiled_per_gene p USING (hugo_gene_symbol)
+ORDER BY altered_samples DESC, hugo_gene_symbol ASC
+LIMIT {top_n:UInt32};
+
+
+-- ============================================================================
+-- gene_mutation_variants_in_study — protein changes of one gene in one study
+-- ============================================================================
+-- The per-variant breakdown behind the portal's Mutations tab / lollipop:
+-- for each protein change of `gene`, how many samples carry it and what
+-- fraction of the samples profiled for the gene that is. Use for "most
+-- common KRAS mutation in LUAD", "how often is IDH1 R132H", etc.
+--
+-- Parameters:
+--   study  — cancer_study_identifier
+--   gene   — HUGO gene symbol
+--
+-- Usage:
+--   SELECT *
+--   FROM gene_mutation_variants_in_study(
+--       study='luad_tcga_pan_can_atlas_2018',
+--       gene='KRAS'
+--   );
+--
+-- Returns one row per (mutation_variant, mutation_type):
+-- (mutation_variant, mutation_type, altered_samples, profiled_samples,
+-- frequency_pct, total_mutation_events). profiled_samples is the same on
+-- every row: samples profiled for mutations in the gene (panel + WES).
+-- Sorted by altered_samples DESC, then mutation_variant ASC.
+-- ============================================================================
+
+DROP VIEW IF EXISTS gene_mutation_variants_in_study;
+
+CREATE VIEW gene_mutation_variants_in_study AS
+WITH profiled_count AS (
+    SELECT COUNT(DISTINCT sample_unique_id) AS n
+    FROM (
+        SELECT sample_unique_id
+        FROM mutation_panel_gene_coverage
+        WHERE cancer_study_identifier = {study:String}
+          AND hugo_gene_symbol = {gene:String}
+        UNION ALL
+        SELECT sample_unique_id
+        FROM mutation_wes_coverage
+        WHERE cancer_study_identifier = {study:String}
+    )
+),
+altered_per_variant AS (
+    SELECT mutation_variant,
+           mutation_type,
+           COUNT(DISTINCT sample_unique_id) AS altered_samples,
+           COUNT(*) AS total_mutation_events
+    FROM genomic_event_derived
+    WHERE cancer_study_identifier = {study:String}
+      AND hugo_gene_symbol = {gene:String}
+      AND variant_type = 'mutation'
+      AND mutation_status != 'UNCALLED'
+      AND off_panel = 0
+    GROUP BY mutation_variant, mutation_type
+)
+SELECT a.mutation_variant,
+       a.mutation_type,
+       a.altered_samples,
+       (SELECT n FROM profiled_count) AS profiled_samples,
+       ROUND(a.altered_samples * 100.0 / NULLIF((SELECT n FROM profiled_count), 0), 1) AS frequency_pct,
+       a.total_mutation_events
+FROM altered_per_variant a
+ORDER BY altered_samples DESC, mutation_variant ASC;
+
+-- ============================================================================
+-- co_altered_genes_in_study — genes enriched in X-mutant vs X-wild-type
+-- ============================================================================
+-- "What else is mutated in KRAS-mutant tumors?" Frequencies inside the
+-- mutant group alone are dominated by large passenger genes (TTN, MUC16)
+-- that are just as common in wild-type samples, so this view reports each
+-- other gene's mutation frequency in both groups and ranks by the
+-- difference.
+--
+-- Groups (both restricted to samples profiled for mutations in `gene`):
+--   mutant    — at least one on-panel, non-UNCALLED mutation in `gene`
+--   wild-type — profiled for `gene` and no such mutation in it
+-- Each other gene's denominator per group is the group's samples that are
+-- profiled for that gene (WES samples + samples on a panel listing it).
+-- Genes mutated in fewer than 10 samples across both groups are dropped
+-- (percentages on a handful of samples are noise).
+--
+-- Parameters:
+--   study  — cancer_study_identifier
+--   gene   — HUGO gene symbol defining the groups
+--   top_n  — UInt32, max number of genes to return
+--
+-- Usage:
+--   SELECT *
+--   FROM co_altered_genes_in_study(
+--       study='luad_tcga_pan_can_atlas_2018',
+--       gene='KRAS',
+--       top_n=20
+--   );
+--
+-- Returns one row per other gene: (hugo_gene_symbol, mutant_altered,
+-- mutant_profiled, mutant_pct, wildtype_altered, wildtype_profiled,
+-- wildtype_pct, pct_difference = mutant_pct - wildtype_pct). Sorted by
+-- abs(pct_difference) DESC. No p-values: significance needs Fisher's
+-- exact test (cBioPortal Comparison / Mutual Exclusivity tab).
+-- ============================================================================
+
+DROP VIEW IF EXISTS co_altered_genes_in_study;
+
+CREATE VIEW co_altered_genes_in_study AS
+WITH wes_samples AS (
+    SELECT DISTINCT sample_unique_id
+    FROM mutation_wes_coverage
+    WHERE cancer_study_identifier = {study:String}
+),
+panel_samples_per_gene AS (
+    SELECT DISTINCT sample_unique_id, hugo_gene_symbol
+    FROM mutation_panel_gene_coverage
+    WHERE cancer_study_identifier = {study:String}
+),
+profiled_for_gene AS (
+    SELECT sample_unique_id FROM wes_samples
+    UNION DISTINCT
+    SELECT sample_unique_id FROM panel_samples_per_gene
+    WHERE hugo_gene_symbol = {gene:String}
+),
+mutated AS (
+    SELECT DISTINCT sample_unique_id, hugo_gene_symbol
+    FROM genomic_event_derived
+    WHERE cancer_study_identifier = {study:String}
+      AND variant_type = 'mutation'
+      AND mutation_status != 'UNCALLED'
+      AND off_panel = 0
+),
+sample_groups AS (
+    SELECT sample_unique_id,
+           sample_unique_id IN (
+               SELECT sample_unique_id FROM mutated WHERE hugo_gene_symbol = {gene:String}
+           ) AS is_mutant
+    FROM profiled_for_gene
+),
+wes_group_sizes AS (
+    SELECT countIf(is_mutant) AS mutant_n, countIf(NOT is_mutant) AS wildtype_n
+    FROM sample_groups
+    WHERE sample_unique_id IN (SELECT sample_unique_id FROM wes_samples)
+),
+panel_group_sizes AS (
+    SELECT p.hugo_gene_symbol,
+           countIf(g.is_mutant) AS mutant_n,
+           countIf(NOT g.is_mutant) AS wildtype_n
+    FROM panel_samples_per_gene p
+    JOIN sample_groups g USING (sample_unique_id)
+    GROUP BY p.hugo_gene_symbol
+),
+altered_per_gene AS (
+    SELECT m.hugo_gene_symbol,
+           countIf(g.is_mutant) AS mutant_altered,
+           countIf(NOT g.is_mutant) AS wildtype_altered
+    FROM mutated m
+    JOIN sample_groups g USING (sample_unique_id)
+    WHERE m.hugo_gene_symbol != {gene:String}
+    GROUP BY m.hugo_gene_symbol
+),
+per_gene AS (
+    SELECT a.hugo_gene_symbol,
+           a.mutant_altered,
+           (SELECT mutant_n FROM wes_group_sizes) + COALESCE(p.mutant_n, 0) AS mutant_profiled,
+           a.wildtype_altered,
+           (SELECT wildtype_n FROM wes_group_sizes) + COALESCE(p.wildtype_n, 0) AS wildtype_profiled
+    FROM altered_per_gene a
+    LEFT JOIN panel_group_sizes p USING (hugo_gene_symbol)
+    WHERE a.mutant_altered + a.wildtype_altered >= 10
+)
+SELECT hugo_gene_symbol,
+       mutant_altered,
+       mutant_profiled,
+       ROUND(mutant_altered * 100.0 / NULLIF(mutant_profiled, 0), 1) AS mutant_pct,
+       wildtype_altered,
+       wildtype_profiled,
+       ROUND(wildtype_altered * 100.0 / NULLIF(wildtype_profiled, 0), 1) AS wildtype_pct,
+       ROUND(mutant_pct - wildtype_pct, 1) AS pct_difference
+FROM per_gene
+ORDER BY abs(pct_difference) DESC, hugo_gene_symbol ASC
+LIMIT {top_n:UInt32};
+
+-- ============================================================================
+-- cna_panel_gene_coverage + cna_wes_coverage
+-- ============================================================================
+-- Copy-number counterparts of mutation_panel_gene_coverage /
+-- mutation_wes_coverage: "is this sample profiled for discrete CNA in gene
+-- G?". Only DISCRETE profiles (GISTIC / `_cna`) count — the continuous
+-- log2 profiles share alteration_type 'COPY_NUMBER_ALTERATION' but are
+-- not what AMP / HOMDEL calls come from, and several studies have log2
+-- data for samples without discrete calls. Non-panel (genome-wide) CNA
+-- profiles carry gene_panel_id = 'WES', like whole-exome mutation data.
+-- ============================================================================
+
+DROP VIEW IF EXISTS cna_panel_gene_coverage;
+
+CREATE VIEW cna_panel_gene_coverage AS
+SELECT
+    stgp.sample_unique_id,
+    stgp.cancer_study_identifier,
+    g.hugo_gene_symbol,
+    stgp.gene_panel_id
+FROM sample_to_gene_panel_derived stgp
+JOIN genetic_profile gprof ON stgp.genetic_profile_id = gprof.stable_id
+JOIN gene_panel gp ON stgp.gene_panel_id = gp.stable_id
+JOIN gene_panel_list gpl ON gp.internal_id = gpl.internal_id
+JOIN gene g ON gpl.gene_id = g.entrez_gene_id
+WHERE stgp.alteration_type = 'COPY_NUMBER_ALTERATION'
+  AND gprof.datatype = 'DISCRETE';
+
+DROP VIEW IF EXISTS cna_wes_coverage;
+
+CREATE VIEW cna_wes_coverage AS
+SELECT
+    stgp.sample_unique_id,
+    stgp.cancer_study_identifier
+FROM sample_to_gene_panel_derived stgp
+JOIN genetic_profile gprof ON stgp.genetic_profile_id = gprof.stable_id
+WHERE stgp.alteration_type = 'COPY_NUMBER_ALTERATION'
+  AND gprof.datatype = 'DISCRETE'
+  AND stgp.gene_panel_id = 'WES';
+
+-- ============================================================================
+-- top_cna_genes_in_study — the study view's "CNA Genes" table
+-- ============================================================================
+-- Genes ranked by samples with a high-level amplification (AMP, +2) or
+-- homozygous deletion (HOMDEL, -2). One row per (gene, CNA type), like the
+-- portal table (gene, cytoband, CNA, # samples, freq). Shallow gains /
+-- losses (+1 / -1) are not in genomic_event_derived; for those use
+-- gene_cna_distribution_in_study.
+--
+-- Parameters:
+--   study  — cancer_study_identifier
+--   top_n  — UInt32, max number of rows to return
+--
+-- Usage:
+--   SELECT *
+--   FROM top_cna_genes_in_study(
+--       study='gbm_tcga_pan_can_atlas_2018',
+--       top_n=20
+--   );
+--
+-- Returns (hugo_gene_symbol, cytoband, cna_type ('AMP' | 'HOMDEL'),
+-- altered_samples, profiled_samples, frequency_pct). profiled_samples =
+-- samples profiled for discrete CNA in that gene (cna_wes_coverage +
+-- cna_panel_gene_coverage). Sorted by altered_samples DESC, then gene.
+-- ============================================================================
+
+DROP VIEW IF EXISTS top_cna_genes_in_study;
+
+CREATE VIEW top_cna_genes_in_study AS
+WITH wes_profiled_count AS (
+    SELECT COUNT(DISTINCT sample_unique_id) AS n
+    FROM cna_wes_coverage
+    WHERE cancer_study_identifier = {study:String}
+),
+panel_profiled_per_gene AS (
+    SELECT hugo_gene_symbol, COUNT(DISTINCT sample_unique_id) AS n
+    FROM cna_panel_gene_coverage
+    WHERE cancer_study_identifier = {study:String}
+    GROUP BY hugo_gene_symbol
+),
+altered_per_gene AS (
+    SELECT hugo_gene_symbol,
+           cna_alteration,
+           any(cna_cytoband) AS cytoband,
+           COUNT(DISTINCT sample_unique_id) AS altered_samples
+    FROM genomic_event_derived
+    WHERE cancer_study_identifier = {study:String}
+      AND variant_type = 'cna'
+      AND cna_alteration IN (2, -2)
+      AND off_panel = 0
+    GROUP BY hugo_gene_symbol, cna_alteration
+)
+SELECT a.hugo_gene_symbol,
+       a.cytoband,
+       if(a.cna_alteration = 2, 'AMP', 'HOMDEL') AS cna_type,
+       a.altered_samples,
+       (SELECT n FROM wes_profiled_count) + COALESCE(p.n, 0) AS profiled_samples,
+       ROUND(a.altered_samples * 100.0 / NULLIF((SELECT n FROM wes_profiled_count) + COALESCE(p.n, 0), 0), 1) AS frequency_pct
+FROM altered_per_gene a
+LEFT JOIN panel_profiled_per_gene p USING (hugo_gene_symbol)
+ORDER BY altered_samples DESC, hugo_gene_symbol ASC
+LIMIT {top_n:UInt32};
+
+-- ============================================================================
+-- gene_cna_distribution_in_study — all discrete CNA levels for one gene
+-- ============================================================================
+-- Mirrors the portal's per-gene CNA chart (getCNACounts): sample counts
+-- for every discrete copy-number value, including shallow gains / losses
+-- and diploid, which genomic_event_derived does not store. Reads the
+-- study's DISCRETE COPY_NUMBER_ALTERATION profile(s) from
+-- genetic_alteration_derived (profile_type 'gistic' or 'cna').
+--
+-- The NA row is computed like the portal: all samples in the study minus
+-- samples with a value for the gene.
+--
+-- Parameters:
+--   study  — cancer_study_identifier
+--   gene   — HUGO gene symbol
+--
+-- Usage:
+--   SELECT *
+--   FROM gene_cna_distribution_in_study(
+--       study='gbm_tcga_pan_can_atlas_2018',
+--       gene='CDKN2A'
+--   );
+--
+-- Returns (profile_type, cna_value, cna_label, samples, profiled_samples,
+-- pct_of_profiled). cna_label is Amplified (2) / Gained (1) / Diploid (0)
+-- / Heterozygously deleted (-1) / Homozygously deleted (-2) / NA.
+-- profiled_samples = samples with a value; pct_of_profiled is NULL on the
+-- NA row. Studies with two discrete profiles return one block per profile.
+-- ============================================================================
+
+DROP VIEW IF EXISTS gene_cna_distribution_in_study;
+
+CREATE VIEW gene_cna_distribution_in_study AS
+WITH discrete_profiles AS (
+    SELECT substring(gprof.stable_id, length({study:String}) + 2) AS profile_type
+    FROM genetic_profile gprof
+    JOIN cancer_study cs ON gprof.cancer_study_id = cs.cancer_study_id
+    WHERE cs.cancer_study_identifier = {study:String}
+      AND gprof.genetic_alteration_type = 'COPY_NUMBER_ALTERATION'
+      AND gprof.datatype = 'DISCRETE'
+),
+value_counts AS (
+    SELECT profile_type,
+           alteration_value AS cna_value,
+           toInt64(count()) AS samples
+    FROM genetic_alteration_derived
+    WHERE cancer_study_identifier = {study:String}
+      AND hugo_gene_symbol = {gene:String}
+      AND profile_type IN (SELECT profile_type FROM discrete_profiles)
+      AND alteration_value NOT IN ('', 'NA')
+    GROUP BY profile_type, alteration_value
+),
+profiled AS (
+    SELECT profile_type, sum(samples) AS profiled_samples
+    FROM value_counts
+    GROUP BY profile_type
+),
+study_sample_count AS (
+    SELECT toInt64(count()) AS n
+    FROM sample_derived
+    WHERE cancer_study_identifier = {study:String}
+),
+all_rows AS (
+    SELECT profile_type, cna_value, samples FROM value_counts
+    UNION ALL
+    SELECT profile_type, 'NA' AS cna_value,
+           (SELECT n FROM study_sample_count) - profiled_samples AS samples
+    FROM profiled
+)
+SELECT r.profile_type,
+       r.cna_value,
+       multiIf(r.cna_value = '2', 'Amplified',
+               r.cna_value = '1', 'Gained',
+               r.cna_value = '0', 'Diploid',
+               r.cna_value = '-1', 'Heterozygously deleted',
+               r.cna_value = '-2', 'Homozygously deleted',
+               r.cna_value = 'NA', 'NA',
+               'Other') AS cna_label,
+       r.samples,
+       p.profiled_samples,
+       if(r.cna_value = 'NA', NULL,
+          ROUND(r.samples * 100.0 / NULLIF(p.profiled_samples, 0), 1)) AS pct_of_profiled
+FROM all_rows r
+JOIN profiled p USING (profile_type)
+ORDER BY r.profile_type, r.cna_value = 'NA', toFloat64OrNull(r.cna_value) DESC;
+
+-- ============================================================================
+-- sv_panel_gene_coverage + sv_wes_coverage
+-- ============================================================================
+-- Structural-variant counterparts of the mutation coverage views: samples
+-- profiled for SVs in gene G via a named panel, or via a non-panel SV
+-- profile (gene_panel_id = 'WES', all genes profiled).
+-- ============================================================================
+
+DROP VIEW IF EXISTS sv_panel_gene_coverage;
+
+CREATE VIEW sv_panel_gene_coverage AS
+SELECT
+    stgp.sample_unique_id,
+    stgp.cancer_study_identifier,
+    g.hugo_gene_symbol,
+    stgp.gene_panel_id
+FROM sample_to_gene_panel_derived stgp
+JOIN gene_panel gp ON stgp.gene_panel_id = gp.stable_id
+JOIN gene_panel_list gpl ON gp.internal_id = gpl.internal_id
+JOIN gene g ON gpl.gene_id = g.entrez_gene_id
+WHERE stgp.alteration_type = 'STRUCTURAL_VARIANT';
+
+DROP VIEW IF EXISTS sv_wes_coverage;
+
+CREATE VIEW sv_wes_coverage AS
+SELECT
+    sample_unique_id,
+    cancer_study_identifier
+FROM sample_to_gene_panel_derived
+WHERE alteration_type = 'STRUCTURAL_VARIANT'
+  AND gene_panel_id = 'WES';
+
+-- ============================================================================
+-- top_sv_genes_in_study — the study view's "Structural Variant Genes" table
+-- ============================================================================
+-- Genes ranked by samples with a structural variant / fusion involving
+-- them. genomic_event_derived stores one row per partner gene, so a
+-- TMPRSS2-ERG fusion counts for both TMPRSS2 and ERG (same as the portal).
+--
+-- Parameters:
+--   study  — cancer_study_identifier
+--   top_n  — UInt32, max number of genes to return
+--
+-- Usage:
+--   SELECT *
+--   FROM top_sv_genes_in_study(
+--       study='prad_tcga_pan_can_atlas_2018',
+--       top_n=20
+--   );
+--
+-- Returns (hugo_gene_symbol, altered_samples, profiled_samples,
+-- frequency_pct, total_sv_events). profiled_samples = samples profiled
+-- for SVs in that gene (sv_wes_coverage + sv_panel_gene_coverage).
+-- Sorted by altered_samples DESC, then gene.
+-- ============================================================================
+
+DROP VIEW IF EXISTS top_sv_genes_in_study;
+
+CREATE VIEW top_sv_genes_in_study AS
+WITH wes_profiled_count AS (
+    SELECT COUNT(DISTINCT sample_unique_id) AS n
+    FROM sv_wes_coverage
+    WHERE cancer_study_identifier = {study:String}
+),
+panel_profiled_per_gene AS (
+    SELECT hugo_gene_symbol, COUNT(DISTINCT sample_unique_id) AS n
+    FROM sv_panel_gene_coverage
+    WHERE cancer_study_identifier = {study:String}
+    GROUP BY hugo_gene_symbol
+),
+altered_per_gene AS (
+    SELECT hugo_gene_symbol,
+           COUNT(DISTINCT sample_unique_id) AS altered_samples,
+           COUNT(*) AS total_sv_events
+    FROM genomic_event_derived
+    WHERE cancer_study_identifier = {study:String}
+      AND variant_type = 'structural_variant'
+      AND mutation_status != 'UNCALLED'
+      AND off_panel = 0
+    GROUP BY hugo_gene_symbol
+)
+SELECT a.hugo_gene_symbol,
+       a.altered_samples,
+       (SELECT n FROM wes_profiled_count) + COALESCE(p.n, 0) AS profiled_samples,
+       ROUND(a.altered_samples * 100.0 / NULLIF((SELECT n FROM wes_profiled_count) + COALESCE(p.n, 0), 0), 1) AS frequency_pct,
+       a.total_sv_events
 FROM altered_per_gene a
 LEFT JOIN panel_profiled_per_gene p USING (hugo_gene_symbol)
 ORDER BY altered_samples DESC, hugo_gene_symbol ASC
