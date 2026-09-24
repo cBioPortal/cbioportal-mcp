@@ -5,7 +5,7 @@ def test_all_numbered_pitfalls_are_parsed():
     sections = server._common_pitfall_sections()
 
     for number in ["1", "2", "3", "4", "5", "5b", "5c", "6", "7", "8", "9", "10",
-                    "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21"]:
+                    "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22"]:
         assert number in sections, f"pitfall #{number} missing from parsed sections"
 
 

@@ -112,6 +112,8 @@ WHERE variant_type = 'mutation' AND mutation_status != 'UNCALLED';
 ```
 **Key**: Include ALL statuses ('SOMATIC', 'UNKNOWN', etc.) except 'UNCALLED'
 
+**Germline-only**: filter with `upper(mutation_status) = 'GERMLINE'`. Spellings vary by study ('Germline', 'GERMLINE'); `= 'Germline'` drops whole studies (e.g. pog570_bcgsc_2020).
+
 ### 4. 🚨 MISSING STUDY FILTERS
 
 #### ❌ Wrong: Querying across all studies
@@ -246,17 +248,20 @@ WHERE cancer_study_identifier = 'coadread_mskcc_2017'
 -- and look for columns with "driver" in the name
 
 -- Step 2: If driver columns exist, use them to filter
+-- driver_filter holds '' when unannotated, so IS NOT NULL matches every row
 SELECT hugo_gene_symbol, mutation_variant, driver_filter
 FROM genomic_event_derived
-WHERE cancer_study_identifier = 'coadread_mskcc_2017'
+WHERE cancer_study_identifier = 'msk_impact_2017'
     AND hugo_gene_symbol = 'BRAF'
     AND variant_type = 'mutation'
-    AND driver_filter IS NOT NULL;
+    AND driver_filter != '';
 
--- Step 3: If driver columns do NOT exist, inform the user:
+-- Step 3: If driver columns do NOT exist or are empty for the study, inform the user:
 -- "Driver mutation annotations are not available in the current database.
 --  Use the cBioPortal web interface with OQL DRIVER syntax (e.g., BRAF: MUT_DRIVER)"
 ```
+
+If the driver query returns no rows (e.g. `driver_filter` is '' in all 78,142 msk_impact_2017 mutation rows), still return the full per-variant table, labelled "not filtered for OncoKB status", together with the OQL `MUT_DRIVER` link suggestion.
 
 **OQL DRIVER syntax (for reference — used in cBioPortal web UI, not SQL):**
 - `TP53: DRIVER` — all OncoKB-annotated driver alterations (mutations, fusions, CNAs)
@@ -348,6 +353,47 @@ FROM genomic_event_derived g
 JOIN clinical_data_derived c ON g.sample_unique_id = c.sample_unique_id
 WHERE g.cancer_study_identifier = 'your_study_id';
 ```
+
+### 22. 🚨 LEFT JOIN DOES NOT PRODUCE NULLs IN CLICKHOUSE
+
+Unmatched right-side columns get their type's default value (`''` for String, `0` for numbers), not NULL. `WHERE r.col IS NULL` matches nothing and `CASE WHEN r.col IS NOT NULL` is always true, so every row silently lands in one group. `SETTINGS join_use_nulls=1` is rejected (queries run read-only).
+
+#### ❌ Wrong: anti-join / group label via IS NULL
+```sql
+-- KRAS-mutant patients with vs without TP53 (pancan_pcawg_2020)
+SELECT CASE WHEN t.patient_unique_id IS NOT NULL THEN 'TP53 + KRAS' ELSE 'KRAS only' END AS grp, count()
+FROM (SELECT DISTINCT patient_unique_id FROM genomic_event_derived
+      WHERE cancer_study_identifier = 'pancan_pcawg_2020' AND hugo_gene_symbol = 'KRAS'
+        AND variant_type = 'mutation' AND mutation_status != 'UNCALLED') k
+LEFT JOIN (SELECT DISTINCT patient_unique_id FROM genomic_event_derived
+      WHERE cancer_study_identifier = 'pancan_pcawg_2020' AND hugo_gene_symbol = 'TP53'
+        AND variant_type = 'mutation' AND mutation_status != 'UNCALLED') t
+  ON k.patient_unique_id = t.patient_unique_id
+GROUP BY grp;
+-- Returns 'TP53 + KRAS' = 272, no 'KRAS only' row. Wrong.
+```
+
+#### ✅ Correct: test membership with IN / NOT IN (or countIf)
+```sql
+SELECT
+    multiIf(patient_unique_id IN (
+        SELECT patient_unique_id FROM genomic_event_derived
+        WHERE cancer_study_identifier = 'pancan_pcawg_2020' AND hugo_gene_symbol = 'TP53'
+          AND variant_type = 'mutation' AND mutation_status != 'UNCALLED'),
+      'TP53 + KRAS', 'KRAS only') AS grp,
+    count() AS patients,
+    countIf(patient_unique_id IN (
+        SELECT patient_unique_id FROM clinical_data_derived
+        WHERE cancer_study_identifier = 'pancan_pcawg_2020' AND attribute_name = 'OS_MONTHS'
+          AND toFloat64OrNull(attribute_value) IS NOT NULL)) AS with_os
+FROM (SELECT DISTINCT patient_unique_id FROM genomic_event_derived
+      WHERE cancer_study_identifier = 'pancan_pcawg_2020' AND hugo_gene_symbol = 'KRAS'
+        AND variant_type = 'mutation' AND mutation_status != 'UNCALLED')
+GROUP BY grp;
+-- KRAS only = 85 (3 with OS), TP53 + KRAS = 187 (1 with OS)
+```
+
+If you must LEFT JOIN, test the default value instead: `WHERE t.patient_unique_id = ''` (String) or `= 0` (numeric).
 
 ## Performance Pitfalls
 
@@ -762,6 +808,7 @@ Example:
 22. **Do not substitute colon-vs-rectum for CRC sidedness** — left/right requires anatomical subsite values.
 23. **Hold scope boundaries after refusal** — do not provide paper critiques, slide outlines, external pipeline code, or medical advice after user pushback.
 24. **Do not promise unavailable outputs** — provide data/handoffs instead of claiming to create plots, CSV files, or external apps.
+25. **LEFT JOIN yields '' / 0, not NULL** — use `IN (SELECT …)` / `NOT IN (SELECT …)` for group membership (pitfall #22)
 
 ### 21. 🚨 ENUMERATION / CATALOG QUESTIONS TRIGGER SCHEMA EXPLORATION
 
@@ -782,7 +829,7 @@ User: *"What kind of cancer are there in the database?"*
 
 | User asks | Call this once | Then answer |
 |---|---|---|
-| "What cancer types are in the database?" | `list_studies(limit=100)` | GROUP BY `type_of_cancer_id` in the returned rows |
+| "What cancer types are in the database?" | `SELECT tc.name, count() AS studies, sum(cs.sample_count) AS samples FROM cancer_study cs JOIN type_of_cancer tc ON cs.type_of_cancer_id = tc.type_of_cancer_id GROUP BY tc.name ORDER BY studies DESC` | report the total number of cancer types and studies plus the top rows. Do not derive it from `list_studies(limit=100)` — 100 studies cover only a fraction of the cancer types |
 | "What studies do you have?" | `list_studies(limit=100)` (or with a `search`) | list them |
 | "What guides do you have?" | `list_guides()` | list them |
 | "What study-specific guides are available?" | `list_study_guides()` | list them |
@@ -807,6 +854,7 @@ Before trusting your results, ask:
 - [ ] Am I comparing the right data types?
 - [ ] Did I handle NULL values appropriately?
 - [ ] Do my join conditions make biological sense?
+- [ ] Did I avoid `IS NULL` / `IS NOT NULL` tests on LEFT JOIN columns (they get '' / 0 in ClickHouse)?
 - [ ] Are my sample counts reasonable for the study?
 - [ ] Did I use numeric values for CNA alterations (not strings)?
 - [ ] Am I using the correct column names (mutation_variant, not protein_change)?
