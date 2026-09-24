@@ -38,6 +38,15 @@ def test_system_prompt_routes_to_targeted_guides():
     assert "Minerva" in prompt
 
 
+def test_system_prompt_routes_clinical_marker_status_to_attribute_guide():
+    prompt = server._load_resource("system-prompt.md")
+
+    assert "Clinical marker/status questions" in prompt
+    assert "HER2-negative" in prompt
+    assert "Do not infer marker status from molecular subtype" in prompt
+    assert "Query the Requested Attribute, Not a Proxy" in prompt
+
+
 def test_existing_guides_cover_open_issue_patterns():
     clinical = server._clinical_data_guide_text()
     mutation = server._mutation_frequency_guide_text()

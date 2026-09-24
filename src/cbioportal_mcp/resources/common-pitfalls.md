@@ -372,6 +372,45 @@ FROM genomic_event_derived
 GROUP BY hugo_gene_symbol;
 ```
 
+### 10b. 🚨 RESOLVING STUDY IDENTIFIERS VIA A SUBQUERY ON A FACT TABLE
+
+`cancer_study` is a 539-row dimension table with every `cancer_study_identifier`
+in the deployment. `genetic_alteration_derived`, `genomic_event_derived`, and
+`clinical_data_derived` are multi-billion-row fact tables. Never use a fact
+table to look up which study identifiers match a pattern — resolve against
+`cancer_study` (or `list_studies()` / `search_oncotree()`) first.
+
+#### ❌ Wrong: subquery on a fact table just to find study identifiers
+```sql
+-- INCORRECT - scans the whole 10.29B-row fact table to resolve study IDs
+SELECT hugo_gene_symbol, alteration_value
+FROM genetic_alteration_derived
+WHERE cancer_study_identifier IN (
+    SELECT DISTINCT cancer_study_identifier
+    FROM genetic_alteration_derived
+    WHERE cancer_study_identifier LIKE '%brca%'
+)
+AND profile_type = 'mrna';
+```
+
+#### ✅ Correct: resolve against the small dimension table, then pass a literal list
+```sql
+-- Step 1: resolve against cancer_study (539 rows)
+SELECT cancer_study_identifier FROM cancer_study
+WHERE cancer_study_identifier LIKE '%brca%';
+
+-- Step 2: use the resolved identifiers as a literal IN (...) list
+SELECT hugo_gene_symbol, alteration_value
+FROM genetic_alteration_derived
+WHERE cancer_study_identifier IN ('brca_metabric', 'brca_tcga_pan_can_atlas_2018')
+AND profile_type = 'mrna';
+```
+
+**Key rule:** If you need to know *which* studies match something, ask
+`cancer_study` (or `list_studies`/`search_oncotree`), never a fact table —
+even a `DISTINCT` subquery still has to scan every row of the fact table to
+find the distinct values.
+
 ## CNA and Column Name Pitfalls
 
 ### 11. 🚨 CNA VALUES ARE NUMERIC, NOT STRINGS
@@ -494,6 +533,41 @@ WHERE attribute_name = 'TUMOR_GRADE' AND cancer_study_identifier = 'brca_tcga';
 
 **Key rule:** Never assume a table or column exists. Always check with `clickhouse_list_tables` and `clickhouse_list_table_columns` first.
 
+#### ❌ Wrong: counting a study's samples through patient/sample joins
+```sql
+-- INCORRECT - can differ from the portal's study list by a few samples
+SELECT cs.cancer_study_identifier, COUNT(DISTINCT s.internal_id) as sample_count
+FROM cancer_study cs
+JOIN patient p ON p.cancer_study_id = cs.cancer_study_id
+JOIN sample s ON s.patient_id = p.internal_id
+WHERE cs.cancer_study_identifier = 'brca_metabric'
+GROUP BY cs.cancer_study_identifier;
+```
+
+#### ✅ Correct: read the precomputed columns on cancer_study
+```sql
+-- CORRECT - the same numbers the portal shows; see sample-filtering-guide §4 for the other data-type columns
+SELECT cancer_study_identifier, sample_count, mutation_sample_count, cna_sample_count
+FROM cancer_study
+WHERE cancer_study_identifier = 'brca_metabric';
+```
+
+#### ❌ Wrong: `corrSpearman(...)` — not a real ClickHouse function
+```sql
+-- INCORRECT - ClickHouse has no corrSpearman function; this errors
+SELECT corrSpearman(a.v, b.v) AS spearman_correlation
+FROM a JOIN b USING (sample_unique_id);
+```
+
+#### ✅ Correct: `rankCorr(...)` is ClickHouse's Spearman-correlation function
+```sql
+-- CORRECT - rankCorr computes Spearman's rank correlation
+SELECT rankCorr(a.v, b.v) AS spearman_correlation
+FROM a JOIN b USING (sample_unique_id);
+-- See gene_pair_coexpression in sql/5-gene-expression-views.sql for the
+-- full working pattern, or cbioportal://gene-expression-guide.
+```
+
 ### 16. 🚨 SILENT QUERY SUBSTITUTION ("did you mean...")
 
 When the user's wording differs from canonical terminology (e.g. "V600V" looks like "V600E" with a typo, or "point mutation" sounds like "missense"), it is forbidden to silently rewrite the question and answer the rewritten version. Doing so produces an answer that looks confident but is for a different question — the user cannot tell what was changed.
@@ -552,7 +626,28 @@ Use this pattern when:
 
 Do not query unrelated genes or "helpful" substitutes unless you state why and the user accepts the substitution.
 
-### 17b. 🚨 AMBIGUOUS ACC / ADENOID CYSTIC CARCINOMA SCOPES
+### 17b. 🚨 IMPLIED LITERATURE REVIEW FOR RARE VARIANTS
+
+Do not present a rare-variant answer as though you reviewed papers or clinical guidelines when the only available evidence came from cBioPortal.
+
+#### ❌ Wrong: imply external literature support
+
+> User: *"I received a report with PIK3CA p.*1069Wext*3. Can you provide details?"*
+> Agent: *"The literature indicates that C-terminal extension mutations are poorly characterized..."*
+
+#### ✅ Correct: keep the source boundary visible
+
+> I can check cBioPortal for occurrences of `PIK3CA p.*1069Wext*3` and any mutation annotations exposed in this deployment. cBioPortal occurrence data does not establish biological significance by itself. For functional or clinical interpretation, you would need an external curated source such as OncoKB, ClinVar, UniProt, or the primary literature.
+
+Correct workflow:
+
+1. Query the literal variant, gene, and study/cancer scope the user asked for.
+2. Report counts and study/cancer contexts with denominators when available.
+3. Check only annotation fields that actually exist in the schema; do not invent OncoKB or driver status.
+4. If no external-source tool was used, do not say "in the literature" or "studies have shown."
+5. End with a clear handoff for biological significance or clinical interpretation.
+
+### 17c. 🚨 AMBIGUOUS ACC / ADENOID CYSTIC CARCINOMA SCOPES
 
 `ACC` is ambiguous. It can mean adrenocortical carcinoma (`ACC`), adenoid cystic carcinoma of the salivary gland (`ACYC`), adenoid cystic breast cancer (`ACBC`), or other site-specific entities. When the user names an anatomical site, lock every downstream query and narrative summary to the matching OncoTree code.
 
@@ -639,9 +734,10 @@ Example:
 17. **Never fabricate OncoKB/driver annotations** — check for driver columns first
 18. **Never silently rewrite the user's query** — if "point mutation" or "V600V" is ambiguous or unusual, surface the normalization or ask, don't substitute. See pitfall #16.
 19. **Validate flawed premises early** — if the gene, alteration, study, or data field is absent, say so before running adjacent analyses.
-20. **Lock site-specific cancer scopes** — if the user specifies salivary ACC, use `ACYC` throughout and do not mix in breast/lung/adrenal ACC rows.
-21. **Hold scope boundaries after refusal** — do not provide paper critiques, slide outlines, external pipeline code, or medical advice after user pushback.
-22. **Do not promise unavailable outputs** — provide data/handoffs instead of claiming to create plots, CSV files, or external apps.
+20. **Do not imply literature review** — rare-variant significance requires explicit external evidence; cBioPortal occurrence counts alone are not literature or clinical interpretation.
+21. **Lock site-specific cancer scopes** — if the user specifies salivary ACC, use `ACYC` throughout and do not mix in breast/lung/adrenal ACC rows.
+22. **Hold scope boundaries after refusal** — do not provide paper critiques, slide outlines, external pipeline code, or medical advice after user pushback.
+23. **Do not promise unavailable outputs** — provide data/handoffs instead of claiming to create plots, CSV files, or external apps.
 
 ### 21. 🚨 ENUMERATION / CATALOG QUESTIONS TRIGGER SCHEMA EXPLORATION
 
@@ -696,6 +792,7 @@ Before trusting your results, ask:
 - [ ] Did I verify all tables and columns exist before querying them?
 - [ ] Did I answer the literal question, or did I silently rewrite it? If I normalized a term ("point mutation" → SNV set, "V600V" → V600E), did I surface that to the user?
 - [ ] Did I validate the user's premise before querying adjacent data?
+- [ ] Did I avoid claiming literature, guideline, or external-database support unless a tool or user-provided source supplied it?
 - [ ] If the user named an anatomical site with an ambiguous abbreviation like ACC, did every query use the same site-specific OncoTree scope?
 - [ ] Did I keep scope boundaries after any refusal?
 - [ ] Did I avoid promising plots, downloads, or external-code debugging that this MCP server cannot perform?
