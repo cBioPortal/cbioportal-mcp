@@ -85,3 +85,12 @@ def test_search_oncotree_matches_site_plus_histology_terms():
 
     assert results[0]["code"] == "ACYC"
     assert results[0]["mainType"] == "Salivary Gland Cancer"
+
+
+def test_common_pitfalls_cover_crc_sidedness_not_colon_vs_rectum():
+    pitfalls = server._common_pitfalls_guide_text()
+
+    assert "LEFT- VS RIGHT-SIDED COLORECTAL CANCER" in pitfalls
+    assert "not the same as colon vs rectum" in pitfalls
+    assert "I should not substitute colon-vs-rectum" in pitfalls
+    assert "subsite-level" in pitfalls

@@ -19,6 +19,7 @@ def test_pitfall_numbers_are_unique():
 def test_lettered_pitfalls_are_each_reachable():
     assert "IMPLIED LITERATURE REVIEW" in server.read_guide.fn("cbioportal://common-pitfalls#17b")
     assert "AMBIGUOUS ACC" in server.read_guide.fn("cbioportal://common-pitfalls#17c")
+    assert "LEFT- VS RIGHT-SIDED" in server.read_guide.fn("cbioportal://common-pitfalls#17d")
 
 
 def test_fragment_returns_only_the_requested_pitfall():
