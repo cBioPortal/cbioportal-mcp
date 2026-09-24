@@ -289,7 +289,7 @@ FROM (
 );
 ```
 
-If a large share of patients sits at one boundary, compute age from `DAYS_TO_BIRTH` instead (negative days from birth to diagnosis): age in years = `-toFloat64OrNull(attribute_value) / 365.25`. Tell the user which attribute you used and why. Check the study guide too — it may already name the right attribute.
+If a large share of patients sits at one boundary, compute age from `DAYS_TO_BIRTH` instead (negative days from birth to diagnosis): age in years = `-toFloat64OrNull(attribute_value) / 365.25`. Tell the user which attribute you used and why. Check the study guide too — it may already name the right attribute. All TARGET GDC studies (`*_target_gdc`) floor `AGE` at 18 — use `DAYS_TO_BIRTH` for them.
 
 ## Raw Table Queries (Advanced)
 

@@ -6,8 +6,11 @@
 Pediatric osteosarcoma study from the TARGET (Therapeutically Applicable Research to Generate Effective Treatments) initiative. Whole exome sequencing data.
 
 ## Gene Panel
-- **WES** (Whole Exome Sequencing): All coding genes profiled
-- For mutation frequency calculations, you can use study-wide sample counts as the denominator (all genes equally covered)
+- **WES** (Whole Exome Sequencing): all coding genes profiled
+- **143 of the 160 samples are profiled for mutations.** Use 143 as the mutation-frequency denominator (`sample_to_gene_panel_derived`, `alteration_type = 'MUTATION_EXTENDED'`), not the study's sample count — e.g. TP53 is mutated in 32/143 = 22.4%.
+
+## Patients vs Samples
+383 patients have clinical data, but only 153 of them have a sample (159 samples). Patient-level questions (age, sex, survival) use all patients with a value; genomic questions use the 143 mutation-profiled samples.
 
 ## Clinical Attributes - Semantic Guide
 
@@ -16,30 +19,22 @@ Pediatric osteosarcoma study from the TARGET (Therapeutically Applicable Researc
 |-----------|-------------|-------|
 | `AGE` | Age at diagnosis, **floored at 18** | Every patient younger than 18 is recorded as 18 (241 of 293). **Don't use it for age statistics** — use `DAYS_TO_BIRTH` |
 | `DAYS_TO_BIRTH` | Days from birth to diagnosis, negative | Age at diagnosis in years = `-DAYS_TO_BIRTH / 365.25`. 293 patients have a value; 90 are empty |
-| `SEX` | Patient sex | Male, Female |
-| `RACE` | Patient race | Per NIH categories |
-| `ETHNICITY` | Patient ethnicity | Hispanic/Latino status |
+| `SEX` | Patient sex | Male 172, Female 133, 78 empty |
+| `RACE`, `ETHNICITY` | Race, ethnicity | |
 
 ### Disease Characteristics
 | Attribute | Description | Notes |
 |-----------|-------------|-------|
-| `DISEASE` | Disease type | Should be "Osteosarcoma" |
-| `TUMOR_SITE` | Primary tumor location | e.g., Femur, Tibia |
-| `HISTOLOGY` | Histological subtype | Osteoblastic, Chondroblastic, etc. |
+| `CANCER_TYPE_DETAILED` | Cancer type | Osteosarcoma for every sample |
+| `PRIMARY_SITE_PATIENT` | Primary site | "Appendicular Skeleton" for every patient with a value — no finer location (femur, tibia) |
+
+No histological subtype, tumor necrosis / chemotherapy response, or event-free survival attributes exist in this study.
 
 ### Clinical Outcomes
 | Attribute | Description | Notes |
 |-----------|-------------|-------|
 | `OS_MONTHS` | Overall survival in months | Time from diagnosis |
-| `OS_STATUS` | Overall survival status | 0:LIVING, 1:DECEASED |
-| `EFS_MONTHS` | Event-free survival in months | Time to first event |
-| `EFS_STATUS` | Event-free survival status | 0:No event, 1:Event |
-
-### Treatment Response
-| Attribute | Description |
-|-----------|-------------|
-| `PERCENT_NECROSIS` | Tumor necrosis percentage post-chemotherapy |
-| `NECROSIS_GROUP` | Grouped necrosis response |
+| `OS_STATUS` | Overall survival status | 0:LIVING 171, 1:DECEASED 105, 107 empty |
 
 ## Age at Diagnosis
 
