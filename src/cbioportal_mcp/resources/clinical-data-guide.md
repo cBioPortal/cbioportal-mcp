@@ -173,6 +173,28 @@ ORDER BY name;
 - `OS_MONTHS`: Overall survival time in months
 - `OS_STATUS`: Overall survival status (0:LIVING, 1:DECEASED or similar)
 
+### Comparing a Clinical Metric Across Cancer Types (e.g. TMB)
+
+- **One consistently processed cohort.** Never average an attribute across hundreds of heterogeneous studies — pipelines, panels and units differ. Use `cancer_study_query_preferences` `'pan_cancer_tcga'` and group by study (or per-sample `CANCER_TYPE`).
+- **Report mean AND median.** TMB is skewed by hypermutators, so the rankings disagree (pan_cancer_tcga: highest mean is UCEC 35.7; highest median is SKCM 14.9, then LUSC 7.7, LUAD 6.7, BLCA 5.8). Name the attribute you used.
+- **TMB = `TMB_NONSYNONYMOUS`** (mutations/Mb, parse with `toFloat64OrNull`). Never `COUNT(*)` of mutation rows or `MUTATION_COUNT` as a TMB proxy.
+
+```sql
+SELECT cancer_study_identifier AS study,
+       count(v) AS n,
+       round(avg(v), 2) AS mean_tmb,
+       round(quantile(0.5)(v), 2) AS median_tmb
+FROM (
+    SELECT cancer_study_identifier, toFloat64OrNull(attribute_value) AS v
+    FROM clinical_data_derived
+    WHERE attribute_name = 'TMB_NONSYNONYMOUS'
+      AND cancer_study_identifier IN (SELECT cancer_study_identifier FROM cancer_study_query_preferences
+                                      WHERE preference_name = 'pan_cancer_tcga')
+)
+GROUP BY study
+ORDER BY median_tmb DESC;
+```
+
 ## Survival Analysis Queries
 
 Survival data is stored as clinical attributes. Common patterns:
