@@ -6,18 +6,10 @@ See `_tcga_pancan_template.md` for common TCGA clinical attributes.
 
 ## Study-Specific Attributes
 
-### Smoking History
-| Attribute | Description | Values |
-|-----------|-------------|--------|
-| `SMOKING_HISTORY` | Tobacco use history | Never, Former, Current |
-| `PACK_YEARS` | Pack-years of smoking | Numeric |
-
-### Molecular Features
-| Attribute | Description |
-|-----------|-------------|
-| `EGFR_MUTATION_STATUS` | EGFR mutation presence |
-| `ALK_FUSION_STATUS` | ALK rearrangement status |
-| `KRAS_MUTATION_STATUS` | KRAS mutation presence |
+### Not available in this study
+- **Smoking history / pack-years**: no smoking attribute. Say smoking status is not available here rather than inferring it.
+- **EGFR / KRAS / ALK status**: no clinical status attributes. Derive EGFR and KRAS status from mutation data, and ALK fusions from structural-variant data (5 samples with an ALK SV in `genomic_event_derived`).
+- `SUBTYPE` is `LUAD` (502) or blank (64) and carries no molecular subtype. `GRADE` is blank for all samples.
 
 ## Key Genes - Driver Mutations
 | Gene | Frequency | Notes |
@@ -32,6 +24,4 @@ See `_tcga_pancan_template.md` for common TCGA clinical attributes.
 
 ## Notes
 - Driver mutations are largely mutually exclusive
-- Never-smokers enriched for EGFR mutations
-- Smokers enriched for KRAS mutations
 - STK11 and KEAP1 mutations associated with poor immunotherapy response

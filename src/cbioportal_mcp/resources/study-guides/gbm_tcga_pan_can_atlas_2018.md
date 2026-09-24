@@ -7,17 +7,16 @@ See `_tcga_pancan_template.md` for common TCGA clinical attributes.
 ## Study-Specific Attributes
 
 ### Molecular Classification
-| Attribute | Description | Values |
+| Attribute | Description | Values (patients) |
 |-----------|-------------|--------|
-| `IDH_STATUS` | IDH mutation status | Mutant, Wild-type |
-| `MGMT_STATUS` | MGMT promoter methylation | Methylated, Unmethylated |
-| `SUBTYPE` | Molecular subtype | Classical, Mesenchymal, Proneural, Neural |
+| `SUBTYPE` | TCGA glioma IDH classification | `GBM_IDHwt` 114, `GBM_IDHmut-non-codel` 7, `GBM` 5, blank 459 |
 
-### Clinical Context
-| Attribute | Description |
-|-----------|-------------|
-| `KPS` | Karnofsky Performance Status |
-| `EXTENT_OF_RESECTION` | Surgical resection extent |
+`SUBTYPE` is blank for most patients and does not hold the transcriptional subtypes (Classical/Mesenchymal/Proneural/Neural).
+
+### Not available in this study
+- **IDH status**: no `IDH_STATUS` attribute. Use IDH1/IDH2 mutations from mutation data (covers all sequenced samples), or `SUBTYPE` for the 121 classified patients.
+- **MGMT promoter methylation status**: not available (the methylation profiles are CpG-probe level, with no MGMT status call).
+- **Karnofsky performance status and extent of resection**: not available.
 
 ## Key Genes & Pathways
 - **TP53**: Frequently mutated
