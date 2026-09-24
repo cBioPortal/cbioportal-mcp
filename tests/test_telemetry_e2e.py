@@ -115,6 +115,64 @@ def _mcp_call(
     return tool_resp
 
 
+def _mcp_discovery_call(
+    client: TestClient,
+    method: str,
+    headers: dict,
+    client_info: dict | None = None,
+) -> dict:
+    """Initialize an MCP session and send one discovery-only request
+    (``tools/list`` / ``resources/list`` / ``prompts/list``), *without* ever
+    calling ``tools/call``.
+
+    This is the connector setup / capability-negotiation traffic a client sends
+    right after ``initialize`` — the population the discovery hooks
+    (on_list_tools/on_list_resources/on_list_prompts) exist to make visible,
+    since it never reaches on_call_tool.
+    """
+    default_headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+    }
+    merged = {**default_headers, **headers}
+
+    init_resp = client.post(
+        "/mcp",
+        json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": client_info or {"name": "test", "version": "1.0"},
+            },
+        },
+        headers=merged,
+    )
+    assert init_resp.status_code == 200, f"initialize failed: {init_resp.text}"
+
+    session_id = init_resp.headers.get("mcp-session-id", "")
+    if session_id:
+        merged["mcp-session-id"] = session_id
+        notify_resp = client.post(
+            "/mcp",
+            json={"jsonrpc": "2.0", "method": "notifications/initialized"},
+            headers=merged,
+        )
+        assert notify_resp.status_code in (200, 202), (
+            f"notifications/initialized failed: {notify_resp.text}"
+        )
+
+    list_resp = client.post(
+        "/mcp",
+        json={"jsonrpc": "2.0", "id": 2, "method": method, "params": {}},
+        headers=merged,
+    )
+    assert list_resp.status_code == 200, f"{method} failed: {list_resp.text}"
+    return list_resp
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -358,3 +416,93 @@ def test_base64_encoded_email_decoded_before_llmobs_span():
     assert captured_calls, "Expected _llmobs_tool_span to be called"
     assert captured_calls[0]["user_email"] == "user+tag@example.com"
     assert captured_calls[0]["user_id"] == "user-id-123"
+
+
+def test_tools_list_produces_span_without_any_tool_call():
+    """
+    A connector that only completes initialize -> tools/list (real-world
+    "connector setup" traffic that never invokes a tool) must still produce
+    an OTel span with client identity attributes — this is exactly the
+    population that previously produced zero telemetry of any kind.
+    """
+    spans = _run_with_span_capture(
+        lambda client: _mcp_discovery_call(
+            client,
+            "tools/list",
+            headers={},
+            client_info={"name": "claude-code", "version": "1.2.3"},
+        ),
+        stateless=False,
+    )
+
+    tool_spans = [s for s in spans if s.name.startswith("mcp.tool/")]
+    assert not tool_spans, "No tools/call happened; there must be no mcp.tool/* span"
+
+    discovery_spans = [s for s in spans if s.name == "mcp.discovery/tools_list"]
+    assert discovery_spans, "Expected an mcp.discovery/tools_list span"
+    attrs = discovery_spans[0].attributes
+    assert attrs["mcp.client_kind"] == "direct"
+    assert attrs["mcp.client.name"] == "claude-code"
+    assert attrs["mcp.client.version"] == "1.2.3"
+
+
+def test_resources_list_produces_discovery_span():
+    spans = _run_with_span_capture(
+        lambda client: _mcp_discovery_call(
+            client, "resources/list", headers={"x-user-id": "librechat-user-1"}
+        )
+    )
+
+    discovery_spans = [s for s in spans if s.name == "mcp.discovery/resources_list"]
+    assert discovery_spans, "Expected an mcp.discovery/resources_list span"
+    attrs = discovery_spans[0].attributes
+    assert attrs["mcp.client_kind"] == "librechat"
+    assert attrs["enduser.id"] == "librechat-user-1"
+
+
+def test_prompts_list_produces_discovery_span():
+    spans = _run_with_span_capture(
+        lambda client: _mcp_discovery_call(client, "prompts/list", headers={})
+    )
+
+    discovery_spans = [s for s in spans if s.name == "mcp.discovery/prompts_list"]
+    assert discovery_spans, "Expected an mcp.discovery/prompts_list span"
+    assert discovery_spans[0].attributes["mcp.client_kind"] == "direct"
+
+
+def test_discovery_span_carries_oauth_resolved_identity():
+    """
+    Discovery spans must resolve identity exactly like tool-call spans: a
+    verified OAuth token wins over the unverified x-user-id header, and the
+    token's email claim lands on enduser.email.
+    """
+    token = AccessToken(
+        token="fake-token",
+        client_id="fake-client",
+        scopes=[],
+        claims={"sub": "keycloak-user-abc", "email": "alice@example.org"},
+    )
+    with patch("fastmcp.server.dependencies.get_access_token", return_value=token):
+        spans = _run_with_span_capture(
+            lambda client: _mcp_discovery_call(
+                client, "tools/list", headers={"x-user-id": "librechat-user-1"}
+            )
+        )
+
+    discovery_spans = [s for s in spans if s.name == "mcp.discovery/tools_list"]
+    assert discovery_spans, "Expected an mcp.discovery/tools_list span"
+    attrs = discovery_spans[0].attributes
+    assert attrs["mcp.client_kind"] == "oauth"
+    assert attrs["enduser.id"] == "keycloak-user-abc"
+    assert attrs["enduser.email"] == "alice@example.org"
+
+
+def test_discovery_requests_do_not_start_llmobs_span():
+    """Discovery requests aren't tool calls, so no LLMObs tool span is started."""
+    app = _make_app()
+    with patch("cbioportal_mcp.telemetry._llmobs_tool_span") as llmobs_span:
+        with TestClient(app) as client:
+            for method in ("tools/list", "resources/list", "prompts/list"):
+                _mcp_discovery_call(client, method, headers={})
+
+    llmobs_span.assert_not_called()

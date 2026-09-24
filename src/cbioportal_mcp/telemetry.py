@@ -9,6 +9,7 @@ import os
 import socket
 import time
 from contextlib import contextmanager
+from typing import Any, NamedTuple
 
 import mcp.types as mt
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
@@ -334,7 +335,7 @@ def _resolve_caller_identity() -> tuple[str | None, str | None, str]:
 
 
 def _extract_mcp_client_info(
-    context: MiddlewareContext[mt.CallToolRequestParams],
+    context: MiddlewareContext[Any],
 ) -> tuple[str | None, str | None]:
     """Read the MCP client's self-reported identity from the initialize handshake.
 
@@ -365,7 +366,7 @@ def _extract_mcp_client_info(
 
 
 def _extract_session_id(
-    context: MiddlewareContext[mt.CallToolRequestParams],
+    context: MiddlewareContext[Any],
 ) -> str | None:
     """Read the MCP transport session ID (Streamable HTTP / SSE) for this call.
 
@@ -416,6 +417,63 @@ def _extract_client_ip() -> str | None:
     except Exception:
         pass
     return None
+
+
+class _CallerContext(NamedTuple):
+    """Everything known about who is making the current MCP request."""
+
+    user_id: str | None
+    user_email: str | None
+    client_kind: str
+    client_name: str | None
+    client_version: str | None
+    session_id: str | None
+
+
+def _resolve_caller_context(context: MiddlewareContext[Any]) -> _CallerContext:
+    """Resolve the full caller identity for the current MCP request.
+
+    Combines ``_resolve_caller_identity`` (OAuth-first, falling back to the
+    LibreChat x-user-id header), ``_extract_mcp_client_info``, and
+    ``_extract_session_id`` so every instrumented hook — tool calls and the
+    read-only discovery requests — derives identity the same way.
+    """
+    user_id, user_email, client_kind = _resolve_caller_identity()
+    client_name, client_version = _extract_mcp_client_info(context)
+    return _CallerContext(
+        user_id=user_id,
+        user_email=user_email,
+        client_kind=client_kind,
+        client_name=client_name,
+        client_version=client_version,
+        session_id=_extract_session_id(context),
+    )
+
+
+def _tag_caller_attributes(span, caller: _CallerContext) -> None:
+    """Set the identity attributes shared by every instrumented MCP span:
+    mcp.client_kind, enduser.id, enduser.email, mcp.client.name,
+    mcp.client.version, mcp.session.id, and network.client.ip.
+    """
+    span.set_attribute("mcp.client_kind", caller.client_kind)
+    if caller.user_id:
+        span.set_attribute("enduser.id", caller.user_id)
+    if caller.user_email:
+        # OTEL/Datadog convention: `enduser.email` alongside
+        # `enduser.id`. Sourced from the verified `email` claim on
+        # OAuth-authenticated calls (see `_resolve_caller_identity`),
+        # or the LibreChat x-user-email header on internal traffic.
+        span.set_attribute("enduser.email", caller.user_email)
+    if caller.client_name:
+        span.set_attribute("mcp.client.name", caller.client_name)
+    if caller.client_version:
+        span.set_attribute("mcp.client.version", caller.client_version)
+    if caller.session_id:
+        span.set_attribute("mcp.session.id", caller.session_id)
+
+    client_ip = _extract_client_ip()
+    if client_ip:
+        span.set_attribute("network.client.ip", client_ip)
 
 
 def _llmobs_tool_span(
@@ -534,6 +592,20 @@ class TelemetryMiddleware(Middleware):
 
     The LLMObs tool span populates the Datadog LLM Observability dashboard widgets
     (Trace Success Rate, Total Number of Traces, Estimated Total Cost).
+
+    The same identity attributes (mcp.client_kind, enduser.id, enduser.email,
+    mcp.client.name, mcp.client.version, mcp.session.id, network.client.ip)
+    are also emitted on three read-only discovery hooks: on_list_tools,
+    on_list_resources, and on_list_prompts — without an LLMObs span, since
+    these aren't tool calls. FastMCP dispatches each MCP JSON-RPC method to
+    its own middleware hook, so tools/list, resources/list, and prompts/list
+    never reach on_call_tool. A connector that only completes the
+    initialize -> tools/list -> resources/list -> prompts/list handshake
+    (connector setup / capability negotiation) without going on to invoke a
+    tool would otherwise produce no telemetry at all.
+
+    Discovery OTel span names: ``mcp.discovery/tools_list``,
+    ``mcp.discovery/resources_list``, ``mcp.discovery/prompts_list``.
     """
 
     def __init__(self) -> None:
@@ -546,43 +618,23 @@ class TelemetryMiddleware(Middleware):
     ) -> mt.CallToolResult:
         tool_name = getattr(context.message, "name", None) or "unknown"
         arguments = getattr(context.message, "arguments", {}) or {}
-        user_id, user_email, client = _resolve_caller_identity()
-        client_name, client_version = _extract_mcp_client_info(context)
-        session_id = _extract_session_id(context)
+        caller = _resolve_caller_context(context)
 
         llmobs_span = _llmobs_tool_span(
             tool_name,
             arguments,
-            user_id,
-            user_email,
-            client,
-            client_name,
-            client_version,
-            session_id,
+            caller.user_id,
+            caller.user_email,
+            caller.client_kind,
+            caller.client_name,
+            caller.client_version,
+            caller.session_id,
         )
         started = time.perf_counter()
 
         with self._tracer.start_as_current_span(f"mcp.tool/{tool_name}") as span:
             span.set_attribute("mcp.tool.name", tool_name)
-            span.set_attribute("mcp.client_kind", client)
-            if user_id:
-                span.set_attribute("enduser.id", user_id)
-            if user_email:
-                # OTEL/Datadog convention: `enduser.email` alongside
-                # `enduser.id`. Sourced from the verified `email` claim on
-                # OAuth-authenticated calls (see `_resolve_caller_identity`),
-                # or the LibreChat x-user-email header on internal traffic.
-                span.set_attribute("enduser.email", user_email)
-            if client_name:
-                span.set_attribute("mcp.client.name", client_name)
-            if client_version:
-                span.set_attribute("mcp.client.version", client_version)
-            if session_id:
-                span.set_attribute("mcp.session.id", session_id)
-
-            client_ip = _extract_client_ip()
-            if client_ip:
-                span.set_attribute("network.client.ip", client_ip)
+            _tag_caller_attributes(span, caller)
 
             try:
                 result = await call_next(context)
@@ -593,8 +645,8 @@ class TelemetryMiddleware(Middleware):
                     tool_name=tool_name,
                     duration_ms=duration_ms,
                     success=True,
-                    client_kind=client,
-                    client_name=client_name,
+                    client_kind=caller.client_kind,
+                    client_name=caller.client_name,
                 )
                 _llmobs_finish(llmobs_span, result, error=False)
                 return result
@@ -608,8 +660,46 @@ class TelemetryMiddleware(Middleware):
                     tool_name=tool_name,
                     duration_ms=duration_ms,
                     success=False,
-                    client_kind=client,
-                    client_name=client_name,
+                    client_kind=caller.client_kind,
+                    client_name=caller.client_name,
                 )
                 _llmobs_finish(llmobs_span, None, error=True)
                 raise
+
+    async def _trace_discovery(
+        self,
+        span_name: str,
+        context: MiddlewareContext[Any],
+        call_next: CallNext[Any, Any],
+    ) -> Any:
+        """Shared implementation for the read-only discovery hooks below.
+
+        These are MCP methods a client calls during connector setup /
+        capability negotiation, right after ``initialize`` and before any tool
+        call — see the class docstring for why they need their own hooks.
+        """
+        caller = _resolve_caller_context(context)
+        with self._tracer.start_as_current_span(span_name) as span:
+            _tag_caller_attributes(span, caller)
+            return await call_next(context)
+
+    async def on_list_tools(
+        self,
+        context: MiddlewareContext[mt.ListToolsRequest],
+        call_next: CallNext[mt.ListToolsRequest, Any],
+    ) -> Any:
+        return await self._trace_discovery("mcp.discovery/tools_list", context, call_next)
+
+    async def on_list_resources(
+        self,
+        context: MiddlewareContext[mt.ListResourcesRequest],
+        call_next: CallNext[mt.ListResourcesRequest, Any],
+    ) -> Any:
+        return await self._trace_discovery("mcp.discovery/resources_list", context, call_next)
+
+    async def on_list_prompts(
+        self,
+        context: MiddlewareContext[mt.ListPromptsRequest],
+        call_next: CallNext[mt.ListPromptsRequest, Any],
+    ) -> Any:
+        return await self._trace_discovery("mcp.discovery/prompts_list", context, call_next)
