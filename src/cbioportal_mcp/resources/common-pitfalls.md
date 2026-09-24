@@ -372,6 +372,45 @@ FROM genomic_event_derived
 GROUP BY hugo_gene_symbol;
 ```
 
+### 10b. 🚨 RESOLVING STUDY IDENTIFIERS VIA A SUBQUERY ON A FACT TABLE
+
+`cancer_study` is a 539-row dimension table with every `cancer_study_identifier`
+in the deployment. `genetic_alteration_derived`, `genomic_event_derived`, and
+`clinical_data_derived` are multi-billion-row fact tables. Never use a fact
+table to look up which study identifiers match a pattern — resolve against
+`cancer_study` (or `list_studies()` / `search_oncotree()`) first.
+
+#### ❌ Wrong: subquery on a fact table just to find study identifiers
+```sql
+-- INCORRECT - scans the whole 10.29B-row fact table to resolve study IDs
+SELECT hugo_gene_symbol, alteration_value
+FROM genetic_alteration_derived
+WHERE cancer_study_identifier IN (
+    SELECT DISTINCT cancer_study_identifier
+    FROM genetic_alteration_derived
+    WHERE cancer_study_identifier LIKE '%brca%'
+)
+AND profile_type = 'mrna';
+```
+
+#### ✅ Correct: resolve against the small dimension table, then pass a literal list
+```sql
+-- Step 1: resolve against cancer_study (539 rows)
+SELECT cancer_study_identifier FROM cancer_study
+WHERE cancer_study_identifier LIKE '%brca%';
+
+-- Step 2: use the resolved identifiers as a literal IN (...) list
+SELECT hugo_gene_symbol, alteration_value
+FROM genetic_alteration_derived
+WHERE cancer_study_identifier IN ('brca_metabric', 'brca_tcga_pan_can_atlas_2018')
+AND profile_type = 'mrna';
+```
+
+**Key rule:** If you need to know *which* studies match something, ask
+`cancer_study` (or `list_studies`/`search_oncotree`), never a fact table —
+even a `DISTINCT` subquery still has to scan every row of the fact table to
+find the distinct values.
+
 ## CNA and Column Name Pitfalls
 
 ### 11. 🚨 CNA VALUES ARE NUMERIC, NOT STRINGS
@@ -493,6 +532,41 @@ WHERE attribute_name = 'TUMOR_GRADE' AND cancer_study_identifier = 'brca_tcga';
 ```
 
 **Key rule:** Never assume a table or column exists. Always check with `clickhouse_list_tables` and `clickhouse_list_table_columns` first.
+
+#### ❌ Wrong: counting a study's samples through patient/sample joins
+```sql
+-- INCORRECT - can differ from the portal's study list by a few samples
+SELECT cs.cancer_study_identifier, COUNT(DISTINCT s.internal_id) as sample_count
+FROM cancer_study cs
+JOIN patient p ON p.cancer_study_id = cs.cancer_study_id
+JOIN sample s ON s.patient_id = p.internal_id
+WHERE cs.cancer_study_identifier = 'brca_metabric'
+GROUP BY cs.cancer_study_identifier;
+```
+
+#### ✅ Correct: read the precomputed columns on cancer_study
+```sql
+-- CORRECT - the same numbers the portal shows; see sample-filtering-guide §4 for the other data-type columns
+SELECT cancer_study_identifier, sample_count, mutation_sample_count, cna_sample_count
+FROM cancer_study
+WHERE cancer_study_identifier = 'brca_metabric';
+```
+
+#### ❌ Wrong: `corrSpearman(...)` — not a real ClickHouse function
+```sql
+-- INCORRECT - ClickHouse has no corrSpearman function; this errors
+SELECT corrSpearman(a.v, b.v) AS spearman_correlation
+FROM a JOIN b USING (sample_unique_id);
+```
+
+#### ✅ Correct: `rankCorr(...)` is ClickHouse's Spearman-correlation function
+```sql
+-- CORRECT - rankCorr computes Spearman's rank correlation
+SELECT rankCorr(a.v, b.v) AS spearman_correlation
+FROM a JOIN b USING (sample_unique_id);
+-- See gene_pair_coexpression in sql/5-gene-expression-views.sql for the
+-- full working pattern, or cbioportal://gene-expression-guide.
+```
 
 ### 16. 🚨 SILENT QUERY SUBSTITUTION ("did you mean...")
 

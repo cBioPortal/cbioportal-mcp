@@ -37,3 +37,14 @@ def test_user_facing_code_samples_default_to_public_rest_api():
 
     assert "default to the REST API" in faq
     assert "Do not provide ClickHouse connection code" in faq
+
+
+def test_system_prompt_calibrates_response_depth_for_researcher_queries():
+    prompt = server._load_resource("system-prompt.md")
+
+    assert "## Response Depth Calibration" in prompt
+    assert "researcher-grade detail" in prompt
+    assert "specific gene symbols" in prompt
+    assert "raw counts and denominators" in prompt
+    assert "selected cohort/study and counting unit" in prompt
+    assert "Avoid pop-science summaries" in prompt
