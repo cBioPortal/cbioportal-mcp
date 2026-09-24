@@ -188,21 +188,33 @@ WHERE cancer_study_identifier = 'your_study'
 GROUP BY patient_unique_id;
 ```
 
+**Never report a median or average of `OS_MONTHS` (or any `*_MONTHS`) as "median survival".** Survival data is censored (`0:LIVING` patients have not had the event yet), so `median()`, `quantile(0.5)`, and `AVG()` over `OS_MONTHS` are wrong. Median OS, log-rank p-values, and hazard ratios require Kaplan-Meier / Cox — hand off to cBioPortal Group Comparison → Survival (link via the navigator) or R (`survival::survfit`) / Python (`lifelines`). See the HARD RULES in `cbioportal://statistical-tests-guide`. If fewer than half of a group's patients have an event, the KM median is likely **not reached** — say so; never substitute a raw median.
+
+What ClickHouse can give is a descriptive per-group summary (one row per patient; patients without OS are excluded):
+
 ```sql
--- Compare survival between groups (e.g., mutated vs wild-type)
-WITH patient_mutation AS (
-    SELECT DISTINCT patient_unique_id, 1 as is_mutated
-    FROM genomic_event_derived
-    WHERE hugo_gene_symbol = 'TP53' AND variant_type = 'mutation'
-        AND cancer_study_identifier = 'your_study'
+-- Describe survival data per group (e.g., mutated vs wild-type) — no median
+WITH mut AS (
+    SELECT DISTINCT patient_unique_id FROM genomic_event_derived
+    WHERE cancer_study_identifier = 'your_study' AND hugo_gene_symbol = 'TP53' AND variant_type = 'mutation'
+),
+os AS (
+    SELECT patient_unique_id,
+        maxIf(toFloat64OrNull(attribute_value), attribute_name = 'OS_MONTHS') AS os_months,
+        maxIf(attribute_value, attribute_name = 'OS_STATUS') AS os_status
+    FROM clinical_data_derived
+    WHERE cancer_study_identifier = 'your_study' AND attribute_name IN ('OS_MONTHS', 'OS_STATUS')
+    GROUP BY patient_unique_id
 )
-SELECT 
-    CASE WHEN m.is_mutated = 1 THEN 'Mutated' ELSE 'Wild-type' END as group_name,
-    median(toFloat64OrNull(c.attribute_value)) as median_os_months
-FROM clinical_data_derived c
-LEFT JOIN patient_mutation m ON c.patient_unique_id = m.patient_unique_id
-WHERE c.cancer_study_identifier = 'your_study'
-    AND c.attribute_name = 'OS_MONTHS'
+SELECT
+    if(patient_unique_id IN (SELECT patient_unique_id FROM mut), 'Mutated', 'Wild-type') AS group_name,
+    count() AS n_patients,
+    countIf(startsWith(os_status, '1')) AS n_events,
+    countIf(startsWith(os_status, '0')) AS n_censored,
+    min(os_months) AS min_followup_months,
+    max(os_months) AS max_followup_months
+FROM os
+WHERE os_months IS NOT NULL AND os_status != ''
 GROUP BY group_name;
 ```
 
