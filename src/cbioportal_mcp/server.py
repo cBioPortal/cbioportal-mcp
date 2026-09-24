@@ -386,6 +386,9 @@ def _gene_resolution_guide_text() -> str:
 def _study_resolution_guide_text() -> str:
     return _load_resource("study-resolution-guide.md")
 
+def _germline_guide_text() -> str:
+    return _load_resource("germline-guide.md")
+
 # --- MCP resources (decorator registers them) --------------------------------
 @mcp.resource("cbioportal://mutation-frequency-guide")
 def mutation_frequency_guide() -> str:
@@ -430,6 +433,11 @@ def gene_resolution_guide() -> str:
 @mcp.resource("cbioportal://study-resolution-guide")
 def study_resolution_guide() -> str:
     return _study_resolution_guide_text()
+
+
+@mcp.resource("cbioportal://germline-guide")
+def germline_guide() -> str:
+    return _germline_guide_text()
 
 
 # Default and maximum rows clickhouse_run_select_query will return. A missing
@@ -690,6 +698,10 @@ def list_guides() -> list[dict]:
             "description": "Guide for resolving requested studies, avoiding silent substitute cohorts, and redirecting to known external cBioPortal instances when data is not in this deployment"
         },
         {
+            "uri": "cbioportal://germline-guide",
+            "description": "Guide for querying germline variant data — storage columns, study discovery, query patterns, and somatic vs germline considerations"
+        },
+        {
             "uri": "cbioportal://study-guide/{study_id}",
             "description": "Dynamic study-specific guide - use get_study_guide(study_id) tool to generate"
         }
@@ -725,7 +737,8 @@ def read_guide(uri: str) -> str:
         "cbioportal://gene-expression-guide": _gene_expression_guide_text(),
         "cbioportal://external-resources-guide": _external_resources_guide_text(),
         "cbioportal://gene-resolution-guide": _gene_resolution_guide_text(),
-        "cbioportal://study-resolution-guide": _study_resolution_guide_text()
+        "cbioportal://study-resolution-guide": _study_resolution_guide_text(),
+        "cbioportal://germline-guide": _germline_guide_text()
     }
 
     if uri not in resources:
