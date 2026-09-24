@@ -227,6 +227,50 @@ FROM top_mutated_genes_in_study(
 -- PIK3CA 347/1066, TP53 347/1066, TTN 187, CDH1 130, GATA3 127
 ```
 
+### Single-study views matching the portal's study-view charts
+
+Each returns the portal's numbers with the correct profiled denominator — use them instead of hand-writing counts.
+
+**`gene_mutation_variants_in_study(study, gene)`** — protein changes of one gene (the Mutations tab). Use for "most common KRAS mutation", "how often is IDH1 R132H".
+
+```sql
+SELECT * FROM gene_mutation_variants_in_study(study = 'luad_tcga_pan_can_atlas_2018', gene = 'KRAS');
+-- G12C 70/566 = 12.4%, G12V 40 (7.1%), G12D 20 (3.5%), G12A 17
+```
+
+Columns: `mutation_variant` (protein change), `mutation_type`, `altered_samples`, `profiled_samples` (samples profiled for the gene, same on every row), `frequency_pct`, `total_mutation_events`.
+
+**`top_cna_genes_in_study(study, top_n)`** — the CNA Genes table: genes ranked by samples with AMP (+2) or HOMDEL (−2).
+
+```sql
+SELECT * FROM top_cna_genes_in_study(study = 'gbm_tcga_pan_can_atlas_2018', top_n = 20);
+-- CDKN2A HOMDEL 322/575 = 56.0%, CDKN2B HOMDEL 317, EGFR AMP 255/575 = 44.3%, MTAP HOMDEL 244
+```
+
+Columns: `hugo_gene_symbol`, `cytoband`, `cna_type` (`AMP` / `HOMDEL`; a gene can appear once per type), `altered_samples`, `profiled_samples` (samples profiled for discrete CNA in that gene, panel-aware), `frequency_pct`. Neighbouring genes in one amplicon/deletion (CDKN2A, CDKN2B, MTAP; EGFR, EGFR-AS1) appear as separate rows.
+
+**`gene_cna_distribution_in_study(study, gene)`** — every discrete CNA level for one gene (the per-gene CNA chart), including gains, shallow deletions and diploid, which `genomic_event_derived` does not store.
+
+```sql
+SELECT * FROM gene_cna_distribution_in_study(study = 'gbm_tcga_pan_can_atlas_2018', gene = 'CDKN2A');
+-- Gained 20, Diploid 119, Heterozygously deleted 114, Homozygously deleted 322 (575 profiled), NA 17
+```
+
+Columns: `profile_type` (the discrete CNA profile, `gistic` or `cna`), `cna_value` (`2`..`-2`, `NA`), `cna_label`, `samples`, `profiled_samples` (samples with a value), `pct_of_profiled` (NULL on the `NA` row = study samples without a value).
+
+**`top_sv_genes_in_study(study, top_n)`** — the Structural Variant Genes table. Each fusion counts for both partner genes.
+
+```sql
+SELECT * FROM top_sv_genes_in_study(study = 'prad_tcga_pan_can_atlas_2018', top_n = 10);
+-- TMPRSS2 204/494 = 41.3%, ERG 203 (41.1%), SLC45A3 26, ACP3 14, ETV4 12
+```
+
+Columns: `hugo_gene_symbol`, `altered_samples`, `profiled_samples` (samples profiled for SVs in that gene), `frequency_pct`, `total_sv_events`.
+
+For custom CNA/SV denominators, the coverage views `cna_panel_gene_coverage` / `cna_wes_coverage` (discrete CNA profiles only) and `sv_panel_gene_coverage` / `sv_wes_coverage` work like the mutation ones.
+
+**`co_altered_genes_in_study(study, gene, top_n)`** — "what else is mutated in X-mutant tumors": each other gene's mutation % in X-mutant vs X-wild-type samples, ranked by the difference. See [Mutant vs Wild-Type Groups](#mutant-vs-wild-type-groups).
+
 ### Variant: Spearman correlation between two genes
 
 Gene expression / copy-number correlation questions ("are TP53 and MYC expression correlated in METABRIC?") belong in `cbioportal://gene-expression-guide`, which covers the `genetic_alteration_derived` table and the `gene_pair_coexpression(study, gene_a, gene_b, profile_type)` view. Don't try to express expression queries through the mutation-frequency views.
@@ -418,29 +462,15 @@ WHERE s.cancer_study_identifier = 'gbm_tcga_pan_can_atlas_2018' AND s.alteration
 
 This is correct for WES studies. For targeted-panel studies, restrict to samples whose panel covers the gene (the `gene_panel` join in Step 2, or `mutation_panel_gene_coverage`).
 
-**"What else is altered in X-mutant tumors?"** Frequencies inside the mutant group alone are dominated by large passenger genes (TTN, MUC16) that are just as common in WT. Report each gene's % in X-mutant AND X-WT and rank by the difference:
+**"What else is altered in X-mutant tumors?"** Frequencies inside the mutant group alone are dominated by large passenger genes (TTN, MUC16) that are just as common in WT. Use `co_altered_genes_in_study`, which reports each gene's % in X-mutant AND X-WT and ranks by the difference:
 
 ```sql
-WITH profiled AS (SELECT DISTINCT sample_unique_id FROM sample_to_gene_panel_derived
-                  WHERE cancer_study_identifier = 'luad_tcga_pan_can_atlas_2018' AND alteration_type = 'MUTATION_EXTENDED'),
-mut AS (SELECT DISTINCT sample_unique_id, hugo_gene_symbol FROM genomic_event_derived
-        WHERE cancer_study_identifier = 'luad_tcga_pan_can_atlas_2018' AND variant_type = 'mutation'
-          AND mutation_status != 'UNCALLED' AND off_panel = 0
-          AND sample_unique_id IN (SELECT sample_unique_id FROM profiled)),
-grp AS (SELECT sample_unique_id,
-               sample_unique_id IN (SELECT sample_unique_id FROM mut WHERE hugo_gene_symbol = 'KRAS') AS is_mut
-        FROM profiled),
-n AS (SELECT countIf(is_mut) AS n_mut, countIf(NOT is_mut) AS n_wt FROM grp)
-SELECT m.hugo_gene_symbol AS gene,
-       round(uniqExactIf(m.sample_unique_id, g.is_mut) * 100 / any(n.n_mut), 1) AS pct_mut,
-       round(uniqExactIf(m.sample_unique_id, NOT g.is_mut) * 100 / any(n.n_wt), 1) AS pct_wt,
-       round(pct_mut - pct_wt, 1) AS diff
-FROM mut m JOIN grp g USING sample_unique_id CROSS JOIN n
-WHERE m.hugo_gene_symbol != 'KRAS'
-GROUP BY gene HAVING uniqExact(m.sample_unique_id) >= 20
-ORDER BY abs(diff) DESC LIMIT 20;
--- 168 KRAS-mutant / 398 WT: TP53 36.9 vs 58.5, EGFR 0.6 vs 17.3, STK11 22.6 vs 9.3 (TTN ~equal)
+SELECT * FROM co_altered_genes_in_study(study = 'luad_tcga_pan_can_atlas_2018', gene = 'KRAS', top_n = 20);
+-- 168 KRAS-mutant / 398 WT: TP53 36.9 vs 58.5, EGFR 0.6 vs 17.3, STK11 22.6 vs 9.3,
+-- KEAP1 20.8 vs 16.8 (not in top 20), TTN 48.8 vs 47.7 (not in top 20)
 ```
+
+Columns: `hugo_gene_symbol`, `mutant_altered` / `mutant_profiled` / `mutant_pct`, `wildtype_altered` / `wildtype_profiled` / `wildtype_pct`, `pct_difference` (mutant − WT, percentage points). Both groups are samples profiled for `gene`; each other gene's denominator counts only group samples profiled for it (panel-aware). Genes mutated in fewer than 10 samples in total are dropped. Mutation-only (no CNA/SV). In multi-cancer studies (msk_chord_2024) differences also reflect cancer-type composition (KRAS-mutant vs APC: colorectal enrichment) — say so, or use a single-cancer study.
 
 Whether a difference is significant needs Fisher's exact — hand off to cBioPortal's Comparison / Mutual Exclusivity tab (see `statistical-tests-guide`).
 
@@ -544,6 +574,8 @@ WHERE variant_type = 'cna'
 GROUP BY hugo_gene_symbol
 ORDER BY amp_count DESC;
 ```
+
+For ranked AMP/HOMDEL genes in a study use `top_cna_genes_in_study`; for one gene's full distribution use `gene_cna_distribution_in_study` (see [Single-study views](#single-study-views-matching-the-portals-study-view-charts)).
 
 **`genomic_event_derived` stores only AMP (2) and HOMDEL (-2).** Shallow deletion / HETLOSS (-1), diploid (0) and gain (1) are only in `genetic_alteration_derived` with `profile_type = 'gistic'`, where `alteration_value` is a String. Never conclude "no shallow deletions" from `cna_alteration = -1` returning 0 rows.
 
