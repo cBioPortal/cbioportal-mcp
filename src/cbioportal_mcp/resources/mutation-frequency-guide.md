@@ -1,5 +1,291 @@
 # Mutation Frequency Analysis Guide
 
+## IMPORTANT: Reporting Mutation Frequencies
+- **ALWAYS report frequencies as percentages**, not raw counts: `frequency = (altered_samples / total_profiled_samples) × 100`
+- For quick frequency lookups, **prefer the TCGA Pan-Cancer Atlas study first**, then offer to expand to other studies
+- When reporting across multiple studies, show **ranges** (e.g., "TP53 is mutated in 30–60% of samples") rather than a single average
+- **NEVER** sum mutation events across studies to compute an aggregate frequency — this can exceed 100% due to double-counting
+- Warn users that samples may overlap across cohorts (e.g., MSK studies may share patients)
+- **Choose and state the counting unit**: use patient-level frequencies for prevalence/rate questions unless the user explicitly asks for samples; use sample-level frequencies when the user asks about samples.
+- **For "across cancer types" questions**, jump to the [Cross-Cancer-Type Mutation Frequency](#cross-cancer-type-mutation-frequency) section below — there is one correct recipe and several common wrong ones.
+
+## Counting Unit: Samples vs Patients
+
+Before answering any mutation count or frequency question, decide whether the unit is samples or patients and state that choice in the answer.
+
+| User wording | Counting unit |
+|--------------|---------------|
+| "prevalence", "rate", "fraction of patients", "patients with", "how common is" | Patient-level: `COUNT(DISTINCT patient_unique_id)` |
+| "samples", "specimens", "biopsies", sample-level cohort composition | Sample-level: `COUNT(DISTINCT sample_unique_id)` |
+| Ambiguous | Ask, or default to patient-level for prevalence/rate language and say so |
+
+### Cross-study sample-count caveat
+
+When an answer touches more than one study and reports a sample count, prepend a one-line caveat:
+
+> Sample IDs are unique within cBioPortal study prefixes, not guaranteed biological-sample identifiers across studies; overlapping cohorts can count the same patient/sample more than once.
+
+Prefer one of these safer approaches:
+
+- Use a shipped `cancer_study_query_preferences` cohort such as `pan_cancer_tcga` or `all_studies_non_redundant`.
+- Restrict to one named study.
+- Aggregate by `patient_unique_id` when the biological question is patient prevalence.
+
+## STOP rule: a frequency above 100% means your query is wrong
+
+If your query returns a frequency over 100%, **do not try to debug or explain the data inconsistency to the user**. The cause is always one of these query bugs:
+
+- Summing mutation events instead of `COUNT(DISTINCT sample_unique_id)` for the numerator
+- Using a study-wide sample count as the denominator instead of the gene-specific profiled count
+- Cross-study aggregation where the same biological sample appears under multiple `sample_unique_id` values (e.g., MSK-IMPACT and MSK-CHORD share patients)
+- **Joining the profiled CTE through `gene_panel` / `gene_panel_list` without a WES branch.** `gene_panel_id = 'WES'` is *not* a row in `gene_panel`, so any inner JOIN through that table silently drops WES-sequenced samples from the denominator while the numerator (from `genomic_event_derived`) still counts their mutations. Always union with `mutation_wes_coverage` (or include WES samples some other way) — see the Cross-Cancer-Type recipe below.
+
+Rewrite the query using one of the canonical patterns below (either single-study or the [Cross-Cancer-Type](#cross-cancer-type-mutation-frequency) recipe). Do **not** loop on diagnostic queries trying to attribute the >100% to "data inconsistencies" — there are none.
+
+## Promoter and Non-Coding Mutation Questions
+
+When the user mentions "promoter", "non-coding", `C228T`, `C250T`, `-124C>T`, `-146C>T`, or "TERT promoter", do not treat the question as "all mutations in the gene."
+
+TERT promoter mutations are a common special case:
+
+- `C228T` corresponds to `-124C>T` in the TERT promoter.
+- `C250T` corresponds to `-146C>T` in the TERT promoter.
+- These are upstream promoter alterations, not protein-coding amino-acid substitutions.
+- They may live in promoter-specific mutation profiles or be flagged differently from coding variants depending on the study.
+
+### Required Workflow
+
+1. Inspect available molecular profiles / columns for the study before querying.
+2. Look for promoter-specific profiles or fields before falling back to `genomic_event_derived`.
+3. If using `genomic_event_derived`, filter to promoter/non-coding records explicitly. Do not report all `TERT` mutation records as promoter mutations.
+4. If the needed promoter fields/profiles are absent in the deployment, say so and do not substitute coding mutations.
+
+Schema exploration pattern:
+
+```sql
+SELECT DISTINCT
+    cancer_study_identifier,
+    genetic_profile_id,
+    genetic_alteration_type,
+    datatype,
+    name
+FROM genetic_profile
+WHERE cancer_study_identifier = 'your_study_id'
+  AND (
+      lower(genetic_profile_id) LIKE '%promoter%'
+      OR lower(name) LIKE '%promoter%'
+  )
+ORDER BY genetic_profile_id;
+```
+
+If promoter data is present, inspect exact mutation fields before counting:
+
+```sql
+SELECT *
+FROM genomic_event_derived
+WHERE cancer_study_identifier = 'your_study_id'
+  AND hugo_gene_symbol = 'TERT'
+LIMIT 20;
+```
+
+Then use only columns that actually encode promoter/non-coding status, genomic position, or the canonical promoter alleles. If no such columns exist, answer that this deployment does not expose enough promoter-specific fields for the requested count.
+
+### Answer Pattern
+
+> I treated this as a promoter-mutation question, not an all-TERT-mutation question. I only counted records from promoter-specific data/fields. Coding TERT mutations are excluded.
+
+If promoter data cannot be identified:
+
+> I found TERT mutation records, but I do not see promoter-specific fields or profiles needed to distinguish C228T/C250T promoter mutations in this deployment. I should not report all TERT mutations as promoter mutations.
+
+## Cross-Cancer-Type Mutation Frequency
+
+When the user asks about a gene "across cancer types" or "in different cancers", look up the right cohort in **`cancer_study_query_preferences`** and group by the per-sample `CANCER_TYPE` clinical attribute. Never hand-pick study lists yourself.
+
+### Pick the preference that matches the question
+
+`cancer_study_query_preferences` is a `(preference_name, cancer_study_identifier, notes)` lookup. A preference can resolve to many studies (a cohort) or a single study (a recommended cohort for a specific question type). The set of preferences depends on which SQL files this deployment loaded — discover what's available with:
+
+```sql
+SELECT preference_name, COUNT(*) AS studies, any(notes) AS notes
+FROM cancer_study_query_preferences
+GROUP BY preference_name
+ORDER BY preference_name;
+```
+
+Preferences shipped with the cBioPortal-public deployment (others may differ):
+
+| `preference_name`           | Studies | When to use |
+|-----------------------------|---------|-------------|
+| `pan_cancer_tcga`           | 32      | **Default for "across cancer types" questions** — including ones phrased as "all cancer types." TCGA PanCancer Atlas uses one consistent `CANCER_TYPE` label per study with balanced sample sizes (hundreds per type), so each cancer type gets one bucket with a meaningful denominator. Canonical published reference dataset. |
+| `large_genomic_cohort`      | 1       | `msk_impact_50k_2026`. Genomic-pattern questions (mutation frequency, co-occurrence) where statistical power matters more than cross-deployment portability. |
+| `treatment_outcomes`        | 1       | `msk_chord_2024`. Treatment / outcomes questions — pulls treatment context from `clinical_event_derived` (see `treatment-guide`). |
+| `all_studies_non_redundant` | 242     | **Only when the user explicitly asks for broader-than-TCGA coverage or for non-TCGA studies specifically.** Big footgun: `CANCER_TYPE` strings are NOT normalized across studies, so the same disease appears under multiple labels (e.g. "Ovarian Cancer" / "Ovarian Carcinoma" / "Ovarian Epithelial Tumor"; "Lung Adenocarcinoma" from one small specialty study vs "Non-Small Cell Lung Cancer" from TCGA + GENIE). Denominators per row vary by orders of magnitude. Frequencies in small per-label buckets are not representative biology — they're artifacts of how that study chose to label its samples. Always warn the user when reporting from this cohort. |
+
+If a preference is missing from this deployment, the discovery query above will tell you what's available — don't hand-pick study lists; ask the user which cohort they want.
+
+Do **not** combine MSK studies (`msk_impact_*`, `msk_chord_*`, `genie_public`) into one query — their `sample_unique_id`s differ but the underlying patients overlap, which inflates counts. Pick one preference.
+
+### Canonical recipe — parameterized view
+
+The whole recipe is wrapped in a parameterized view. The agent's "canonical" query is one line:
+
+```sql
+SELECT *
+FROM gene_mutation_frequency_by_cancer_type(
+    preference = 'pan_cancer_tcga',  -- default; see preference table above for when to switch
+    gene       = 'TP53'
+)
+ORDER BY frequency_pct DESC;
+```
+
+Returns `(cancer_type, altered_samples, profiled_samples, frequency_pct)` for every cancer type with ≥ 50 profiled samples for the gene in the cohort. The recipe works identically whether the preference resolves to 1 study or 242.
+
+The view is defined in `sql/4-mutation-frequency-views.sql` and handles the WES-vs-named-panel split internally (see "Why this works" below). The agent should prefer this view for any "gene X across cancer types in cohort Y" question instead of writing the JOIN chain by hand.
+
+### Variant: a single named study (`gene_mutation_frequency_in_study`)
+
+Use when the user names a specific study by id and that study isn't part of a shipped preference. Returns one row per cancer type with ≥ 50 profiled samples — typically one row for single-cancer-type studies (`brca_metabric`, `lung_msk_2017`, ...) and one row per cancer type for multi-cancer-type studies (`msk_chord_2024`).
+
+```sql
+SELECT *
+FROM gene_mutation_frequency_in_study(
+    study = 'brca_metabric',
+    gene  = 'TP53'
+)
+ORDER BY frequency_pct DESC;
+```
+
+Same WES-aware denominator handling as the cohort view.
+
+### Variant: a handful of named studies (`gene_mutation_frequency_in_studies`)
+
+Use when the user names two or more studies that aren't a shipped preference and aren't worth defining one for — e.g. *"TP53 in METABRIC and TCGA Pan-Cancer Atlas breast"*. Takes an `Array(String)` of study ids:
+
+```sql
+SELECT *
+FROM gene_mutation_frequency_in_studies(
+    studies = ['brca_metabric', 'brca_tcga_pan_can_atlas_2018'],
+    gene    = 'TP53'
+)
+ORDER BY frequency_pct DESC;
+```
+
+**You are responsible for non-overlap.** Sample IDs are study-prefixed (`<study_id>_<sample.stable_id>`), so the same physical sample appearing in two studies under different IDs WILL be double-counted by this view and produce a frequency that's higher than reality. The shipped preferences (`all_studies_non_redundant`, `pan_cancer_tcga`) are vetted to be non-overlapping; ad-hoc lists are not. If you can't vouch for non-overlap, fall back to the single-study view or a shipped preference.
+
+### Variant: copy-number or structural-variant alterations (`gene_alteration_frequency_by_cancer_type`)
+
+The cohort view above filters to point mutations only. For amplifications, deep deletions, or fusions/SVs, use the generalized view that takes an `alteration` token:
+
+```sql
+SELECT *
+FROM gene_alteration_frequency_by_cancer_type(
+    preference = 'pan_cancer_tcga',
+    gene       = 'MYC',
+    alteration = 'amplification'         -- or 'deep_deletion', 'structural_variant', 'mutation'
+)
+ORDER BY frequency_pct DESC;
+```
+
+Numerator and denominator both switch on the `alteration` parameter:
+
+| `alteration` token   | Counts (numerator)                              | Profiled denominator (alteration_type)  |
+|----------------------|-------------------------------------------------|-----------------------------------------|
+| `mutation`           | `variant_type='mutation'` AND `mutation_status != 'UNCALLED'` | `MUTATION_EXTENDED`                     |
+| `amplification`      | `variant_type='cna'` AND `cna_alteration = 2`   | `COPY_NUMBER_ALTERATION`                |
+| `deep_deletion`      | `variant_type='cna'` AND `cna_alteration = -2`  | `COPY_NUMBER_ALTERATION`                |
+| `structural_variant` | `variant_type='structural_variant'`             | `STRUCTURAL_VARIANT`                    |
+
+For `alteration='mutation'` the result equals `gene_mutation_frequency_by_cancer_type` (which is kept as the cleaner shorthand for that case).
+
+### Variant: top-N most-mutated genes in a cohort (`top_mutated_genes_in_cohort`)
+
+When the user asks "what are the most-mutated genes in cohort X" instead of naming a specific gene, use this view. Mirrors cbioportal-backend's `StudyViewMapper.getMutatedGenes` with the same WES-aware per-gene denominator as the gene-frequency view.
+
+```sql
+SELECT *
+FROM top_mutated_genes_in_cohort(
+    preference = 'pan_cancer_tcga',
+    top_n      = 20
+);
+```
+
+Returns `(hugo_gene_symbol, altered_samples, profiled_samples, frequency_pct, total_mutation_events)`, sorted by `altered_samples DESC` then gene symbol ASC (matching the backend's tiebreaker). Per-gene `profiled_samples` correctly reflects which samples were assayed for that gene — for targeted-panel cohorts (`large_genomic_cohort` = msk_impact_50k_2026), the denominator is samples on a panel that includes the gene; for WES cohorts (`pan_cancer_tcga`), every gene gets the same WES-sample denominator.
+
+### Variant: Spearman correlation between two genes
+
+Gene expression / copy-number correlation questions ("are TP53 and MYC expression correlated in METABRIC?") belong in `cbioportal://gene-expression-guide`, which covers the `genetic_alteration_derived` table and the `gene_pair_coexpression(study, gene_a, gene_b, profile_type)` view. Don't try to express expression queries through the mutation-frequency views.
+
+### When to drop down to the expanded CTE form
+
+For variations none of these three views cover (top-N most-mutated genes per cancer type, comparing two specific cancer types, custom alteration filters), drop down to the expanded CTE form below and adapt — but start from this CTE form, not a from-scratch JOIN chain that risks missing the WES branch:
+
+```sql
+WITH cohort AS (
+    SELECT cancer_study_identifier
+    FROM cancer_study_query_preferences
+    WHERE preference_name = 'pan_cancer_tcga'
+),
+sample_cancer_type AS (
+    SELECT cd.sample_unique_id, cd.attribute_value AS cancer_type
+    FROM clinical_data_derived cd
+    JOIN cohort c USING (cancer_study_identifier)
+    WHERE cd.attribute_name = 'CANCER_TYPE'  -- or 'CANCER_TYPE_DETAILED'
+),
+altered AS (
+    SELECT sct.cancer_type,
+           COUNT(DISTINCT ged.sample_unique_id) AS altered_samples
+    FROM genomic_event_derived ged
+    JOIN cohort c USING (cancer_study_identifier)
+    JOIN sample_cancer_type sct USING (sample_unique_id)
+    WHERE ged.variant_type = 'mutation'
+      AND ged.mutation_status != 'UNCALLED'
+      AND ged.hugo_gene_symbol = 'TP53'  -- target gene
+      AND ged.off_panel = 0
+    GROUP BY sct.cancer_type
+),
+profiled_samples_for_gene AS (
+    SELECT sample_unique_id, cancer_study_identifier
+    FROM mutation_panel_gene_coverage
+    WHERE hugo_gene_symbol = 'TP53'  -- same gene as above
+    UNION ALL
+    SELECT sample_unique_id, cancer_study_identifier
+    FROM mutation_wes_coverage
+),
+profiled AS (
+    SELECT sct.cancer_type,
+           COUNT(DISTINCT p.sample_unique_id) AS profiled_samples
+    FROM profiled_samples_for_gene p
+    JOIN cohort c USING (cancer_study_identifier)
+    JOIN sample_cancer_type sct USING (sample_unique_id)
+    GROUP BY sct.cancer_type
+)
+SELECT a.cancer_type,
+       a.altered_samples,
+       p.profiled_samples,
+       ROUND(a.altered_samples * 100.0 / NULLIF(p.profiled_samples, 0), 1) AS frequency_pct
+FROM altered a
+JOIN profiled p USING (cancer_type)
+WHERE p.profiled_samples >= 50  -- suppress tiny cancer types
+ORDER BY frequency_pct DESC;
+```
+
+### Why this works
+- **`cancer_study_query_preferences` enforces a non-overlapping cohort.** Every shipped preference resolves to studies with no shared samples, so `COUNT(DISTINCT sample_unique_id)` doesn't double-count.
+- **`CANCER_TYPE` from `clinical_data_derived`, not `type_of_cancer_id` from `cancer_study`.** Multi-cancer-type studies (MSK-CHORD, MSK-IMPACT-50k, GENIE) carry `cancer_study.type_of_cancer_id = 'mixed'`; the per-sample diagnosis lives in the clinical data. Using the clinical attribute also works uniformly for single-cancer-type studies in the same cohort.
+- **WES-aware profiled denominator.** Samples on a named panel are profiled for the genes listed in `gene_panel_list`; WES samples are profiled for *every* gene. `WES` is not in the `gene_panel` table at all, so the older recipe that joined through `gene_panel` / `gene_panel_list` silently dropped WES rows — producing >100% frequencies wherever WES studies contributed altered samples but no profiled samples. The two views in `sql/4-mutation-frequency-views.sql` (`mutation_panel_gene_coverage` and `mutation_wes_coverage`) encapsulate this split so every gene-frequency query gets the WES branch for free via the `UNION ALL` above.
+
+### When to vary
+- **Top-N most-mutated genes per cancer type**: drop the `hugo_gene_symbol = '…'` filter and group by `(cancer_type, hugo_gene_symbol)`. Same CTEs.
+- **Comparing two specific cancer types**: filter `sct.cancer_type IN ('Cancer A', 'Cancer B')` after resolving via `search_oncotree`.
+- **Treatment-related cross-cancer questions**: switch to `preference_name = 'treatment_outcomes'` and pull treatment context from `clinical_event_derived` (see `treatment-guide`).
+
+### What NOT to do
+- **DO NOT** hand-build a `cancer_study_identifier IN ('luad_tcga', 'coadread_tcga', ...)` list — look it up in `cancer_study_query_preferences` so the canonical cohort definition stays consistent across queries.
+- **DO NOT** UNION mutation events from many separate studies and then group by `type_of_cancer_id` — frequencies don't compose without per-cancer-type profiling denominators.
+- **DO NOT** group by `cancer_study.type_of_cancer_id` for `msk_chord_2024`, `msk_impact_50k_2026`, or GENIE — they're `type_of_cancer_id = 'mixed'`. Use `clinical_data_derived.CANCER_TYPE`.
+- **DO NOT** try to debug a >100% result query-by-query. See the STOP rule above.
+
 ## Overview
 For accurate gene mutation frequency calculations, you must use gene-specific profiling denominators, not study-wide sample counts.
 
@@ -32,9 +318,10 @@ For accurate gene mutation frequency calculations, you must use gene-specific pr
 
 ### Key Rules:
 - **DO NOT use genomic_event_derived for total sample counts** - this gives study-wide counts, not gene-specific
-- Report **sample frequencies only** for accurate, memory-efficient analysis
+- Report **the requested counting unit**: patient-level for prevalence/rate questions, sample-level only when the user asks for samples or specimens
 - **Each gene has different profiling coverage** - denominators vary by gene
 - Sample frequency: numberOfAlteredSamplesOnPanel / gene_specific_profiled_samples
+- Patient frequency: altered patients with at least one profiled altered sample / patients with at least one sample profiled for the gene
 - **CRITICAL: Each gene will have different profiling coverage** (e.g., TP53 might be profiled in 25,040 samples, MUC16 in 23,000)
 
 ## Recommended Query Pattern
@@ -163,7 +450,7 @@ ORDER BY sample_frequency_percent DESC;
 - **Off-panel filtering**: Use `off_panel = 0` to exclude mutations not covered by the gene panel
 - **Mutation status filtering**: Exclude `UNCALLED` mutations for accurate counts
 - **Study-specific analysis**: Always filter by specific cancer study for consistent results
-- **Memory efficiency**: Sample-level analysis is more memory-efficient than patient-level for large datasets
+- **Counting unit**: Patient-level prevalence is usually more clinically meaningful than sample-level prevalence because patients can have multiple samples
 - **Be efficient**: Minimize database calls where possible
 
 ## Copy Number Alteration (CNA) Queries

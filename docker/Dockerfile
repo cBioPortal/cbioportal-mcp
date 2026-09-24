@@ -4,17 +4,21 @@ FROM python:3.11-slim
 # Set working directory
 WORKDIR /app
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
+# uv (instead of pip) so the build respects uv.lock
+RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     curl \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && pip install --no-cache-dir uv
 
-# Copy the source code into the image
+# Deps-only layer — cache stays warm unless pyproject/uv.lock change.
+COPY pyproject.toml uv.lock README.md ./
+RUN uv sync --frozen --no-dev --no-install-project
+
+# Source layer — invalidates on any source/SQL change. The install below
+# is a fast project-only step now that deps are already in .venv.
 COPY . /app
-
-# Install dependencies
-RUN pip install --upgrade pip && pip install .
+RUN uv sync --frozen --no-dev
 
 # Set environment variables expected at runtime (user should override as needed)
 ENV CLICKHOUSE_HOST=localhost \
@@ -31,5 +35,4 @@ ENV CLICKHOUSE_HOST=localhost \
 # Expose port (optional — based on what the MCP server binds to; change if needed)
 EXPOSE 8000
 
-# Default command
-CMD ["cbioportal-mcp"]
+CMD ["uv", "run", "cbioportal-mcp"]

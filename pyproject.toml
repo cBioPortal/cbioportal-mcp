@@ -13,9 +13,20 @@ authors = [
     { name = "cBioPortal MCP Contributors" }
 ]
 dependencies = [
-    "fastmcp",
-    "mcp-clickhouse",
+    "fastmcp>=2.12.3,<3.0.0",
+    # 0.5.0 caches clients natively (connection reuse, server-side cancellation,
+    # https://github.com/ClickHouse/mcp-clickhouse/pull/152) so cbioportal_mcp no
+    # longer needs its own pooling patch. Stay off 0.6.0, which moves to FastMCP 4.
+    "mcp-clickhouse==0.5.0",
     "clickhouse-driver>=0.2.0",
+    "opentelemetry-sdk>=1.27.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.27.0",
+    "ddtrace",
+    # Adds the `redis` extra to fastmcp's own py-key-value-aio pin (which only
+    # requests `disk` and `memory`) so RedisStore is importable for OAuth
+    # client/token storage. Version range mirrors fastmcp>=2.10,<2.14's pin
+    # so both requirements resolve to one shared py-key-value-aio install.
+    "py-key-value-aio[redis]>=0.2.8,<0.4.0",
 ]
 
 [project.optional-dependencies]

@@ -38,15 +38,64 @@ SELECT
     cs.cancer_study_identifier,
     cs.name as study_name,
     cs.description,
-    COUNT(DISTINCT p.internal_id) as patient_count,
-    COUNT(DISTINCT s.internal_id) as sample_count
+    cs.sample_count,
+    COUNT(DISTINCT p.internal_id) as patient_count
 FROM cancer_study cs
 LEFT JOIN patient p ON cs.cancer_study_id = p.cancer_study_id
-LEFT JOIN sample s ON p.internal_id = s.patient_id
 WHERE
     cs.cancer_study_identifier = 'your_study_id'
-GROUP BY cs.cancer_study_identifier, cs.name, cs.description;
+GROUP BY cs.cancer_study_identifier, cs.name, cs.description, cs.sample_count;
 ```
+
+### 4. Find Studies by Available Data Types
+
+Use this when the user asks *"which studies have mutation and copy-number data for X"*, *"studies with expression for Y"*, *"is there any imaging data"*, or any *"studies with Z data"* question. `cancer_study` has one precomputed sample count per data type — filter on them. No join and no schema exploration needed. These are the same counts as the portal's study list and its "Data type" filter.
+
+**Canonical query — studies with ALL requested data types for a cancer type:**
+
+```sql
+SELECT
+    cancer_study_identifier,
+    name,
+    sample_count,
+    mutation_sample_count,
+    cna_sample_count
+FROM cancer_study
+WHERE type_of_cancer_id = 'luad'          -- ← OncoTree code from search_oncotree
+  AND mutation_sample_count > 0           -- ← one condition per required data type
+  AND cna_sample_count > 0
+ORDER BY sample_count DESC;
+```
+
+**Data type → column** (a count of 0 means the study doesn't have that data):
+
+| Data type in the user's question | Column (portal "Data type" filter label) |
+|---|---|
+| samples in the study | `sample_count` |
+| mutation / mutations | `mutation_sample_count` ("Mutations") |
+| copy-number / CNA / amplification / deletion | `cna_sample_count` ("CNA") |
+| structural variant / fusion | `structural_variant_sample_count` |
+| RNA-Seq / mRNA expression | `rna_seq_sample_count` ("RNA-Seq") |
+| microarray expression | `mrna_microarray_sample_count` ("RNA (microarray)") |
+| microRNA | `mirna_sample_count` ("miRNA") |
+| protein / RPPA | `rppa_sample_count` ("RPPA") |
+| mass-spectrometry proteomics | `mass_spectrometry_sample_count` ("Protein Mass-Spectrometry") |
+| treatment | `treatment_patient_count` ("Treatment") — counts **patients**, not samples |
+| imaging / pathology slides / other linked resources | `resource_sample_counts['<display name>'] > 0`, e.g. `'Slide Microscopy'`, `'Computed Tomography'`, `'Magnetic Resonance'`, `'H&E Slide'`; list what exists with `SELECT DISTINCT arrayJoin(mapKeys(resource_sample_counts)) FROM cancer_study` |
+
+**Rules:**
+
+- **Resolve the cancer type first** via `search_oncotree(term)`; use the returned `type_of_cancer_id` (lowercase) in the WHERE clause. Don't `ILIKE '%lung%'`.
+- **ALL vs ANY:** AND the conditions for "study has all of these types"; OR them for "at least one".
+- Report the counts, not just the study names: "TCGA LUAD PanCancer: 566 samples with mutations, 511 with CNA".
+- Do NOT `clickhouse_list_tables` or `clickhouse_list_table_columns` first — this query is the schema you need.
+- Do NOT run per-study probing queries. One query returns the whole list.
+
+**Worked example — "Which cBioPortal studies include lung adenocarcinoma samples with mutation and copy-number data?"**
+
+1. `search_oncotree("lung adenocarcinoma")` → `LUAD`
+2. Run the canonical query above with `type_of_cancer_id = 'luad'`
+3. Return the list of studies with their sample counts, and use `list_studies(search="<id>")` (or the navigator) only if the user then wants details on a specific one
 
 ## Sample Type Filtering
 

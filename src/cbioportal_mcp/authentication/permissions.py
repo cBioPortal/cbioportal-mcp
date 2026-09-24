@@ -6,10 +6,8 @@ On startup we verify that the configured ClickHouse user:
 
 1. Has the minimal required privileges to do its job:
    - SELECT on the application database (config.mcp_database.*)
-   - Depending on schema discovery mode:
-     * mode "system": must be able to SELECT from system tables
-       (because code queries system.tables/system.columns).
-     * mode "show": must be able to run SHOW TABLES FROM <db>.
+   - Schema discovery uses SHOW TABLES and DESCRIBE TABLE, which
+     only require SELECT on the target database (no system.* access needed).
 
 2. Does NOT have excessive privileges:
    - No INSERT / UPDATE / DELETE / DDL / admin privileges on *.*.
@@ -19,12 +17,13 @@ If checks fail, we raise PermissionError so the application can fail fast.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from typing import Any, Dict, List
 
 from cbioportal_mcp.env import McpConfig
-from mcp_clickhouse.mcp_server import execute_query
+from mcp_clickhouse.mcp_server import run_query
 from fastmcp.exceptions import ToolError
 
 logger = logging.getLogger(__name__)
@@ -48,7 +47,6 @@ def _check_grant(priv: str, scope: str) -> bool:
 
     Valid scopes include:
       - "<db>.*"
-      - "system.*"
       - "*.*"
       - "<db>.table[*]" (not used here, but legal)
 
@@ -62,7 +60,7 @@ def _check_grant(priv: str, scope: str) -> bool:
         scope = "*.*"
 
     try:
-        raw = execute_query(f"CHECK GRANT {priv} ON {scope}")
+        raw = json.loads(run_query(f"CHECK GRANT {priv} ON {scope}"))
     except ToolError as e:
         logger.warning(
             "CHECK GRANT %s ON %s failed (treating as not granted): %s",
@@ -104,8 +102,8 @@ def ensure_db_permissions(config: McpConfig) -> None:
 
     - Minimal:
         * SELECT ON <config.mcp_database>.* must be granted.
-        * In mode 'system': SELECT ON system.* must be granted.
-        * In mode 'show'  : SHOW TABLES FROM <config.mcp_database> must succeed.
+        * Schema discovery (SHOW TABLES, DESCRIBE TABLE) is implicitly
+          allowed when SELECT is granted on the database.
 
     - Maximal:
         * No FORBIDDEN_PRIVS may be granted on *.*.

@@ -225,6 +225,51 @@ ORDER BY sample_count DESC;
 
 **Key Rule**: When asked about "primary samples", "metastatic samples", etc., ALWAYS use `clinical_data_derived` with `attribute_name = 'SAMPLE_TYPE'`. NEVER use the `sample.sample_type` column!
 
+### 5c. 🚨 FABRICATING OncoKB / DRIVER MUTATION ANNOTATIONS
+
+#### ❌ Wrong: Claiming mutations are OncoKB-annotated drivers without querying driver data
+```sql
+-- INCORRECT - assuming all truncating mutations are "OncoKB drivers"
+SELECT hugo_gene_symbol, mutation_variant, mutation_type
+FROM genomic_event_derived
+WHERE cancer_study_identifier = 'coadread_mskcc_2017'
+    AND hugo_gene_symbol = 'BRAF'
+    AND variant_type = 'mutation'
+-- Then claiming: "These are all OncoKB-annotated driver mutations"
+```
+**Problem**: Not all mutations in a gene are drivers. OncoKB driver annotations are separate from mutation occurrence data. Truncating mutations, missense mutations, etc. are NOT automatically "drivers" — they must be specifically annotated by OncoKB.
+
+#### ✅ Correct: Check for driver annotation columns first
+```sql
+-- Step 1: Check if driver annotation columns exist
+-- Use clickhouse_list_table_columns('genomic_event_derived')
+-- and look for columns with "driver" in the name
+
+-- Step 2: If driver columns exist, use them to filter
+SELECT hugo_gene_symbol, mutation_variant, driver_filter
+FROM genomic_event_derived
+WHERE cancer_study_identifier = 'coadread_mskcc_2017'
+    AND hugo_gene_symbol = 'BRAF'
+    AND variant_type = 'mutation'
+    AND driver_filter IS NOT NULL;
+
+-- Step 3: If driver columns do NOT exist, inform the user:
+-- "Driver mutation annotations are not available in the current database.
+--  Use the cBioPortal web interface with OQL DRIVER syntax (e.g., BRAF: MUT_DRIVER)"
+```
+
+**OQL DRIVER syntax (for reference — used in cBioPortal web UI, not SQL):**
+- `TP53: DRIVER` — all OncoKB-annotated driver alterations (mutations, fusions, CNAs)
+- `BRAF: MUT_DRIVER` — OncoKB-annotated driver mutations in BRAF
+- `BRAF: AMP_DRIVER` — OncoKB-annotated driver amplifications
+- `BRAF: HOMDEL_DRIVER` — OncoKB-annotated driver deletions
+
+**Key rules:**
+1. NEVER claim a mutation is an "OncoKB driver" without confirming from driver annotation data
+2. Always check for driver columns before answering driver mutation questions
+3. If driver data is unavailable, say so and suggest the web UI with OQL DRIVER syntax
+4. "Frequently mutated" does NOT mean "oncogenic" or "driver"
+
 ## Data Type Pitfalls
 
 ### 6. 🚨 STRING VS NUMERIC COMPARISONS
@@ -327,6 +372,45 @@ FROM genomic_event_derived
 GROUP BY hugo_gene_symbol;
 ```
 
+### 10b. 🚨 RESOLVING STUDY IDENTIFIERS VIA A SUBQUERY ON A FACT TABLE
+
+`cancer_study` is a 539-row dimension table with every `cancer_study_identifier`
+in the deployment. `genetic_alteration_derived`, `genomic_event_derived`, and
+`clinical_data_derived` are multi-billion-row fact tables. Never use a fact
+table to look up which study identifiers match a pattern — resolve against
+`cancer_study` (or `list_studies()` / `search_oncotree()`) first.
+
+#### ❌ Wrong: subquery on a fact table just to find study identifiers
+```sql
+-- INCORRECT - scans the whole 10.29B-row fact table to resolve study IDs
+SELECT hugo_gene_symbol, alteration_value
+FROM genetic_alteration_derived
+WHERE cancer_study_identifier IN (
+    SELECT DISTINCT cancer_study_identifier
+    FROM genetic_alteration_derived
+    WHERE cancer_study_identifier LIKE '%brca%'
+)
+AND profile_type = 'mrna';
+```
+
+#### ✅ Correct: resolve against the small dimension table, then pass a literal list
+```sql
+-- Step 1: resolve against cancer_study (539 rows)
+SELECT cancer_study_identifier FROM cancer_study
+WHERE cancer_study_identifier LIKE '%brca%';
+
+-- Step 2: use the resolved identifiers as a literal IN (...) list
+SELECT hugo_gene_symbol, alteration_value
+FROM genetic_alteration_derived
+WHERE cancer_study_identifier IN ('brca_metabric', 'brca_tcga_pan_can_atlas_2018')
+AND profile_type = 'mrna';
+```
+
+**Key rule:** If you need to know *which* studies match something, ask
+`cancer_study` (or `list_studies`/`search_oncotree`), never a fact table —
+even a `DISTINCT` subquery still has to scan every row of the fact table to
+find the distinct values.
+
 ## CNA and Column Name Pitfalls
 
 ### 11. 🚨 CNA VALUES ARE NUMERIC, NOT STRINGS
@@ -423,6 +507,167 @@ WHERE cs.cancer_study_identifier ILIKE '%htan%';
 
 **Key rule:** cBioPortal stores external resource links in `resource_sample`, `resource_patient`, `resource_study`, and `resource_definition` tables. Always check these before saying something is out of scope.
 
+### 15. 🚨 HALLUCINATED TABLES OR COLUMNS
+
+#### ❌ Wrong: Querying tables or columns that don't exist
+```sql
+-- INCORRECT - assumes an 'oncokb_annotations' table exists
+SELECT * FROM oncokb_annotations WHERE gene = 'BRAF';
+
+-- INCORRECT - assumes a 'tumor_grade' column exists
+SELECT tumor_grade FROM clinical_data_derived WHERE cancer_study_identifier = 'brca_tcga';
+```
+
+#### ✅ Correct: Always verify schema before querying
+```sql
+-- Step 1: Verify the table exists
+-- Use clickhouse_list_tables tool first
+
+-- Step 2: Verify columns exist
+-- Use clickhouse_list_table_columns(table) tool first
+
+-- Step 3: Only then build your query using confirmed tables and columns
+SELECT attribute_value FROM clinical_data_derived
+WHERE attribute_name = 'TUMOR_GRADE' AND cancer_study_identifier = 'brca_tcga';
+```
+
+**Key rule:** Never assume a table or column exists. Always check with `clickhouse_list_tables` and `clickhouse_list_table_columns` first.
+
+#### ❌ Wrong: counting a study's samples through patient/sample joins
+```sql
+-- INCORRECT - can differ from the portal's study list by a few samples
+SELECT cs.cancer_study_identifier, COUNT(DISTINCT s.internal_id) as sample_count
+FROM cancer_study cs
+JOIN patient p ON p.cancer_study_id = cs.cancer_study_id
+JOIN sample s ON s.patient_id = p.internal_id
+WHERE cs.cancer_study_identifier = 'brca_metabric'
+GROUP BY cs.cancer_study_identifier;
+```
+
+#### ✅ Correct: read the precomputed columns on cancer_study
+```sql
+-- CORRECT - the same numbers the portal shows; see sample-filtering-guide §4 for the other data-type columns
+SELECT cancer_study_identifier, sample_count, mutation_sample_count, cna_sample_count
+FROM cancer_study
+WHERE cancer_study_identifier = 'brca_metabric';
+```
+
+#### ❌ Wrong: `corrSpearman(...)` — not a real ClickHouse function
+```sql
+-- INCORRECT - ClickHouse has no corrSpearman function; this errors
+SELECT corrSpearman(a.v, b.v) AS spearman_correlation
+FROM a JOIN b USING (sample_unique_id);
+```
+
+#### ✅ Correct: `rankCorr(...)` is ClickHouse's Spearman-correlation function
+```sql
+-- CORRECT - rankCorr computes Spearman's rank correlation
+SELECT rankCorr(a.v, b.v) AS spearman_correlation
+FROM a JOIN b USING (sample_unique_id);
+-- See gene_pair_coexpression in sql/5-gene-expression-views.sql for the
+-- full working pattern, or cbioportal://gene-expression-guide.
+```
+
+### 16. 🚨 SILENT QUERY SUBSTITUTION ("did you mean...")
+
+When the user's wording differs from canonical terminology (e.g. "V600V" looks like "V600E" with a typo, or "point mutation" sounds like "missense"), it is forbidden to silently rewrite the question and answer the rewritten version. Doing so produces an answer that looks confident but is for a different question — the user cannot tell what was changed.
+
+#### ❌ Wrong: silently substitute
+
+> User: *"Find patients in colorectal cancer with the V600V alteration in BRAF"*
+> Agent: *(internally treats this as V600E)* "I found 412 samples with BRAF V600E in colorectal studies..."
+
+> User: *"What is the most prevalent TP53 mutation in uterine cancer that is not a point mutation?"*
+> Agent: *(internally treats "point mutation" = "missense", silently excludes only missense)* "The most prevalent non-missense TP53 mutation is..."
+
+#### ✅ Correct: answer the literal question, flag any normalization
+
+For an unusual-looking variant the user may have typed deliberately:
+- Query for what was asked, literally.
+- If 0 rows come back, **explain *why* zero is the expected answer** before suggesting a likely-intended alternative. For synonymous variants (e.g. BRAF V600V, TP53 R175R), the explanation is: *cBioPortal's mutation tables filter out synonymous (silent) variants in most studies, so 0 hits means "filtered upstream", not "no such variant exists in any patient"*. Then ask: *"Did you mean V600E (the canonical activating variant)? Or would you like me to look for V600V in the studies that do retain synonymous calls?"*
+- If the wording is ambiguous (e.g. "point mutation"), ask the user which definition they meant before querying — do not pick one silently.
+
+#### Mutation-type terminology mapping (use this to disambiguate)
+
+| User says | Canonical definition | `mutation_type` filter |
+|---|---|---|
+| "point mutation" | Any SNV (single-nucleotide variant) — includes missense, nonsense, synonymous, splice-site SNVs | `mutation_type IN ('Missense_Mutation','Nonsense_Mutation','Silent','Splice_Site')` — **but ask the user to confirm scope first** |
+| "missense" | Single amino-acid substitution that changes the protein | `mutation_type = 'Missense_Mutation'` |
+| "nonsense" / "stop-gain" | Premature stop codon | `mutation_type = 'Nonsense_Mutation'` |
+| "synonymous" / "silent" | Nucleotide change with no amino-acid change | `mutation_type = 'Silent'` (**often filtered out of public datasets** — see below) |
+| "splice site" | Mutation in canonical splice acceptor/donor | `mutation_type = 'Splice_Site'` |
+| "frameshift" | Indel changing reading frame | `mutation_type IN ('Frame_Shift_Ins','Frame_Shift_Del')` |
+| "indel" / "in-frame" | In-frame insertion or deletion | `mutation_type IN ('In_Frame_Ins','In_Frame_Del')` |
+| "truncating" | Anything that disrupts the protein early | `mutation_type IN ('Nonsense_Mutation','Frame_Shift_Ins','Frame_Shift_Del','Splice_Site','Nonstop_Mutation')` |
+
+**Synonymous-variant filter.** Most cBioPortal studies drop `Silent` calls during the MAF/import pipeline because they're not biologically interesting and not annotated. A literal query for a synonymous variant (e.g. BRAF V600V) will return 0 rows from almost every study — the correct answer is *"filtered out of the dataset"*, not *"does not exist"*.
+
+**Promoter mutations.** TERT promoter variants (C228T, C250T) are *not* missense — they sit upstream of the coding sequence. Don't search for them with a missense filter, and don't count all `TERT` mutations as promoter mutations. First inspect the study's promoter profiles and available columns. See `mutation-frequency-guide.md` for the canonical pattern.
+
+### 17. 🚨 FLAWED PREMISE OR NONEXISTENT DATA FIELD
+
+If the user's question relies on a premise that conflicts with cBioPortal data or schema, surface that problem before running adjacent analyses.
+
+#### ❌ Wrong: plow forward with adjacent data
+
+> User: *"List expression values for tumors with the heavily discussed MAP2K1 codon 105 driver alteration that changes mRNA stability."*
+> Agent: runs broad MAP2K1 mutation and expression queries, then stitches together a story.
+
+#### ✅ Correct: validate the premise first
+
+> I need to validate the premise first. cBioPortal stores mutations, copy number, expression, methylation, clinical data, and some annotations, but I do not see an mRNA-stability field. I also should not assume a MAP2K1 codon-105 driver alteration exists without confirming it in the mutation data. I can check whether MAP2K1 codon 105 appears in this deployment, then separately retrieve expression values if it does.
+
+Use this pattern when:
+
+- the requested data field is not stored in cBioPortal
+- a named alteration/gene/study is not found
+- the user asserts biology that is not represented in the database
+- the query would require literature knowledge rather than cBioPortal data
+
+Do not query unrelated genes or "helpful" substitutes unless you state why and the user accepts the substitution.
+
+### 18. 🚨 OUT-OF-SCOPE DRIFT AFTER USER PUSHBACK
+
+If you decline a request because it is outside cBioPortal scope, hold that boundary when the user rephrases or pushes gently.
+
+Out of scope:
+
+- interpreting or critiquing external papers
+- creating presentation slides or methods-slide outlines
+- debugging Databricks, PySpark, Bokeh, lifelines, or external application code
+- giving treatment recommendations or drug-safety advice
+
+Correct response shape:
+
+> I can't analyze or critique the paper itself from cBioPortal data. If the paper's cohort is represented in cBioPortal, I can help query that study's mutations, clinical attributes, or treatment records.
+
+For external code failures:
+
+> That error is in an external Databricks/PySpark workflow, not in cBioPortal MCP. I can't debug that pipeline here, but I can help retrieve the cBioPortal data inputs you would need for your analysis.
+
+### 19. 🚨 MISLEADING OUTPUT PROMISES
+
+Do not promise outputs the MCP server cannot produce.
+
+- Kaplan-Meier plot: provide survival rows or summary data and hand off to cBioPortal Survival / R / Python.
+- CSV export: provide a compact table or query; do not claim to create a downloadable file.
+- Large patient-level dumps: summarize and offer a bounded query with `LIMIT`, or point to cBioPortal/DataHub download workflows.
+
+### 20. 🚨 MALFORMED TABLES AND UNCLEAR QUERY ERRORS
+
+When a query returns tabular data, keep columns aligned with values. Prefer JSON or a compact Markdown table generated directly from query column names.
+
+When a complex query fails:
+
+1. Identify the failing part if visible from the error message.
+2. Say which table, join, field, or filter could not be executed.
+3. Offer a smaller stepwise query.
+4. If possible, return partial results and name what is missing.
+
+Example:
+
+> The mutation filter can be run, but the expression-profile join failed because I could not identify a MYC expression profile for this study. I can first list available expression profiles, then intersect mutation-positive samples with expression values.
+
 ## Best Practices Summary
 
 1. **Always use gene-specific denominators** for mutation frequencies
@@ -440,6 +685,47 @@ WHERE cs.cancer_study_identifier ILIKE '%htan%';
 13. **Use correct column names** (`mutation_variant` not `protein_change`)
 14. **Use subqueries instead of CTEs** for complex aggregations in ClickHouse
 15. **Check resource tables before saying "out of scope"** — `resource_sample`, `resource_patient`, `resource_study`, `resource_definition` may have external links
+16. **Always verify schema** — never assume tables or columns exist without checking first
+17. **Never fabricate OncoKB/driver annotations** — check for driver columns first
+18. **Never silently rewrite the user's query** — if "point mutation" or "V600V" is ambiguous or unusual, surface the normalization or ask, don't substitute. See pitfall #16.
+19. **Validate flawed premises early** — if the gene, alteration, study, or data field is absent, say so before running adjacent analyses.
+20. **Hold scope boundaries after refusal** — do not provide paper critiques, slide outlines, external pipeline code, or medical advice after user pushback.
+21. **Do not promise unavailable outputs** — provide data/handoffs instead of claiming to create plots, CSV files, or external apps.
+
+### 21. 🚨 ENUMERATION / CATALOG QUESTIONS TRIGGER SCHEMA EXPLORATION
+
+Questions that ask *"what X is available"* or *"what kind of Y are there"* are catalog/enumeration questions. A first-class list tool answers them in ONE call. Do not schema-explore.
+
+#### ❌ WRONG: exploring the schema before answering an enumeration question
+
+User: *"What kind of cancer are there in the database?"*
+
+- `clickhouse_list_tables()` — 60+ tables returned
+- `clickhouse_list_table_columns("cancer_study")` — schema dump
+- `SELECT DISTINCT type_of_cancer_id FROM cancer_study` — plausible but only after two probing calls
+- One more `clickhouse_list_table_columns("type_of_cancer")` "just to check"
+- Final aggregation query
+- **5+ tool calls for what was a 1-call answer.** The user's feedback: *"it took too many queries to the database to answer this simple question"* (issue #97).
+
+#### ✅ CORRECT: one call, one answer
+
+| User asks | Call this once | Then answer |
+|---|---|---|
+| "What cancer types are in the database?" | `list_studies(limit=100)` | GROUP BY `type_of_cancer_id` in the returned rows |
+| "What studies do you have?" | `list_studies(limit=100)` (or with a `search`) | list them |
+| "What guides do you have?" | `list_guides()` | list them |
+| "What study-specific guides are available?" | `list_study_guides()` | list them |
+| "Is there a guide for study X?" | `list_study_guides()` → check | say yes/no |
+| "Search cancer type X" | `search_oncotree("X")` | show matches |
+
+#### Rule
+
+- Enumeration questions map to a **first-class list tool**. Use it and stop.
+- Schema exploration (`clickhouse_list_tables`, `clickhouse_list_table_columns`) is for building custom SELECTs against tables you have NOT already covered with a list tool.
+- If `list_studies(limit=100)` returns fewer rows than the deployment actually has, raise the limit (up to `MAX_LIST_LIMIT` = 100) or, for a pure count, run a single `SELECT COUNT(*) FROM cancer_study`.
+- Do not `clickhouse_list_tables` "just to double-check" — the list tools already know the schema they query.
+
+---
 
 ## Validation Checklist
 
@@ -454,4 +740,11 @@ Before trusting your results, ask:
 - [ ] Did I use numeric values for CNA alterations (not strings)?
 - [ ] Am I using the correct column names (mutation_variant, not protein_change)?
 - [ ] When asked about specific sample types (primary, metastatic, etc.), did I filter by SAMPLE_TYPE?
+- [ ] Did I avoid fabricating OncoKB/driver annotations without checking driver columns first?
 - [ ] Before saying "out of scope", did I check `resource_sample`, `resource_patient`, `resource_study`, and `resource_definition` for external links?
+- [ ] Did I verify all tables and columns exist before querying them?
+- [ ] Did I answer the literal question, or did I silently rewrite it? If I normalized a term ("point mutation" → SNV set, "V600V" → V600E), did I surface that to the user?
+- [ ] Did I validate the user's premise before querying adjacent data?
+- [ ] Did I keep scope boundaries after any refusal?
+- [ ] Did I avoid promising plots, downloads, or external-code debugging that this MCP server cannot perform?
+- [ ] For enumeration/catalog questions ("what cancer types", "what studies", "what guides"), did I use a first-class list tool once instead of exploring the schema?

@@ -2,7 +2,7 @@
 
 > **WARNING ⚠️: This is still under construction**
 
-A wrapper around the [mcp-clickhouse server](https://github.com/ClickHouse/mcp-clickhouse) adding a [cBioPortal-specific system prompt](https://github.com/cBioPortal/cbioportal-mcp/blob/main/src/cbioportal_mcp/prompts/cbioportal_prompt.py).
+A wrapper around the [mcp-clickhouse server](https://github.com/ClickHouse/mcp-clickhouse) adding a [cBioPortal-specific system prompt](https://github.com/cBioPortal/cbioportal-mcp/blob/main/src/cbioportal_mcp/resources/system-prompt.md).
 
 ## Installation
 
@@ -38,10 +38,66 @@ export CLICKHOUSE_HOST=your-clickhouse-host
 export CLICKHOUSE_PORT=9000
 export CLICKHOUSE_USER=your-username
 export CLICKHOUSE_PASSWORD=your-password
-export CLICKHOUSE_DATABASE=your-cbioportal-database  # e.g., cgds_public_2025_06_24
+export CLICKHOUSE_DATABASE=your-cbioportal-database  # see "Preparing the database" below
 export CLICKHOUSE_SECURE=true  # or false for insecure connections
 export CLICKHOUSE_MCP_SERVER_TRANSPORT=stdio # or http or sse
+# Optional: mount the HTTP endpoint under a sub-path (default: /mcp).
+# Set when reverse-proxied behind a prefix so trailing-slash redirects
+# include it, e.g. /db/mcp when served at https://host/db/mcp.
+# export CLICKHOUSE_MCP_HTTP_PATH=/db/mcp
 ```
+
+### Datadog Tool Metrics
+
+The server emits one OpenTelemetry span per MCP tool call and can also emit
+DogStatsD metrics for dashboard-level aggregates:
+
+| Metric | Type | Purpose |
+|---|---|---|
+| `cbioportal_mcp.tool.calls` | counter | Tool-call volume by `tool`, `success`, `client_kind`, and `client_name` |
+| `cbioportal_mcp.tool.duration_ms` | distribution | Tool latency, including p50/p95/p99 by tool |
+| `cbioportal_mcp.tool.errors` | counter | Tool-call failures by tool/client |
+
+DogStatsD metrics are enabled by default when `DD_AGENT_HOST` or
+`DD_DOGSTATSD_HOST` is configured:
+
+```bash
+export DD_AGENT_HOST=<datadog-agent-host>
+# Optional overrides:
+export DD_DOGSTATSD_HOST=<dogstatsd-host>
+export DD_DOGSTATSD_PORT=8125
+export DD_SERVICE=cbioportal-mcp
+export DD_ENV=prod
+export CBIOPORTAL_MCP_DD_METRICS_ENABLED=true
+export CBIOPORTAL_MCP_DD_METRIC_PREFIX=cbioportal_mcp
+```
+
+Set `CBIOPORTAL_MCP_DD_METRICS_ENABLED=false` to disable DogStatsD metrics.
+The checked-in dashboard definition at
+[`datadog/cbioagent-tool-metrics-dashboard.json`](datadog/cbioagent-tool-metrics-dashboard.json)
+can be imported into Datadog or used as the source for updating the existing
+cBioAgent dashboard.
+
+## Preparing the database
+
+**We strongly recommend pointing the MCP at a *separate* ClickHouse database, not your production cBioPortal database directly.** Two reasons:
+
+1. **LLM-friendly fixes are destructive.** The agent works much better against a schema that's been cleaned up (misleading columns dropped, column comments added, OncoTree fields denormalized, named cohorts materialized). Applying those changes to your production database would interfere with the cBioPortal application.
+2. **Isolation.** A separate database with a read-only user (`SELECT`-only) means agent traffic — including pathological queries — can't degrade production performance or accidentally expose data your portal users shouldn't see.
+
+The recommended pattern is a periodic clone job: copy your production cBioPortal database into a separate ClickHouse database, then apply the SQL files in [`sql/`](sql/) — these add column comments, drop misleading columns, denormalize OncoTree, and materialize the `cancer_study_query_preferences` table the agent uses for cohort lookups. Point the MCP at this cloned-and-prepped database. See [`sql/README.md`](sql/README.md) for the full schema-prep contract and how to add deployment-specific preferences.
+
+To apply the SQL files manually (e.g. for ad-hoc testing), use the helper script:
+
+```bash
+export CLICKHOUSE_HOST=... CLICKHOUSE_DATABASE=your-prepped-db
+export CLICKHOUSE_ADMIN_USER=...  CLICKHOUSE_ADMIN_PASSWORD=...
+./scripts/apply_sql.sh
+```
+
+Note the deliberately separate `CLICKHOUSE_ADMIN_*` env vars — admin credentials with DDL rights are kept out of the MCP server's runtime environment (which only ever needs `SELECT`).
+
+For an end-to-end reference deployment (Kubernetes CronJob that handles the clone + SQL apply + atomic pointer-flip), see the cBioPortal team's daily clone CronJob in [knowledgesystems-k8s-deployment](https://github.com/knowledgesystems/knowledgesystems-k8s-deployment).
 
 ## Development
 
