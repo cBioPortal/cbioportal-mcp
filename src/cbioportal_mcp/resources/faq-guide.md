@@ -128,7 +128,7 @@ Study identifiers typically combine disease, institution, and year, but the orde
 | `_genie_` | AACR Project GENIE | `genie_public` |
 | `_pan_can_` | Pan-Cancer Atlas | `brca_tcga_pan_can_atlas_2018` |
 
-When searching for studies on a specific topic, use `list_studies(search=...)` with the disease name or abbreviation. For example, `list_studies(search="clonal hematopoiesis")` finds CH studies.
+When searching for studies on a specific topic, call `list_studies(search=...)` yourself with the disease name or abbreviation — for example, `list_studies(search="clonal hematopoiesis")` finds CH studies — and give the user the resulting studies as links. Tools are for you, not the user: never tell the user to call `list_studies` or any other tool. If they want to browse on their own, point them to https://www.cbioportal.org (the study list and its search box) or offer to search for them.
 
 ### Study Links
 
