@@ -9,6 +9,18 @@ def test_all_numbered_pitfalls_are_parsed():
         assert number in sections, f"pitfall #{number} missing from parsed sections"
 
 
+def test_pitfall_numbers_are_unique():
+    numbers = server._PITFALL_HEADER_RE.findall(server._common_pitfalls_guide_text())
+
+    duplicates = sorted({n for n in numbers if numbers.count(n) > 1})
+    assert not duplicates, f"pitfall numbers used twice (one section becomes unreachable): {duplicates}"
+
+
+def test_lettered_pitfalls_are_each_reachable():
+    assert "IMPLIED LITERATURE REVIEW" in server.read_guide.fn("cbioportal://common-pitfalls#17b")
+    assert "AMBIGUOUS ACC" in server.read_guide.fn("cbioportal://common-pitfalls#17c")
+
+
 def test_fragment_returns_only_the_requested_pitfall():
     fragment = server.read_guide.fn("cbioportal://common-pitfalls#16")
 
