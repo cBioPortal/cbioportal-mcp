@@ -258,8 +258,10 @@ WHERE cancer_study_identifier = 'msk_impact_2017'
 
 -- Step 3: If driver columns do NOT exist or are empty for the study, inform the user:
 -- "Driver mutation annotations are not available in the current database.
---  Use the cBioPortal web interface with OQL DRIVER syntax (e.g., BRAF: MUT_DRIVER)"
+--  Use the cBioPortal web interface with OQL DRIVER syntax (e.g., BRAF: DRIVER)"
 ```
+
+`driver_filter` values and the full oncogenic-only workflow: mutation-frequency-guide, "Driver / Oncogenic Mutations Only".
 
 If the driver query returns no rows (e.g. `driver_filter` is '' in all 78,142 msk_impact_2017 mutation rows), still return the full per-variant table, labelled "not filtered for OncoKB status", together with the OQL `MUT_DRIVER` link suggestion.
 

@@ -157,6 +157,20 @@ WHERE
     AND attribute_value = 'Breast Cancer';
 ```
 
+### 2b. A Subtype Inside a Multi-Subtype Study
+
+When the user names a subtype and the study mixes several, restrict to that subtype's samples by `ONCOTREE_CODE` (resolve the code with `search_oncotree`) instead of using the whole study. Example: adenoid cystic carcinoma in `acc_2019`, which also holds other salivary and gland tumors:
+
+```sql
+SELECT attribute_value AS oncotree_code, uniqExact(sample_unique_id) AS samples
+FROM clinical_data_derived
+WHERE cancer_study_identifier = 'acc_2019' AND attribute_name = 'ONCOTREE_CODE'
+GROUP BY oncotree_code ORDER BY samples DESC;
+-- ACYC 935, LUACC 76, ACBC 38
+```
+
+Use the matching samples as both numerator and denominator (e.g. `sample_unique_id IN (... attribute_value = 'ACYC')`), and say how many of the study's samples that is.
+
 ### 3. Cancer Type Hierarchy
 
 ```sql
