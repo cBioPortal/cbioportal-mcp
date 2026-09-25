@@ -35,6 +35,20 @@ Also cite the specific study publication(s) whose data you used.
 
 Note: Synonymous mutations are not included in cBioPortal.
 
+## What Cancer Types Are in the Database?
+
+Answer from the studies actually loaded, not from the OncoTree ontology (OncoTree lists hundreds of codes, most with no study here). One query:
+
+```sql
+SELECT tc.type_of_cancer_id, tc.name, tc.tissue, count() AS studies
+FROM cancer_study cs
+JOIN type_of_cancer tc ON cs.type_of_cancer_id = tc.type_of_cancer_id
+GROUP BY tc.type_of_cancer_id, tc.name, tc.tissue
+ORDER BY studies DESC;
+```
+
+Report how many distinct cancer types there are across how many studies, grouped by `tissue`. `mixed` ("Mixed Cancer Types") marks multi-cancer studies such as MSK-IMPACT and MSK-CHORD; their per-sample cancer types are in `clinical_data_derived` (`CANCER_TYPE`).
+
 ## Data Types Usually Not Stored Directly
 
 cBioPortal generally does not store:
@@ -75,7 +89,7 @@ Answer actionability questions only if actionability/driver annotation data is a
 
 ## Germline Variant Studies
 
-cBioPortal can represent germline variant studies when germline variants and associated clinical data are loaded as a study. Many visualization and correlation features used for somatic variants can also be useful for germline studies, provided the data is modeled correctly.
+cBioPortal supports germline variants: mutations are loaded with `mutation_status` `GERMLINE`, either alongside somatic calls or as germline-only studies. Most features — study view, clinical correlation, plots, group comparison, OncoPrint, mutation diagrams — work the same as for somatic data. Do not describe cBioPortal as somatic-only. For querying germline data, see the germline-guide.
 
 For germline-study setup questions, explain:
 

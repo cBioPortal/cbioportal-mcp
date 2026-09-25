@@ -31,7 +31,7 @@ Common values across the public portal:
 
 | Family | Profile types |
 |---|---|
-| mRNA expression | `mrna`, `mrna_median_Zscores`, `mrna_seq_v2_rsem`, `mrna_seq_v2_rsem_Zscores`, `mrna_seq_cpm`, `mrna_seq_fpkm`, `mrna_U133`, `mrna_outliers` |
+| mRNA expression | `rna_seq_v2_mrna`, `rna_seq_v2_mrna_median_Zscores`, `rna_seq_v2_mrna_median_all_sample_Zscores` (TCGA PanCancer Atlas), `mrna`, `mrna_median_Zscores`, `mrna_seq_v2_rsem`, `mrna_seq_v2_rsem_Zscores`, `mrna_seq_cpm`, `mrna_seq_fpkm`, `mrna_U133`, `mrna_outliers` |
 | Copy number (continuous) | `cna`, `linear_CNA`, `log2CNA`, `cna_consensus`, `cna_rae`, `gistic` |
 | Methylation | `methylation_hm27`, `methylation_hm450`, `methylation_epic`, `methylation_promoters_rrbs` |
 | miRNA | `mirna`, `mirna_median_Zscores` |
@@ -104,3 +104,37 @@ The view's job is to encode this shape once and force the `alteration_value NOT 
 ## Cross-study correlation
 
 `genetic_alteration_derived.profile_type` values are study-scoped — `mrna` in METABRIC isn't directly comparable to `mrna` in TCGA-BRCA because the underlying assays and normalizations differ. To pool across studies, use a Z-scored profile type that exists in both (`mrna_median_Zscores` is the most common) and document the caveat in the response. Or stay within a single study.
+
+## Expression across cancer types
+
+Z-scores are computed within each study, so every study is centered on its own reference: they rank samples inside a study but erase differences between cancer types. Do not compare cancer types on Z-scores.
+
+For "gene X expression across cancer types", use the TCGA PanCancer Atlas studies (`pan_cancer_tcga` preference) and the non-Z-score `rna_seq_v2_mrna` profile (RSEM, batch-normalized across the PanCancer Atlas studies, so values are comparable between them), grouped by `CANCER_TYPE`. Report an upper percentile next to the median: genes driven by amplification in a subset of tumors stand out in the tail, not the median.
+
+```sql
+WITH cohort AS (
+    SELECT cancer_study_identifier FROM cancer_study_query_preferences WHERE preference_name = 'pan_cancer_tcga'
+),
+ct AS (
+    SELECT sample_unique_id, attribute_value AS cancer_type
+    FROM clinical_data_derived
+    WHERE attribute_name = 'CANCER_TYPE' AND cancer_study_identifier IN (SELECT cancer_study_identifier FROM cohort)
+)
+SELECT ct.cancer_type,
+       count() AS samples,
+       round(median(log2(toFloat64OrNull(g.alteration_value) + 1)), 2) AS median_log2_rsem,
+       round(quantile(0.9)(log2(toFloat64OrNull(g.alteration_value) + 1)), 2) AS p90_log2_rsem
+FROM genetic_alteration_derived g
+JOIN ct USING (sample_unique_id)
+WHERE g.cancer_study_identifier IN (SELECT cancer_study_identifier FROM cohort)
+  AND g.hugo_gene_symbol = 'ERBB2'
+  AND g.profile_type = 'rna_seq_v2_mrna'
+  AND g.alteration_value NOT IN ('', 'NA')
+  AND toFloat64OrNull(g.alteration_value) IS NOT NULL
+GROUP BY ct.cancer_type
+ORDER BY p90_log2_rsem DESC;
+-- ERBB2: Breast 1,082 samples, median 12.78, p90 14.75; Bladder median 12.88, p90 14.28; Esophagogastric p90 13.75.
+-- By median alone bladder edges out breast; the HER2-amplified tail puts breast on top.
+```
+
+Point to cBioPortal Plots for the full distribution. Outside TCGA PanCancer Atlas, raw values from different studies are not comparable either; say so rather than pooling them.

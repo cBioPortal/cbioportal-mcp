@@ -445,6 +445,25 @@ WHERE alteration_type = 'MUTATION_EXTENDED'
 - **Profiled Samples** = gene-specific profiled samples from Step 2
 - **Sample %** = (# Samples / Profiled Samples) × 100
 
+## Driver / Oncogenic Mutations Only
+
+"Oncogenic", "driver" or "pathogenic" narrows the question to annotated drivers. The database can only partly answer it:
+
+- `genomic_event_derived.driver_filter` holds the study's own custom driver annotation: `'Putative_Driver'`, `'Putative_Passenger'`, or `''` (not annotated). `driver_filter_annotation` has the free-text reason (e.g. "Pathogenic or Likely-Pathogenic"). Only a few studies supply it — mainly clonal hematopoiesis studies (`msk_ch_*`); TCGA, MSK-IMPACT and MSK-CHORD do not.
+- OncoKB oncogenicity is computed by the cBioPortal web app at view time and is **not stored** in the database.
+
+Check the study first:
+
+```sql
+SELECT driver_filter, count() AS mutations
+FROM genomic_event_derived
+WHERE cancer_study_identifier = 'your_study_id' AND variant_type = 'mutation'
+GROUP BY driver_filter;
+```
+
+- **Annotations present:** add `AND driver_filter = 'Putative_Driver'` to the numerator and say the counts use the study's own driver annotation.
+- **Only `''`:** say the database has no driver annotation for this study, report the all-mutation numbers labelled as such (never as "oncogenic"), and give an OncoPrint / results-view link with the OQL `DRIVER` modifier (e.g. `KRAS: DRIVER`), where cBioPortal applies OncoKB and hotspot annotations.
+
 ## Mutant vs Wild-Type Groups
 
 **Wild-type = profiled for the gene AND no mutation of any kind in it.** Never "patients with some mutation row in the gene" (that makes WT tiny), never unprofiled samples, never "not this variant" (R132G/R132C carriers are neither R132H nor WT).
