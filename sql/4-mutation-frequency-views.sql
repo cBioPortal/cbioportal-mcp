@@ -394,8 +394,11 @@ profiled_samples_for_gene AS (
     FROM sample_to_gene_panel_derived stgp
     JOIN gene_panel gp ON stgp.gene_panel_id = gp.stable_id
     JOIN gene_panel_list gpl ON gp.internal_id = gpl.internal_id
-    JOIN gene g ON gpl.gene_id = g.entrez_gene_id
-    WHERE g.hugo_gene_symbol = {gene:String}
+    -- IN-subquery instead of JOIN gene: resolves the symbol to its entrez
+    -- id(s) once, rather than joining every panel row against the gene
+    -- table before filtering. COUNT(DISTINCT) downstream makes the result
+    -- identical even for symbols with several (or duplicated) gene rows.
+    WHERE gpl.gene_id IN (SELECT entrez_gene_id FROM gene WHERE hugo_gene_symbol = {gene:String})
       AND stgp.alteration_type = multiIf(
           {alteration:String} = 'mutation',           'MUTATION_EXTENDED',
           {alteration:String} = 'amplification',      'COPY_NUMBER_ALTERATION',
