@@ -34,20 +34,28 @@ jobs:
       - name: Set image tag
         id: set-tag
         run: |
-          if [ -n "${{ github.event.inputs.ref }}" ]; then
-            echo "IMAGE_TAG=${{ github.event.inputs.ref }}" >> $GITHUB_ENV
-          elif [ "${{ github.event_name }}" = "push" ] && [ "${{ github.ref_name }}" = "beta" ]; then
+          if [ -n "$INPUT_REF" ]; then
+            # Must be a valid Docker tag; this also rejects newlines that could inject into $GITHUB_ENV.
+            if ! printf '%s' "$INPUT_REF" | grep -Eqx '[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}'; then
+              echo "ref is not a valid Docker tag: $INPUT_REF" >&2
+              exit 1
+            fi
+            echo "IMAGE_TAG=$INPUT_REF" >> "$GITHUB_ENV"
+          elif [ "$EVENT_NAME" = "push" ] && [ "$REF_NAME" = "beta" ]; then
             # Beta pushes publish only :beta and must never touch :latest.
-            echo "IMAGE_TAG=beta" >> $GITHUB_ENV
-          elif [ "${{ github.event_name }}" = "push" ] && [ "${{ github.ref_name }}" = "main" ]; then
-            echo "IMAGE_TAG=latest" >> $GITHUB_ENV
+            echo "IMAGE_TAG=beta" >> "$GITHUB_ENV"
+          elif [ "$EVENT_NAME" = "push" ] && [ "$REF_NAME" = "main" ]; then
+            echo "IMAGE_TAG=latest" >> "$GITHUB_ENV"
           else
-            echo "Unexpected trigger ${{ github.event_name }} on ${{ github.ref_name }}; refusing to pick a tag" >&2
+            echo "Unexpected trigger $EVENT_NAME on $REF_NAME; refusing to pick a tag" >&2
             exit 1
           fi
-          echo "PLATFORM_PAIR=${platform//\//-}" >> $GITHUB_ENV
+          echo "PLATFORM_PAIR=${platform//\//-}" >> "$GITHUB_ENV"
         env:
           platform: ${{ matrix.platform }}
+          INPUT_REF: ${{ github.event.inputs.ref }}
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
 
       - name: Log in to DockerHub
         uses: docker/login-action@v3
@@ -67,8 +75,8 @@ jobs:
           platforms: ${{ matrix.platform }}
           # Push by digest only; the merge job tags the final manifest.
           outputs: type=image,name=cbioportal/mcp,push-by-digest=true,name-canonical=true,push=true
-          cache-from: type=gha,scope=${{ env.PLATFORM_PAIR }}
-          cache-to: type=gha,scope=${{ env.PLATFORM_PAIR }},mode=max
+          cache-from: type=gha,scope=${{ env.PLATFORM_PAIR }}-${{ env.IMAGE_TAG }}
+          cache-to: type=gha,scope=${{ env.PLATFORM_PAIR }}-${{ env.IMAGE_TAG }},mode=max
 
       - name: Export digest
         run: |
@@ -90,17 +98,26 @@ jobs:
     steps:
       - name: Set image tag
         run: |
-          if [ -n "${{ github.event.inputs.ref }}" ]; then
-            echo "IMAGE_TAG=${{ github.event.inputs.ref }}" >> $GITHUB_ENV
-          elif [ "${{ github.event_name }}" = "push" ] && [ "${{ github.ref_name }}" = "beta" ]; then
+          if [ -n "$INPUT_REF" ]; then
+            # Must be a valid Docker tag; this also rejects newlines that could inject into $GITHUB_ENV.
+            if ! printf '%s' "$INPUT_REF" | grep -Eqx '[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}'; then
+              echo "ref is not a valid Docker tag: $INPUT_REF" >&2
+              exit 1
+            fi
+            echo "IMAGE_TAG=$INPUT_REF" >> "$GITHUB_ENV"
+          elif [ "$EVENT_NAME" = "push" ] && [ "$REF_NAME" = "beta" ]; then
             # Beta pushes publish only :beta and must never touch :latest.
-            echo "IMAGE_TAG=beta" >> $GITHUB_ENV
-          elif [ "${{ github.event_name }}" = "push" ] && [ "${{ github.ref_name }}" = "main" ]; then
-            echo "IMAGE_TAG=latest" >> $GITHUB_ENV
+            echo "IMAGE_TAG=beta" >> "$GITHUB_ENV"
+          elif [ "$EVENT_NAME" = "push" ] && [ "$REF_NAME" = "main" ]; then
+            echo "IMAGE_TAG=latest" >> "$GITHUB_ENV"
           else
-            echo "Unexpected trigger ${{ github.event_name }} on ${{ github.ref_name }}; refusing to pick a tag" >&2
+            echo "Unexpected trigger $EVENT_NAME on $REF_NAME; refusing to pick a tag" >&2
             exit 1
           fi
+        env:
+          INPUT_REF: ${{ github.event.inputs.ref }}
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
 
       - name: Download digests
         uses: actions/download-artifact@v4
@@ -121,8 +138,8 @@ jobs:
       - name: Create multi-arch manifest
         working-directory: /tmp/digests
         run: |
-          docker buildx imagetools create -t cbioportal/mcp:${{ env.IMAGE_TAG }} \
+          docker buildx imagetools create -t "cbioportal/mcp:$IMAGE_TAG" \
             $(printf 'cbioportal/mcp@sha256:%s ' *)
 
       - name: Inspect
-        run: docker buildx imagetools inspect cbioportal/mcp:${{ env.IMAGE_TAG }}
+        run: docker buildx imagetools inspect "cbioportal/mcp:$IMAGE_TAG"
