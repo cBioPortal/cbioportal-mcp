@@ -443,7 +443,9 @@ WHERE p.profiled_samples >= 50;
 -- profiled for ALL genes, so their count is a single number per cohort
 -- (computed once). For named-panel samples, profiled count is per-gene
 -- and only needs to include the genes the panel actually lists. We
--- compute these two pieces separately and add them per gene.
+-- compute these two pieces separately and add them per gene; the panel
+-- piece leaves out samples that are also WES, so a sample with both a WES
+-- and a panel mutation profile is counted once.
 --
 -- Parameters:
 --   preference  — cancer_study_query_preferences.preference_name
@@ -479,10 +481,18 @@ wes_profiled_count AS (
     JOIN cohort c USING (cancer_study_identifier)
 ),
 panel_profiled_per_gene AS (
-    -- For each gene, count cohort samples on a named panel that lists it.
+    -- For each gene, count cohort samples on a named panel that lists it,
+    -- leaving out samples already counted as WES (a sample can be WES for
+    -- one mutation profile and on a panel for another). The two counts are
+    -- then disjoint, so their sum is COUNT(DISTINCT) of the union.
     SELECT mpgc.hugo_gene_symbol, COUNT(DISTINCT mpgc.sample_unique_id) AS n
     FROM mutation_panel_gene_coverage mpgc
     JOIN cohort c USING (cancer_study_identifier)
+    WHERE mpgc.sample_unique_id NOT IN (
+        SELECT w.sample_unique_id
+        FROM mutation_wes_coverage w
+        JOIN cohort c2 USING (cancer_study_identifier)
+    )
     GROUP BY mpgc.hugo_gene_symbol
 ),
 altered_per_gene AS (
@@ -538,9 +548,15 @@ WITH wes_profiled_count AS (
     WHERE cancer_study_identifier = {study:String}
 ),
 panel_profiled_per_gene AS (
+    -- Panel samples not already counted as WES, so WES + panel is the
+    -- distinct union (see top_mutated_genes_in_cohort).
     SELECT hugo_gene_symbol, COUNT(DISTINCT sample_unique_id) AS n
     FROM mutation_panel_gene_coverage
     WHERE cancer_study_identifier = {study:String}
+      AND sample_unique_id NOT IN (
+          SELECT sample_unique_id FROM mutation_wes_coverage
+          WHERE cancer_study_identifier = {study:String}
+      )
     GROUP BY hugo_gene_symbol
 ),
 altered_per_gene AS (
@@ -706,11 +722,14 @@ wes_group_sizes AS (
     WHERE sample_unique_id IN (SELECT sample_unique_id FROM wes_samples)
 ),
 panel_group_sizes AS (
+    -- Panel samples not already counted in wes_group_sizes, so the two
+    -- sizes add up to the distinct union per gene.
     SELECT p.hugo_gene_symbol,
            countIf(g.is_mutant) AS mutant_n,
            countIf(NOT g.is_mutant) AS wildtype_n
     FROM panel_samples_per_gene p
     JOIN sample_groups g USING (sample_unique_id)
+    WHERE p.sample_unique_id NOT IN (SELECT sample_unique_id FROM wes_samples)
     GROUP BY p.hugo_gene_symbol
 ),
 altered_per_gene AS (
@@ -819,9 +838,15 @@ WITH wes_profiled_count AS (
     WHERE cancer_study_identifier = {study:String}
 ),
 panel_profiled_per_gene AS (
+    -- Panel samples not already counted as WES, so WES + panel is the
+    -- distinct union (see top_mutated_genes_in_cohort).
     SELECT hugo_gene_symbol, COUNT(DISTINCT sample_unique_id) AS n
     FROM cna_panel_gene_coverage
     WHERE cancer_study_identifier = {study:String}
+      AND sample_unique_id NOT IN (
+          SELECT sample_unique_id FROM cna_wes_coverage
+          WHERE cancer_study_identifier = {study:String}
+      )
     GROUP BY hugo_gene_symbol
 ),
 altered_per_gene AS (
@@ -998,9 +1023,15 @@ WITH wes_profiled_count AS (
     WHERE cancer_study_identifier = {study:String}
 ),
 panel_profiled_per_gene AS (
+    -- Panel samples not already counted as WES, so WES + panel is the
+    -- distinct union (see top_mutated_genes_in_cohort).
     SELECT hugo_gene_symbol, COUNT(DISTINCT sample_unique_id) AS n
     FROM sv_panel_gene_coverage
     WHERE cancer_study_identifier = {study:String}
+      AND sample_unique_id NOT IN (
+          SELECT sample_unique_id FROM sv_wes_coverage
+          WHERE cancer_study_identifier = {study:String}
+      )
     GROUP BY hugo_gene_symbol
 ),
 altered_per_gene AS (
