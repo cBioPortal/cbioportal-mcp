@@ -594,15 +594,16 @@ def run_select_query(query: str, *, query_label: str, max_rows: int | None = Non
     Returns:
         list: A list of rows, where each row is a dictionary with column names as keys and corresponding values.
     """
-    from mcp_clickhouse.mcp_server import run_query
+    from cbioportal_mcp.query_cache import query_cache_settings, run_query
 
     # DB-level read-only permissions (enforced on startup) prevent non-SELECT queries,
     # so we don't need application-level query filtering. This allows CTEs (WITH ... AS).
     if max_rows is not None:
         query = _with_row_cap(query, max_rows)
     logger.debug("run_select_query: delegate the query to run_query tool of ClickHouse MCP")
-    with traced_db_query(query_label):
-        ch_query_result = json.loads(run_query(query))
+    settings = query_cache_settings()
+    with traced_db_query(query_label, query_cache=settings is not None):
+        ch_query_result = json.loads(run_query(query, settings=settings))
         result = zip_select_query_result(ch_query_result)
     return result
 

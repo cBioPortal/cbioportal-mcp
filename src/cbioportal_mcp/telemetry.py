@@ -157,6 +157,7 @@ def _emit_db_query_metrics(
     query_label: str,
     duration_ms: float,
     success: bool,
+    query_cache: bool = False,
 ) -> None:
     """Emit aggregate Datadog metrics for one ClickHouse SELECT, tagged by call
     site. run_select_query() is a single funnel for every SELECT the server
@@ -167,7 +168,12 @@ def _emit_db_query_metrics(
     if client is None:
         return
 
-    tags = {"query_label": query_label, "success": str(success).lower()}
+    tags = {
+        "query_label": query_label,
+        "success": str(success).lower(),
+    }
+    if query_cache:
+        tags["query_cache"] = "on"
     try:
         client.increment("db_query.calls", tags)
         client.distribution("db_query.duration_ms", round(duration_ms, 3), tags)
@@ -178,7 +184,7 @@ def _emit_db_query_metrics(
 
 
 @contextmanager
-def traced_db_query(query_label: str):
+def traced_db_query(query_label: str, *, query_cache: bool = False):
     """Wrap one ClickHouse SELECT with an OTel span (``db.query/<label>``) and
     a Datadog distribution metric, both tagged by query_label so latency can
     be broken down by call site in Datadog instead of averaged into one
@@ -189,6 +195,8 @@ def traced_db_query(query_label: str):
     started = time.perf_counter()
     with tracer.start_as_current_span(f"db.query/{query_label}") as span:
         span.set_attribute("db.query.label", query_label)
+        if query_cache:
+            span.set_attribute("db.query.cache", "on")
         try:
             yield
         except Exception as exc:
@@ -196,13 +204,23 @@ def traced_db_query(query_label: str):
             span.set_attribute("db.query.duration_ms", duration_ms)
             span.set_attribute("db.query.success", False)
             span.set_attribute("error.type", type(exc).__name__)
-            _emit_db_query_metrics(query_label=query_label, duration_ms=duration_ms, success=False)
+            _emit_db_query_metrics(
+                query_label=query_label,
+                duration_ms=duration_ms,
+                success=False,
+                query_cache=query_cache,
+            )
             raise
         else:
             duration_ms = (time.perf_counter() - started) * 1000
             span.set_attribute("db.query.duration_ms", duration_ms)
             span.set_attribute("db.query.success", True)
-            _emit_db_query_metrics(query_label=query_label, duration_ms=duration_ms, success=True)
+            _emit_db_query_metrics(
+                query_label=query_label,
+                duration_ms=duration_ms,
+                success=True,
+                query_cache=query_cache,
+            )
 
 
 def configure_telemetry() -> TracerProvider | None:
