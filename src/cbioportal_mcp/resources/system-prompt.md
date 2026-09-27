@@ -16,12 +16,12 @@ This prompt is static reference material: the core schema, the precomputed views
 Conventions used everywhere:
 - `sample_unique_id` = `<cancer_study_identifier>_<sample.stable_id>`; `patient_unique_id` = `<cancer_study_identifier>_<patient.stable_id>`. Join derived tables on these, never on stable ids alone.
 - Derived tables are sorted by the columns in **order by**; filtering on the leading columns (almost always `cancer_study_identifier` first) keeps queries fast. Always filter fact tables by study.
-- String columns hold `''` (not NULL) for missing values. `LowCardinality(String)` compares like `String`.
+- Most String columns hold `''` (not NULL) for missing values. Exceptions: `cancer_study.cancer_study_identifier`, `cancer_study.pmid` and `cancer_study.citation` are `Nullable(String)`, and so is `genetic_alteration_derived.alteration_value`. `LowCardinality(String)` compares like `String`.
 
 ### Study, cancer type, patient, sample
 
 **`cancer_study`** — one row per study.
-`cancer_study_id` Int (internal; join key to raw tables), `cancer_study_identifier` String (**use this for filtering**), `type_of_cancer_id` (lowercase OncoTree code; `'mixed'` for multi-cancer studies such as msk_chord_2024, msk_impact_*, GENIE), `name`, `description`, `pmid`, `citation`, `public`.
+`cancer_study_id` Int (internal; join key to raw tables), `cancer_study_identifier` Nullable(String) (**use this for filtering**), `type_of_cancer_id` (lowercase OncoTree code; `'mixed'` for multi-cancer studies such as msk_chord_2024, msk_impact_*, GENIE), `name`, `description`, `pmid` and `citation` (both Nullable), `public`.
 Precomputed counts (same numbers as the portal study list / "Data type" filter): `sample_count`, `mutation_sample_count`, `cna_sample_count`, `structural_variant_sample_count`, `mrna_expression_sample_count` (any mRNA profile — use for "has expression data"), `rna_seq_sample_count`, `mrna_microarray_sample_count`, `mirna_sample_count`, `rppa_sample_count`, `mass_spectrometry_sample_count`, `treatment_patient_count` (patients, not samples), `resource_sample_counts` Map(String, UInt32) keyed by resource display name (`resource_sample_counts['Slide Microscopy'] > 0`). `0` = no data of that type. There is **no** `patient_count` column.
 
 **`type_of_cancer`** — OncoTree codes. `type_of_cancer_id` (lowercase code), `name`, `short_name`, `parent`, `main_type`, `tissue`, `level`, `revocations` Array(String), `precursors` Array(String). Resolve names/abbreviations with `search_oncotree(term)`, not `LIKE`.
@@ -32,7 +32,7 @@ Precomputed counts (same numbers as the portal study list / "Data type" filter):
 **`sample_derived`** — one row per sample; order by `(cancer_study_identifier, sample_unique_id)`.
 `sample_unique_id`, `sample_stable_id`, `patient_unique_id`, `patient_stable_id`, `cancer_study_identifier`, `internal_id` (= `sample.internal_id`), `patient_internal_id`, `sequenced` (1 = in `<study>_sequenced`), `copy_number_segment_present`. Its `sample_type` column carries the generic loader value ("Primary Solid Tumor" for every tumor) — **never** use it for primary/metastatic; use the `SAMPLE_TYPE` clinical attribute.
 
-**`cancer_study_query_preferences`** — curated cohorts. `preference_name`, `cancer_study_identifier`, `notes`; order by `(preference_name, cancer_study_identifier)`. Shipped preferences (discover with `SELECT preference_name, count() FROM cancer_study_query_preferences GROUP BY 1`): `pan_cancer_tcga` (default for "across cancer types"), `large_genomic_cohort` (msk_impact_50k_2026), `treatment_outcomes` (msk_chord_2024), `all_studies_non_redundant` (only on explicit request; `CANCER_TYPE` labels are not normalized across its studies — warn the user).
+**`cancer_study_query_preferences`** — curated cohorts. `preference_name`, `cancer_study_identifier`, `notes`; order by `(preference_name, cancer_study_identifier)`. Loaded preferences vary by deployment — discover them with `SELECT preference_name, count() FROM cancer_study_query_preferences GROUP BY 1`. `pan_cancer_tcga` (default for "across cancer types") ships everywhere PanCancer Atlas is loaded. Public portal only (`sql/portal-specific/public-portal/`): `large_genomic_cohort` (msk_impact_50k_2026), `treatment_outcomes` (msk_chord_2024), `all_studies_non_redundant` (only on explicit request; `CANCER_TYPE` labels are not normalized across its studies — warn the user).
 
 ### Clinical
 
@@ -48,7 +48,7 @@ Precomputed counts (same numbers as the portal study list / "Data type" filter):
 - `clinical_event` — `clinical_event_id`, `patient_id` (→ `patient.internal_id`), `start_date`, `stop_date`, `event_type` (`Treatment`, `Sample acquisition`, `Status`, …; case varies — compare with `lower()`).
 - `clinical_event_data` — `clinical_event_id`, `key`, `value`. Treatment keys: `AGENT`; type in `TREATMENT_TYPE` or `Treatment_TYPE`; subtype in `SUBTYPE` or `TREATMENT_SUBTYPE`.
 - `clinical_event_data_derived` — pre-joined: `cancer_study_identifier`, `event_type`, `patient_unique_id`, `key`, `value`, `start_date`, `stop_date` (0 = none); order by `(cancer_study_identifier, event_type, patient_unique_id)`.
-- `clinical_event_derived` has **no** `key`/`value` columns (`clinical_event_id`, `patient_stable_id`, `start_date`, `stop_date`, `event_type`, `cancer_study_identifier`).
+- `clinical_event_derived` has **no** `key`/`value` columns (`clinical_event_id`, `patient_id`, `patient_stable_id`, `start_date`, `stop_date`, `event_type`, `cancer_study_identifier`).
 
 ### Genomic
 
@@ -76,7 +76,7 @@ Precomputed counts (same numbers as the portal study list / "Data type" filter):
 
 ## Precomputed Views (prefer these — they reproduce the portal's numbers)
 
-Parameterized views are called like table functions: `SELECT * FROM view_name(param='…', …)`. All mutation/CNA/SV frequency views use the WES-aware profiled denominator and exclude UNCALLED / off-panel events.
+Parameterized views are called like table functions: `SELECT * FROM view_name(param='…', …)`. The mutation / AMP-HOMDEL / SV frequency views use the WES-aware profiled denominator (panel + WES coverage) and exclude UNCALLED / off-panel events. **Exception:** `gene_cna_distribution_in_study` reads discrete CNA values from `genetic_alteration_derived`; its `profiled_samples` is the number of samples with a value for that gene in each profile, and it applies no `off_panel` filter.
 
 | View (parameters) | Returns |
 |---|---|

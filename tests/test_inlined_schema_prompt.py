@@ -162,3 +162,35 @@ def test_clinical_guide_survival_section_hands_off_to_kaplan_meier():
     assert "not reached" in survival
     assert "median_os" not in survival
 
+
+
+def test_system_prompt_names_cna_distribution_denominator_exception():
+    views = _section(_prompt(), "## Precomputed Views")
+
+    assert "**Exception:** `gene_cna_distribution_in_study`" in views
+    assert "no `off_panel` filter" in views
+
+
+def test_system_prompt_names_nullable_string_exceptions():
+    schema = _section(_prompt(), "## Core Schema")
+
+    assert "Most String columns hold `''` (not NULL)" in schema
+    for column in ["cancer_study_identifier", "pmid", "citation"]:
+        assert f"`cancer_study.{column}`" in schema
+
+
+def test_system_prompt_marks_public_portal_only_preferences():
+    schema = _section(_prompt(), "## Core Schema")
+    public_sql = (SQL_DIR / "portal-specific" / "public-portal" / "0-preferences.sql").read_text()
+
+    assert "Public portal only" in schema
+    for preference in ["large_genomic_cohort", "treatment_outcomes", "all_studies_non_redundant"]:
+        assert f"'{preference}'" in public_sql
+        assert schema.index("Public portal only") < schema.index(f"`{preference}`")
+
+
+def test_system_prompt_lists_clinical_event_derived_patient_id():
+    schema = _section(_prompt(), "## Core Schema")
+    line = next(ln for ln in schema.splitlines() if ln.startswith("- `clinical_event_derived`"))
+
+    assert "`patient_id`" in line
