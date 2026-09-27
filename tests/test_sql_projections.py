@@ -177,3 +177,31 @@ def test_expected_sort_orders():
         "cancer_study_identifier",
     ]
     assert orders["stgp_by_study"][0] == "cancer_study_identifier"
+
+
+def test_genomic_event_projections_hold_only_recipe_columns():
+    """Every projected column costs a full sorted copy; adding one needs a reason in sql/9."""
+    recipe_columns = {
+        "sample_unique_id",
+        "cancer_study_identifier",
+        "hugo_gene_symbol",
+        "variant_type",
+        "mutation_status",
+        "off_panel",
+        "cna_alteration",  # gene_alteration_frequency_by_cancer_type amp / deep_deletion
+    }
+    for m in _projections():
+        if m.group("table") != "genomic_event_derived":
+            continue
+        select_cols, _ = _select_and_order_columns(m.group("body"))
+        assert set(select_cols) == recipe_columns, m.group("name")
+
+
+def test_header_states_the_required_setting():
+    from cbioportal_mcp.authentication.permissions import PROJECTION_SAFE_SETTINGS
+
+    header = PROJECTIONS_SQL.read_text()
+    readme = (SQL_DIR / "README.md").read_text()
+    for name, value in PROJECTION_SAFE_SETTINGS.items():
+        assert f"{name} = {value}" in header
+        assert f"{name} = {value}" in readme

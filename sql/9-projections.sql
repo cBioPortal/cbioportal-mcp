@@ -1,6 +1,17 @@
 -- ============================================================================
 -- Projections for alteration-frequency and co-occurrence query shapes
 -- ============================================================================
+-- REQUIRES optimize_use_implicit_projections = 0 for every user that queries
+-- this database (see sql/README.md, "Projections"). With ClickHouse's
+-- default (1), a bare count() whose WHERE is answered by the base primary
+-- key over-counts once these projections exist: the implicit exact-count
+-- path counts the granules the base key proves fully matching, and the
+-- normal-projection read of the remaining rows counts them again. Seen on
+-- 24.8.14, 26.2.19, 26.8.12 and 26.9.3 (e.g. 36384 instead of 20000). The MCP
+-- refuses to start against a database that has projections unless its
+-- ClickHouse user has that setting pinned so a query can't turn it back on
+-- (cbioportal_mcp.authentication.permissions).
+--
 -- The derived tables are sorted for the cBioPortal backend's access pattern,
 -- not the agent's:
 --
@@ -12,21 +23,23 @@
 --                                          genetic_profile_id,
 --                                          sample_unique_id)
 --
--- Agent frequency / co-occurrence queries (and every recipe view in
--- sql/4-mutation-frequency-views.sql) filter on study + hugo_gene_symbol +
+-- Study- and gene-scoped agent queries and most recipe views in
+-- sql/4-mutation-frequency-views.sql filter on study + hugo_gene_symbol +
 -- variant_type and never on genetic_profile_stable_id, so the primary key
--- can't prune: every study-scoped gene lookup reads the whole table. The
+-- prunes poorly and a study-scoped gene lookup reads most granules. The
 -- profiling denominator on sample_to_gene_panel_derived has the same problem
--- (no study in the key).
+-- (no study in the key). Cohort-wide recipes with no gene filter (for example
+-- top_mutated_genes_in_cohort) don't benefit.
 --
 -- The projections below give ClickHouse alternate sort orders to pick from.
--- The optimizer chooses a projection per query only when it reads fewer
--- marks than the base table and the projection holds every column the query
--- touches; otherwise it silently falls back to the base table. Results are
--- identical either way.
+-- The optimizer uses one for a query only when it holds every column the
+-- query reads and would read fewer marks than the base table; otherwise the
+-- query reads the base table.
 --
 --   ged_by_study_gene   study-first: "gene X in study S" (gene_*_in_study,
---                       gene_*_in_studies, two-gene co-occurrence in S).
+--                       gene_*_in_studies, top_mutated_genes_in_study,
+--                       co_altered_genes_in_study, top_sv_genes_in_study,
+--                       two-gene co-occurrence in S).
 --   ged_by_gene_study   gene-first: cross-study "gene X across cancer types
 --                       in cohort Y" (gene_*_by_cancer_type). Those views
 --                       restrict the study via JOIN cohort, which does not
@@ -34,23 +47,24 @@
 --                       key prunes them.
 --   stgp_by_study       study-first profiling denominator.
 --
--- The genomic_event_derived projections are deliberately NARROW: they omit
--- the wide free-text columns (mutation_variant, driver_*_annotation,
--- cna_cytoband, sv_event_info) that frequency / co-occurrence queries never
--- read. A query that selects one of those columns uses the base table.
+-- The genomic_event_derived projections hold only the seven columns the
+-- recipe views filter or count on. cna_alteration is the one column beyond
+-- the six every mutation recipe reads: gene_alteration_frequency_by_cancer_type
+-- filters on it for amplification / deep_deletion, and it is a
+-- Nullable(Int8), so it costs about a byte per row. Everything else
+-- (patient_unique_id, mutation_variant, mutation_type, cna_cytoband,
+-- annotations, ...) reads the base table: gene_mutation_variants_in_study and
+-- top_cna_genes_in_study, and patient-level agent queries, get no speedup
+-- but return the same rows.
 --
--- Both tables are plain MergeTree (not Replacing/Collapsing), so
--- deduplicate_merge_projection_mode does not apply. No file in sql/ runs
--- lightweight DELETE/UPDATE against these tables (that would need
--- lightweight_mutation_projection_mode on tables with projections).
---
--- Re-apply: the daily clone rebuilds every table via CLONE AS and then runs
--- every sql/*.sql, so projections are recreated on each clone. Re-running
--- this file on a DB that already has them is safe: ADD ... IF NOT EXISTS is a
--- no-op and MATERIALIZE rewrites the projection parts (same result, costs a
--- rebuild). mutations_sync = 2 makes each MATERIALIZE block until every
--- replica finishes, so the clone job does not hand the DB to the MCP server
--- with half-built projections.
+-- Re-apply: the daily clone rebuilds every table via CLONE AS from the
+-- production database (which has no projections) and then runs every
+-- sql/*.sql, so this file recreates the projections on each clone.
+-- Re-running it on a database that already has them is a no-op:
+-- ADD ... IF NOT EXISTS skips, and MATERIALIZE on parts that already carry
+-- the projection rewrites no rows. mutations_sync = 2 makes each MATERIALIZE
+-- wait until every replica finishes, so the clone job does not hand the
+-- database to the MCP server with half-built projections.
 --
 -- Verify / drop: see sql/README.md ("Projections").
 -- ============================================================================
@@ -63,19 +77,12 @@ ALTER TABLE genomic_event_derived
     (
         SELECT
             sample_unique_id,
-            patient_unique_id,
-            hugo_gene_symbol,
-            entrez_gene_id,
-            gene_panel_stable_id,
             cancer_study_identifier,
-            genetic_profile_stable_id,
+            hugo_gene_symbol,
             variant_type,
-            mutation_type,
             mutation_status,
-            driver_filter,
-            driver_tiers_filter,
-            cna_alteration,
-            off_panel
+            off_panel,
+            cna_alteration
         ORDER BY (cancer_study_identifier, hugo_gene_symbol, variant_type, sample_unique_id)
     );
 
@@ -86,28 +93,17 @@ ALTER TABLE genomic_event_derived
 -- ----------------------------------------------------------------------------
 -- genomic_event_derived: gene-first (cross-study / cohort queries)
 -- ----------------------------------------------------------------------------
--- Same columns as ged_by_study_gene minus patient_unique_id. Cross-study
--- frequency is counted per sample, and once rows are sorted gene-first the
--- two unique-id strings stop compressing well (together ~80% of this
--- projection's size), so dropping the patient id cuts its size ~40%.
--- Patient-level cross-study queries use the base table.
 ALTER TABLE genomic_event_derived
     ADD PROJECTION IF NOT EXISTS ged_by_gene_study
     (
         SELECT
             sample_unique_id,
-            hugo_gene_symbol,
-            entrez_gene_id,
-            gene_panel_stable_id,
             cancer_study_identifier,
-            genetic_profile_stable_id,
+            hugo_gene_symbol,
             variant_type,
-            mutation_type,
             mutation_status,
-            driver_filter,
-            driver_tiers_filter,
-            cna_alteration,
-            off_panel
+            off_panel,
+            cna_alteration
         ORDER BY (hugo_gene_symbol, variant_type, cancer_study_identifier, sample_unique_id)
     );
 
