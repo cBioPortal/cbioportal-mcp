@@ -84,7 +84,7 @@ For "which studies have imaging" use `cancer_study.resource_sample_counts` first
 Parameterized views are called like table functions: `SELECT * FROM view_name(param='…', …)`. Event filters and denominators, exactly as the view SQL applies them:
 - `off_panel = 0`: `gene_mutation_frequency_by_cancer_type`, `gene_mutation_frequency_in_study`, `gene_mutation_frequency_in_studies`, `gene_alteration_frequency_by_cancer_type` (all branches), `top_mutated_genes_in_cohort`, `top_mutated_genes_in_study`, `gene_mutation_variants_in_study`, `co_altered_genes_in_study`, `top_cna_genes_in_study`, `top_sv_genes_in_study`.
 - `mutation_status != 'UNCALLED'`: `gene_mutation_frequency_by_cancer_type`, `gene_mutation_frequency_in_study`, `gene_mutation_frequency_in_studies`, `gene_alteration_frequency_by_cancer_type` (`alteration='mutation'` branch only), `top_mutated_genes_in_cohort`, `top_mutated_genes_in_study`, `gene_mutation_variants_in_study`, `co_altered_genes_in_study`, `top_sv_genes_in_study`.
-- No `mutation_status` filter: `top_cna_genes_in_study`, `gene_cna_distribution_in_study`, and the CNA branches of `gene_alteration_frequency_by_cancer_type`.
+- No `mutation_status` filter: `top_cna_genes_in_study`, `gene_cna_distribution_in_study`, `gene_alteration_frequency_by_cancer_type` (`alteration='amplification'`, `alteration='deep_deletion'` and `alteration='structural_variant'` branches).
 - Profiled denominator = samples profiled for the gene (named panel containing it + WES): every view in the `off_panel = 0` list.
 - **Exception:** `gene_cna_distribution_in_study` reads discrete CNA values from `genetic_alteration_derived` and applies no `off_panel` filter; its `profiled_samples` = samples with a non-empty, non-NA value for the gene in that profile.
 

@@ -14,7 +14,8 @@ CREATE TABLE allele_specific_copy_number (
     `minor_copy_number` Nullable(Int64),
     `expected_alt_copies` Nullable(Int64),
     `total_copy_number` Nullable(Int64)
-);
+)
+ORDER BY (mutation_event_id, genetic_profile_id, sample_id);
 
 -- src/main/resources/db-scripts/clickhouse/init/schema.sql
 CREATE TABLE alteration_driver_annotation (
@@ -25,13 +26,15 @@ CREATE TABLE alteration_driver_annotation (
     `driver_filter_annotation` Nullable(String),
     `driver_tiers_filter` Nullable(String),
     `driver_tiers_filter_annotation` Nullable(String)
-);
+)
+ORDER BY (alteration_event_id, genetic_profile_id, sample_id);
 
 -- src/main/resources/db-scripts/clickhouse/init/schema.sql
 CREATE TABLE authorities (
     `email` String,
     `authority` String
-);
+)
+ORDER BY (email);
 
 -- src/main/resources/db-scripts/clickhouse/init/schema.sql
 CREATE TABLE cancer_study (
@@ -47,13 +50,15 @@ CREATE TABLE cancer_study (
     `status` Nullable(Int64),
     `import_date` Nullable(DateTime64(6)),
     `reference_genome_id` Nullable(Int64)
-);
+)
+ORDER BY (cancer_study_id);
 
 -- src/main/resources/db-scripts/clickhouse/init/schema.sql
 CREATE TABLE cancer_study_tags (
     `cancer_study_id` Int64,
     `tags` String
-);
+)
+ORDER BY (cancer_study_id);
 
 -- src/main/resources/db-scripts/clickhouse/init/schema.sql
 CREATE TABLE clinical_attribute_meta (
@@ -64,7 +69,8 @@ CREATE TABLE clinical_attribute_meta (
     `patient_attribute` Int32,
     `priority` String,
     `cancer_study_id` Int64
-);
+)
+ORDER BY (attr_id, cancer_study_id);
 
 -- src/main/resources/db-scripts/clickhouse/init/schema.sql
 CREATE TABLE clinical_event (
@@ -73,35 +79,40 @@ CREATE TABLE clinical_event (
     `start_date` Int64,
     `stop_date` Nullable(Int64),
     `event_type` String
-);
+)
+ORDER BY (clinical_event_id);
 
 -- src/main/resources/db-scripts/clickhouse/init/schema.sql
 CREATE TABLE clinical_event_data (
     `clinical_event_id` Int64,
     `key` String,
     `value` String
-);
+)
+ORDER BY (clinical_event_id);
 
 -- src/main/resources/db-scripts/clickhouse/init/schema.sql
 CREATE TABLE clinical_patient (
     `internal_id` Int64,
     `attr_id` String,
     `attr_value` String
-);
+)
+ORDER BY (internal_id, attr_id);
 
 -- src/main/resources/db-scripts/clickhouse/init/schema.sql
 CREATE TABLE clinical_sample (
     `internal_id` Int64,
     `attr_id` String,
     `attr_value` String
-);
+)
+ORDER BY (internal_id, attr_id);
 
 -- src/main/resources/db-scripts/clickhouse/init/schema.sql
 CREATE TABLE cna_event (
     `cna_event_id` Int64,
     `entrez_gene_id` Int64,
     `alteration` Int32
-);
+)
+ORDER BY (cna_event_id);
 
 -- src/main/resources/db-scripts/clickhouse/init/schema.sql
 CREATE TABLE copy_number_seg (
@@ -113,7 +124,8 @@ CREATE TABLE copy_number_seg (
     `end` Int64,
     `num_probes` Int64,
     `segment_mean` Float64
-);
+)
+ORDER BY (seg_id);
 
 -- src/main/resources/db-scripts/clickhouse/init/schema.sql
 CREATE TABLE copy_number_seg_file (
@@ -122,7 +134,8 @@ CREATE TABLE copy_number_seg_file (
     `reference_genome_id` String,
     `description` String,
     `filename` String
-);
+)
+ORDER BY (seg_file_id);
 
 -- src/main/resources/db-scripts/clickhouse/init/schema.sql
 CREATE TABLE data_access_tokens (
@@ -130,7 +143,8 @@ CREATE TABLE data_access_tokens (
     `username` String,
     `expiration` DateTime64(6),
     `creation` DateTime64(6)
-);
+)
+ORDER BY (token);
 
 -- src/main/resources/db-scripts/clickhouse/init/schema.sql
 CREATE TABLE gene (
@@ -138,26 +152,30 @@ CREATE TABLE gene (
     `hugo_gene_symbol` String,
     `genetic_entity_id` Int64,
     `type` Nullable(String)
-);
+)
+ORDER BY (entrez_gene_id);
 
 -- src/main/resources/db-scripts/clickhouse/init/schema.sql
 CREATE TABLE gene_alias (
     `entrez_gene_id` Int64,
     `gene_alias` String
-);
+)
+ORDER BY (entrez_gene_id, gene_alias);
 
 -- src/main/resources/db-scripts/clickhouse/init/schema.sql
 CREATE TABLE gene_panel (
     `internal_id` Int64,
     `stable_id` String,
     `description` Nullable(String)
-);
+)
+ORDER BY (internal_id);
 
 -- src/main/resources/db-scripts/clickhouse/init/schema.sql
 CREATE TABLE gene_panel_list (
     `internal_id` Int64,
     `gene_id` Int64
-);
+)
+ORDER BY (internal_id, gene_id);
 
 -- src/main/resources/db-scripts/clickhouse/init/schema.sql
 CREATE TABLE generic_entity_properties (
@@ -165,7 +183,8 @@ CREATE TABLE generic_entity_properties (
     `genetic_entity_id` Int64,
     `name` String,
     `value` String
-);
+)
+ORDER BY (id);
 
 -- src/main/resources/db-scripts/clickhouse/init/schema.sql
 CREATE TABLE geneset (
@@ -175,40 +194,46 @@ CREATE TABLE geneset (
     `name` String,
     `description` String,
     `ref_link` Nullable(String)
-);
+)
+ORDER BY (id);
 
 -- src/main/resources/db-scripts/clickhouse/init/schema.sql
 CREATE TABLE geneset_gene (
     `geneset_id` Int64,
     `entrez_gene_id` Int64
-);
+)
+ORDER BY (geneset_id, entrez_gene_id);
 
 -- src/main/resources/db-scripts/clickhouse/init/schema.sql
 CREATE TABLE geneset_hierarchy_leaf (
     `node_id` Int64,
     `geneset_id` Int64
-);
+)
+ORDER BY (node_id, geneset_id);
 
 -- src/main/resources/db-scripts/clickhouse/init/schema.sql
 CREATE TABLE geneset_hierarchy_node (
     `node_id` Int64,
     `node_name` String,
     `parent_id` Nullable(Int64)
-);
+)
+ORDER BY (node_id);
 
 -- src/main/resources/db-scripts/clickhouse/init/schema.sql
 CREATE TABLE genetic_alteration (
     `genetic_profile_id` Int64,
     `genetic_entity_id` Int64,
     `values` String
-);
+)
+ORDER BY (genetic_profile_id, genetic_entity_id);
 
 -- src/main/resources/db-scripts/clickhouse/init/schema.sql
 CREATE TABLE genetic_entity (
     `id` Int64,
     `entity_type` String,
     `stable_id` Nullable(String)
-);
+)
+ORDER BY (id);
 
 -- src/main/resources/db-scripts/clickhouse/init/schema.sql
 CREATE TABLE genetic_profile (
@@ -224,20 +249,23 @@ CREATE TABLE genetic_profile (
     `pivot_threshold` Nullable(Float64),
     `sort_order` Nullable(String),
     `patient_level` Nullable(Int32)
-);
+)
+ORDER BY (genetic_profile_id);
 
 -- src/main/resources/db-scripts/clickhouse/init/schema.sql
 CREATE TABLE genetic_profile_link (
     `referring_genetic_profile_id` Int64,
     `referred_genetic_profile_id` Int64,
     `reference_type` Nullable(String)
-);
+)
+ORDER BY (referring_genetic_profile_id, referred_genetic_profile_id);
 
 -- src/main/resources/db-scripts/clickhouse/init/schema.sql
 CREATE TABLE genetic_profile_samples (
     `genetic_profile_id` Int64,
     `ordered_sample_list` String
-);
+)
+ORDER BY (genetic_profile_id);
 
 -- src/main/resources/db-scripts/clickhouse/init/schema.sql
 CREATE TABLE gistic (
@@ -249,13 +277,15 @@ CREATE TABLE gistic (
     `wide_peak_end` Int64,
     `q_value` Float64,
     `amp` Int32
-);
+)
+ORDER BY (gistic_roi_id);
 
 -- src/main/resources/db-scripts/clickhouse/init/schema.sql
 CREATE TABLE gistic_to_gene (
     `gistic_roi_id` Int64,
     `entrez_gene_id` Int64
-);
+)
+ORDER BY (gistic_roi_id, entrez_gene_id);
 
 -- src/main/resources/db-scripts/clickhouse/init/schema.sql
 CREATE TABLE info (
@@ -263,7 +293,8 @@ CREATE TABLE info (
     `geneset_version` Nullable(String),
     `derived_table_schema_version` Nullable(String),
     `gene_table_version` Nullable(String)
-);
+)
+ORDER BY tuple();
 
 -- src/main/resources/db-scripts/clickhouse/init/schema.sql
 CREATE TABLE mut_sig (
@@ -274,7 +305,8 @@ CREATE TABLE mut_sig (
     `NumMutations` Int64,
     `p_value` Float64,
     `q_value` Float64
-);
+)
+ORDER BY (cancer_study_id, entrez_gene_id);
 
 -- src/main/resources/db-scripts/clickhouse/init/schema.sql
 CREATE TABLE mutation (
@@ -309,7 +341,8 @@ CREATE TABLE mutation (
     `normal_ref_count` Nullable(Int64) COMMENT 'Normal reference allele count.',
     `amino_acid_change` Nullable(String) COMMENT 'Amino acid change from mutation.',
     `annotation_json` Nullable(String) COMMENT 'JSON-formatted annotations.'
-);
+)
+ORDER BY (genetic_profile_id, entrez_gene_id);
 
 -- src/main/resources/db-scripts/clickhouse/init/schema.sql
 CREATE TABLE mutation_count_by_keyword (
@@ -318,7 +351,8 @@ CREATE TABLE mutation_count_by_keyword (
     `entrez_gene_id` Int64,
     `keyword_count` Int64,
     `gene_count` Int64
-);
+)
+ORDER BY (genetic_profile_id, entrez_gene_id);
 
 -- src/main/resources/db-scripts/clickhouse/init/schema.sql
 CREATE TABLE mutation_event (
@@ -343,14 +377,16 @@ CREATE TABLE mutation_event (
     `protein_pos_end` Nullable(Int64),
     `canonical_transcript` Nullable(Int32),
     `keyword` Nullable(String)
-);
+)
+ORDER BY (mutation_event_id);
 
 -- src/main/resources/db-scripts/clickhouse/init/schema.sql
 CREATE TABLE patient (
     `internal_id` Int64,
     `stable_id` String,
     `cancer_study_id` Int64
-);
+)
+ORDER BY (internal_id);
 
 -- src/main/resources/db-scripts/clickhouse/init/schema.sql
 CREATE TABLE reference_genome (
@@ -361,7 +397,8 @@ CREATE TABLE reference_genome (
     `genome_size` Nullable(Int64),
     `url` String,
     `release_date` Nullable(DateTime64(6))
-);
+)
+ORDER BY (reference_genome_id);
 
 -- src/main/resources/db-scripts/clickhouse/init/schema.sql
 CREATE TABLE reference_genome_gene (
@@ -371,7 +408,8 @@ CREATE TABLE reference_genome_gene (
     `cytoband` Nullable(String),
     `start` Nullable(Int64),
     `end` Nullable(Int64)
-);
+)
+ORDER BY (entrez_gene_id, reference_genome_id);
 
 -- src/main/resources/db-scripts/clickhouse/init/schema.sql
 CREATE TABLE resource_definition (
@@ -383,28 +421,32 @@ CREATE TABLE resource_definition (
     `priority` Int64,
     `cancer_study_id` Int64,
     `custom_metadata` Nullable(String)
-);
+)
+ORDER BY (resource_id, cancer_study_id);
 
 -- src/main/resources/db-scripts/clickhouse/init/schema.sql
 CREATE TABLE resource_patient (
     `internal_id` Int64,
     `resource_id` String,
     `url` String
-);
+)
+ORDER BY (internal_id, resource_id, url);
 
 -- src/main/resources/db-scripts/clickhouse/init/schema.sql
 CREATE TABLE resource_sample (
     `internal_id` Int64,
     `resource_id` String,
     `url` String
-);
+)
+ORDER BY (internal_id, resource_id, url);
 
 -- src/main/resources/db-scripts/clickhouse/init/schema.sql
 CREATE TABLE resource_study (
     `internal_id` Int64,
     `resource_id` String,
     `url` String
-);
+)
+ORDER BY (internal_id, resource_id, url);
 
 -- src/main/resources/db-scripts/clickhouse/init/schema.sql
 CREATE TABLE sample (
@@ -412,7 +454,8 @@ CREATE TABLE sample (
     `stable_id` String,
     `sample_type` String,
     `patient_id` Int64
-);
+)
+ORDER BY (internal_id);
 
 -- src/main/resources/db-scripts/clickhouse/init/schema.sql
 CREATE TABLE sample_cna_event (
@@ -420,7 +463,8 @@ CREATE TABLE sample_cna_event (
     `sample_id` Int64 COMMENT 'References sample.internal_id.',
     `genetic_profile_id` Int64 COMMENT 'References genetic_profile.genetic_profile_id.',
     `annotation_json` Nullable(String) COMMENT 'JSON-formatted annotation details.'
-);
+)
+ORDER BY (genetic_profile_id, cna_event_id, sample_id);
 
 -- src/main/resources/db-scripts/clickhouse/init/schema.sql
 CREATE TABLE sample_list (
@@ -430,20 +474,23 @@ CREATE TABLE sample_list (
     `cancer_study_id` Int64,
     `name` String,
     `description` Nullable(String)
-);
+)
+ORDER BY (list_id);
 
 -- src/main/resources/db-scripts/clickhouse/init/schema.sql
 CREATE TABLE sample_list_list (
     `list_id` Int64,
     `sample_id` Int64
-);
+)
+ORDER BY (list_id, sample_id);
 
 -- src/main/resources/db-scripts/clickhouse/init/schema.sql
 CREATE TABLE sample_profile (
     `sample_id` Int64,
     `genetic_profile_id` Int64,
     `panel_id` Nullable(Int64)
-);
+)
+ORDER BY (sample_id, genetic_profile_id);
 
 -- src/main/resources/db-scripts/clickhouse/init/schema.sql
 CREATE TABLE structural_variant (
@@ -487,7 +534,8 @@ CREATE TABLE structural_variant (
     `comments` Nullable(String),
     `sv_status` String,
     `annotation_json` Nullable(String)
-);
+)
+ORDER BY (`sample_id`, `genetic_profile_id`);
 
 -- src/main/resources/db-scripts/clickhouse/init/schema.sql
 CREATE TABLE type_of_cancer (
@@ -496,14 +544,16 @@ CREATE TABLE type_of_cancer (
     `dedicated_color` String,
     `short_name` Nullable(String),
     `parent` Nullable(String)
-);
+)
+ORDER BY (type_of_cancer_id);
 
 -- src/main/resources/db-scripts/clickhouse/init/schema.sql
 CREATE TABLE users (
     `email` String,
     `name` String,
     `enabled` Int32
-);
+)
+ORDER BY (email);
 
 -- src/main/resources/db-scripts/clickhouse/clickhouse.sql
 CREATE TABLE sample_to_gene_panel_derived (
@@ -512,13 +562,15 @@ CREATE TABLE sample_to_gene_panel_derived (
     gene_panel_id LowCardinality(String),
     cancer_study_identifier LowCardinality(String),
     genetic_profile_id LowCardinality(String)
-);
+)
+ORDER BY (gene_panel_id, alteration_type, genetic_profile_id, sample_unique_id);
 
 -- src/main/resources/db-scripts/clickhouse/clickhouse.sql
 CREATE TABLE gene_panel_to_gene_derived (
     gene_panel_id LowCardinality(String),
     gene String
-);
+)
+ORDER BY (gene_panel_id);
 
 -- src/main/resources/db-scripts/clickhouse/clickhouse.sql
 CREATE TABLE sample_derived (
@@ -536,7 +588,8 @@ CREATE TABLE sample_derived (
     -- fields below are needed for the DETAILED projection
     sequenced                   Int,
     copy_number_segment_present Int
-);
+)
+ORDER BY (cancer_study_identifier, sample_unique_id);
 
 -- src/main/resources/db-scripts/clickhouse/clickhouse.sql
 CREATE TABLE genomic_event_derived (
@@ -559,7 +612,8 @@ CREATE TABLE genomic_event_derived (
     sv_event_info             String,
     patient_unique_id         String,
     off_panel                 Boolean DEFAULT FALSE
-);
+)
+ORDER BY (genetic_profile_stable_id, cancer_study_identifier, variant_type, entrez_gene_id, hugo_gene_symbol, sample_unique_id);
 
 -- src/main/resources/db-scripts/clickhouse/clickhouse.sql
 CREATE TABLE clinical_data_derived (
@@ -570,7 +624,8 @@ CREATE TABLE clinical_data_derived (
     attribute_value String,
     cancer_study_identifier LowCardinality(String),
     type LowCardinality(String)
-);
+)
+ORDER BY (cancer_study_identifier, type, attribute_name, sample_unique_id);
 
 -- src/main/resources/db-scripts/clickhouse/clickhouse.sql
 CREATE TABLE clinical_event_derived (
@@ -581,7 +636,8 @@ CREATE TABLE clinical_event_derived (
     `stop_date` Nullable(Int64),
     `event_type` LowCardinality(String),
     `cancer_study_identifier` LowCardinality(String)
-);
+)
+ORDER BY (cancer_study_identifier, event_type, clinical_event_id);
 
 -- src/main/resources/db-scripts/clickhouse/clickhouse.sql
 CREATE TABLE clinical_event_data_derived (
@@ -592,7 +648,8 @@ CREATE TABLE clinical_event_data_derived (
     stop_date Int32 DEFAULT 0,
     event_type LowCardinality(String),
     cancer_study_identifier LowCardinality(String)
-);
+)
+ORDER BY (cancer_study_identifier, event_type, patient_unique_id);
 
 -- src/main/resources/db-scripts/clickhouse/clickhouse.sql
 CREATE TABLE genetic_alteration_derived (
@@ -601,7 +658,8 @@ CREATE TABLE genetic_alteration_derived (
     hugo_gene_symbol String,
     profile_type LowCardinality(String),
     alteration_value Nullable(String)
-);
+)
+ORDER BY (cancer_study_identifier, hugo_gene_symbol, profile_type, sample_unique_id);
 
 -- src/main/resources/db-scripts/clickhouse/clickhouse.sql
 CREATE TABLE generic_assay_data_derived (
@@ -615,7 +673,8 @@ CREATE TABLE generic_assay_data_derived (
     datatype String,
     patient_level NUMERIC,
     profile_type String
-);
+)
+ORDER BY (profile_type, entity_stable_id, patient_unique_id, sample_unique_id);
 
 -- src/main/resources/db-scripts/clickhouse/clickhouse.sql
 CREATE TABLE mutation_derived (
@@ -662,17 +721,20 @@ CREATE TABLE mutation_derived (
     `alleleSpecificCopyNumber.minorCopyNumber` Nullable(Int64) COMMENT 'Minor copy number',
     `alleleSpecificCopyNumber.expectedAltCopies` Nullable(Int64) COMMENT 'Expected alternate copies',
     `alleleSpecificCopyNumber.totalCopyNumber` Nullable(Int64) COMMENT 'Total copy number'
-);
+)
+ORDER BY (molecularProfileId, sampleId, entrezGeneId);
 
 -- src/main/resources/db-scripts/clickhouse/clickhouse.sql
 CREATE TABLE generic_assay_profile_entity_derived (
     profile_stable_id LowCardinality(String),
     entity_stable_id  String
-);
+)
+ORDER BY (profile_stable_id, entity_stable_id);
 
 -- src/main/resources/db-scripts/clickhouse/clickhouse.sql
 CREATE TABLE generic_assay_meta_derived (
     entity_stable_id String,
     entity_type LowCardinality(String),
     properties Map(String, String)
-);
+)
+ORDER BY (entity_stable_id);
