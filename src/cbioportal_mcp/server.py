@@ -1368,5 +1368,9 @@ def search_oncotree(search_term: str) -> list[dict]:
     return [item for _, item in scored[:25]]
 
 
+# Registers the precomputed-aggregate tools (get_alteration_frequency, ...) on `mcp`.
+# Imported last because domain_tools uses the helpers defined above.
+from cbioportal_mcp import domain_tools  # noqa: E402,F401
+
 if __name__ == "__main__":
     main()

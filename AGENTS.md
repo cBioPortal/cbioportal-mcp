@@ -17,6 +17,7 @@ SQL scripts in `sql/` directory (numeric prefix = apply order; see `sql/README.m
 - `3-add-cancer-study-query-preferences.sql` - Creates the cohort-lookup table
 - `4-mutation-frequency-views.sql` - WES-aware views for mutation-frequency denominators + parameterized `gene_mutation_frequency_by_cancer_type(preference, gene)` recipe view + `top_mutated_genes_in_cohort` / `top_mutated_genes_in_study` + single-study portal-chart views (`gene_mutation_variants_in_study`, `co_altered_genes_in_study`, `top_cna_genes_in_study`, `gene_cna_distribution_in_study`, `top_sv_genes_in_study`) with CNA/SV coverage views
 - `5-gene-expression-views.sql` - Expression / copy-number-value / methylation views (`gene_pair_coexpression`); backed by `genetic_alteration_derived`
+- `8-precomputed-aggregates.sql` - Precomputed alteration-frequency / profiled-count tables backing the `get_alteration_frequency`, `get_top_altered_genes`, `get_gene_frequency_by_cancer_type` and `get_profiled_counts` tools (same semantics as the `sql/4` recipes)
 - `portal-specific/<portal-name>/*.sql` - Deployment-specific cohorts (e.g. `portal-specific/public-portal/0-preferences.sql`). Existence-gated so they're no-ops on other deployments.
 
 **Example**: The `sample.sample_type` column contained "Primary Solid Tumor" for ALL samples, causing agents to report wrong counts for "primary samples". Solution: Remove the column entirely.
@@ -134,6 +135,7 @@ sql/
 ├── 3-add-cancer-study-query-preferences.sql     # cancer_study_query_preferences table + portable preferences
 ├── 4-mutation-frequency-views.sql                # Mutation-frequency parameterized views + coverage building blocks
 ├── 5-gene-expression-views.sql                   # Expression / CN / methylation correlation views
+├── 8-precomputed-aggregates.sql                  # Precomputed frequency tables behind the domain tools
 └── portal-specific/                             # Deployment-specific preferences (iterated after portable files)
     └── public-portal/
         └── 0-preferences.sql                    # cbioportal.org cohort rows (gated, no-op elsewhere)
