@@ -398,7 +398,11 @@ profiled_samples_for_gene AS (
     -- id(s) once, rather than joining every panel row against the gene
     -- table before filtering. COUNT(DISTINCT) downstream makes the result
     -- identical even for symbols with several (or duplicated) gene rows.
-    WHERE gpl.gene_id IN (SELECT entrez_gene_id FROM gene WHERE hugo_gene_symbol = {gene:String})
+    -- IS NOT NULL keeps NULL keys unmatched (as the equality JOIN did) even
+    -- under transform_null_in=1.
+    WHERE gpl.gene_id IN (
+        SELECT entrez_gene_id FROM gene
+        WHERE hugo_gene_symbol = {gene:String} AND entrez_gene_id IS NOT NULL)
       AND stgp.alteration_type = multiIf(
           {alteration:String} = 'mutation',           'MUTATION_EXTENDED',
           {alteration:String} = 'amplification',      'COPY_NUMBER_ALTERATION',
