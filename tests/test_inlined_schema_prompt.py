@@ -1,3 +1,4 @@
+import asyncio
 import importlib.util
 import os
 import re
@@ -334,34 +335,292 @@ def _documented_tables() -> set[str]:
     return names
 
 
-def _known_relations() -> set[str]:
-    """Every table in the DDL fixture or created by sql/, plus every view in sql/."""
-    views = {
-        v
-        for path in SQL_DIR.rglob("*.sql")
-        for v in re.findall(r"^CREATE VIEW (?:IF NOT EXISTS )?(\w+)", path.read_text(), re.M)
+# --- Every identifier the prompt names must exist -----------------------------
+# Each backticked token and each FROM/JOIN target must resolve to a relation,
+# column, view parameter, ClickHouse word, server tool (and its parameters),
+# guide URI, or one of the short allowlists below.
+
+
+def _relation_columns() -> dict[str, set[str]]:
+    """Columns per table (DDL fixture, replayed through sql/ CREATE, ADD COLUMN and
+    EXCHANGE TABLES) and per view (its output aliases and parameters).
+
+    Dropped columns are kept: the prompt may name them to say they are gone.
+    """
+    tables = {name: set(cols) for name, (cols, _) in _ddl_statements().items()}
+    for stmt in _sql_statements():
+        copy = re.search(r"CREATE TABLE (?:IF NOT EXISTS )?(\w+) AS (\w+)\s*$", stmt.strip())
+        if copy:
+            tables[copy.group(1)] = set(tables[copy.group(2)])
+        altered = re.search(r"ALTER TABLE (\w+)", stmt)
+        if altered:
+            added = re.findall(r"ADD COLUMN (?:IF NOT EXISTS )?(\w+)", stmt)
+            tables.setdefault(altered.group(1), set()).update(added)
+        exchanged = re.search(r"EXCHANGE TABLES (\w+) AND (\w+)", stmt)
+        if exchanged:
+            a, b = exchanged.groups()
+            tables[a], tables[b] = tables[b], tables[a]
+    for name, (cols, _) in _sql_created_tables().items():
+        tables.setdefault(name, set()).update(cols)
+    for name, params in _view_params().items():
+        tables[name] = set(re.findall(r"\bAS\s+(\w+)", _view_bodies()[name], re.I)) | params
+    return tables
+
+
+def _view_params() -> dict[str, set[str]]:
+    return {name: set(re.findall(r"\{(\w+):", body)) for name, body in _view_bodies().items()}
+
+
+def _server_tools() -> dict[str, set[str]]:
+    tools = asyncio.run(server.mcp.get_tools())
+    return {name: set(tool.parameters.get("properties", {})) for name, tool in tools.items()}
+
+
+def _guide_uri_exists(uri: str) -> bool:
+    text = server.read_guide.fn(uri)
+    return not text.startswith(("Resource not found:", "No pitfall numbered"))
+
+
+def _sql_literals() -> set[str]:
+    """String literals the shipped SQL uses (attribute names, enum values, preferences)."""
+    return {lit for stmt in _sql_statements() for lit in re.findall(r"'([^'\n]*)'", stmt)}
+
+
+def _oncotree_codes() -> set[str]:
+    return {entry["code"] for entry in server._load_oncotree_data()}
+
+
+# ClickHouse keywords, functions and types the prompt uses (matched case-insensitively).
+CLICKHOUSE_WORDS = {
+    *"SELECT DISTINCT FROM WHERE AND OR NOT IN IS NULL AS ON JOIN LEFT UNION ALL".split(),
+    *"GROUP BY ORDER DESC ASC WITH LIKE CAST DESCRIBE TABLE true".split(),
+    *"count countIf sum avg min max maxIf quantile round nullIf lower upper".split(),
+    *"startsWith toFloat64OrNull Nullable String Int Array".split(),
+}
+
+# Names the prompt cites to say they do NOT exist; test_negative_examples_do_not_exist
+# keeps them honest.
+NEGATIVE_EXAMPLES = {
+    "oncokb_annotations",
+    "tumor_grade",
+    "patient_count",
+    "cancer_study.patient_count",
+}
+
+# External analysis tools the prompt hands off to (not part of this database).
+EXTERNAL_NAMES = {"lifelines", "survival::survfit", "fisher.test", "scipy.stats.fisher_exact"}
+
+# Output fields of server tools; test_allowlisted_tool_fields_exist checks server.py.
+TOOL_OUTPUT_FIELDS = {"has_guide"}
+
+# Values stored in the data (not the DDL) that the shipped SQL never spells out,
+# keyed by the column that holds them; test_column_values_are_keyed_by_real_columns
+# checks each key.
+COLUMN_VALUES = {
+    "attribute_name": {
+        *"AGE CANCER_TYPE_DETAILED DAYS_TO_BIRTH MUTATION_COUNT ONCOTREE_CODE SEX".split(),
+        *"OS_MONTHS OS_STATUS SAMPLE_TYPE TMB_NONSYNONYMOUS TUMOR_PURITY DFS_* PFS_*".split(),
+    },
+    "datatype": {"NUMBER", "STRING", "BOOLEAN", "MAF", "CONTINUOUS", "Z-SCORE"},
+    "genetic_alteration_type": {"PROTEIN_LEVEL", "METHYLATION", "GENERIC_ASSAY"},
+    "profile_type": {
+        *"rna_seq_v2_mrna rna_seq_v2_mrna_median_all_sample_Zscores methylation_hm450".split(),
+        "mrna",
+        "rppa",
+    },
+    "mutation_type": {"Missense_Mutation", "Nonsense_Mutation", "Frame_Shift_Del", "Splice_Site"},
+    "mutation_status": {"UNKNOWN"},
+    "mutation_variant": {"V600E"},
+    "hugo_gene_symbol": {"TP53"},
+    "event_type": {"Status", "Sample acquisition"},
+}
+
+# Free-text terms in prose: clinical markers and cBioPortal OQL keywords.
+PROSE_TERMS = {"ER-positive", "HER2-negative", "PR", "PD-L1", "DRIVER", "MUT_DRIVER"}
+
+# Whole spans that are formulas in prose, not SQL.
+PROSE_SPANS = {"altered/profiled × 100"}
+
+# Call-syntax examples: placeholders allowed ONLY inside that exact snippet.
+SYNTAX_EXAMPLES = {"SELECT * FROM view_name(param='…', …)": {"view_name", "param"}}
+
+IDENT_RE = re.compile(r"(?<![\w.:#-])[A-Za-z_][\w]*(?:(?:\.|::)[A-Za-z_]\w*)*(?:-[A-Za-z0-9]\w*)*")
+PATTERN_RE = re.compile(r"[\w.<>*]*(?:<[\w.]+>|\w\*|\*\w)[\w.<>*]*")
+CALL_RE = re.compile(r"\b(\w+)\(([^()]*)\)")
+
+
+def _prompt_snippets() -> list[tuple[int, str]]:
+    """(line, text) for each inline code span and each line of each fenced block."""
+    text = _prompt()
+    snippets = []
+    for m in re.finditer(r"```\w*\n(.*?)```", text, re.S):
+        snippets.append((text.count("\n", 0, m.start(1)) + 1, m.group(1)))
+    prose = re.sub(r"```.*?```", lambda m: re.sub(r"[^\n]", " ", m.group()), text, flags=re.S)
+    for m in re.finditer(r"`([^`\n]+)`", prose):
+        snippets.append((text.count("\n", 0, m.start()) + 1, m.group(1)))
+    return snippets
+
+
+def _unquote(sql: str) -> str:
+    """Drop string literals and unwrap `quoted` / "quoted" identifiers."""
+    sql = re.sub(r"'(?:[^'\\]|\\.)*'", "''", sql)
+    return re.sub(r"[`\"]([\w.]+)[`\"]", r"\1", sql)
+
+
+def _local_names(sql: str) -> set[str]:
+    """CTEs, column aliases and table aliases a snippet defines."""
+    stop = "WHERE|ON|JOIN|LEFT|INNER|GROUP|ORDER|UNION|LIMIT|AS|USING|FINAL"
+    return set(re.findall(r"\b(\w+)\s+AS\s*\(", sql, re.I)) | {
+        *re.findall(r"\bAS\s+(\w+)", sql, re.I),
+        *re.findall(rf"\b(?:FROM|JOIN)\s+[\w.]+\s+(?!(?:{stop})\b)(\w+)", sql, re.I),
     }
-    return set(_all_tables()) | views
 
 
-# Generic stand-ins the prompt uses to describe call syntax, not real relations.
-PLACEHOLDER_RELATIONS = {"view_name"}
+def _relations_read(sql: str) -> set[str]:
+    """FROM/JOIN targets, with quotes removed and database qualifiers kept."""
+    return set(re.findall(r"\b(?:FROM|JOIN)\s+([A-Za-z_][\w.]*)", _unquote(sql), re.I))
 
 
-def _sql_snippets(text: str) -> list[str]:
-    """```sql blocks plus inline `code` spans that read from a relation."""
-    blocks = _code_blocks(text)
-    prose = re.sub(r"```.*?```", "", text, flags=re.S)
-    inline = [
-        s for s in re.findall(r"`([^`\n]+)`", prose) if re.search(r"\b(FROM|JOIN)\b", s, re.I)
-    ]
-    return blocks + inline
+def _blank(m: re.Match) -> str:
+    """Blank out a match but keep its newlines, so offsets still map to prompt lines."""
+    return re.sub(r"[^\n]", " ", m.group())
 
 
-def _relations_read(snippet: str) -> set[str]:
-    """FROM/JOIN targets of a snippet, minus CTEs it defines."""
-    ctes = set(re.findall(r"\b(\w+)\s+AS\s*\(", snippet, re.I))
-    return set(re.findall(r"\b(?:FROM|JOIN)\s+([A-Za-z_][\w.]*)", snippet, re.I)) - ctes
+def _problem(line: int, sql: str, offset: int, token: str, why: str) -> str:
+    return f"line {line + sql.count(chr(10), 0, offset)}: {token!r} {why}"
+
+
+def _is_relation(name: str, relations, local) -> bool:
+    parts = name.split(".")
+    return (len(parts) <= 2 and parts[-1] in relations) or (len(parts) == 1 and name in local)
+
+
+def _unresolved_tokens() -> list[str]:
+    columns = _relation_columns()
+    relations = set(columns)
+    documented = _documented_tables()
+    views = _view_params()
+    tools = _server_tools()
+    bare = (
+        relations
+        | set().union(*(columns[t] for t in documented | set(views)))
+        | CLICKHOUSE_WORDS
+        | set(tools)
+        | EXTERNAL_NAMES
+        | TOOL_OUTPUT_FIELDS
+        | set().union(*COLUMN_VALUES.values())
+        | PROSE_TERMS
+        | NEGATIVE_EXAMPLES
+        | _sql_literals()
+        | _oncotree_codes()
+    )
+    keywords = {w.lower() for w in CLICKHOUSE_WORDS}
+
+    def resolves(token: str, local: set[str]) -> bool:
+        if token in bare or token in local or token.lower() in keywords:
+            return True
+        if token.startswith("_"):  # column-name suffix, e.g. driver_filter + `_annotation`
+            return any(n.endswith(token) for n in bare)
+        parts = token.split(".")
+        if len(parts) == 1:
+            return False
+        if parts[0] in local:  # alias.column
+            return True
+        if parts[0] not in relations and parts[1] in relations:  # db.table[.column]
+            parts = parts[1:]
+        if parts[0] not in relations or len(parts) > 2:
+            return False
+        return len(parts) == 1 or parts[1] in columns[parts[0]]
+
+    problems = []
+    for line, raw in _prompt_snippets():
+        if raw in PROSE_SPANS or raw in bare:
+            continue
+        allowed = SYNTAX_EXAMPLES.get(raw, set())
+        sql = _unquote(raw)
+        local = _local_names(sql) | allowed
+
+        def fail(offset, token, why, line=line, sql=sql):
+            problems.append(_problem(line, sql, offset, token, why))
+
+        for target in _relations_read(raw):
+            if not _is_relation(target, relations, local):
+                fail(sql.find(target), target, "is read FROM/JOIN but is not a table or view")
+
+        for m in re.finditer(r"cbioportal://[\w/#-]+|(?<![\w/])#(\w+)", sql):
+            uri = m.group() if m.group(1) is None else f"cbioportal://common-pitfalls{m.group()}"
+            if uri != "cbioportal://common-pitfalls#N" and not _guide_uri_exists(uri):
+                fail(m.start(), m.group(), "is not a guide URI read_guide() serves")
+        sql = re.sub(r"\[[^\]]*\]\([^)]*\)", _blank, sql)  # markdown link template
+        sql = re.sub(r"cbioportal://[\w/#-]+|(?<![\w/])#\w+|https?://\S+", _blank, sql)
+        sql = re.sub(  # repo paths
+            r"[\w.-]+(?:/[\w.-]+)+/?",
+            lambda m: _blank(m) if (REPO / m.group()).exists() else m.group(),
+            sql,
+        )
+
+        for m in CALL_RE.finditer(sql):
+            params = tools.get(m.group(1), views.get(m.group(1)))
+            if params is None:
+                continue
+            for arg in (a.strip() for a in m.group(2).split(",")):
+                name = arg.split("=")[0].strip()
+                if re.fullmatch(r"\w+", name) and name not in params | allowed:
+                    fail(m.start(), f"{m.group(1)}({name})", "is not a parameter of that call")
+        sql = CALL_RE.sub(  # tool/view arguments are checked above
+            lambda m: m.group(1) + "(" + re.sub(r"[^\n]", " ", m.group(2)) + ")"
+            if m.group(1) in tools or m.group(1) in views
+            else m.group(),
+            sql,
+        )
+
+        for m in PATTERN_RE.finditer(sql):
+            for inner in re.findall(r"<([\w.]+)>", m.group()):
+                if not resolves(inner, local):
+                    fail(m.start(), inner, "is not a known identifier")
+            literal = re.sub(r"<[\w.]+>", "", m.group())
+            if "*" in m.group() and m.group() not in bare:
+                regex = re.compile(re.escape(literal).replace(r"\*", r"\w*"))
+                if not any(regex.fullmatch(n) for n in bare):
+                    fail(m.start(), m.group(), "matches no known identifier")
+        sql = PATTERN_RE.sub(_blank, sql)
+
+        for m in IDENT_RE.finditer(sql):
+            token = m.group()
+            if not resolves(token, local):
+                fail(m.start(), token, "is not a known table, column, function, tool or value")
+    return problems
+
+
+def test_every_backticked_identifier_in_prompt_resolves():
+    problems = _unresolved_tokens()
+
+    assert not problems, "prompt names identifiers that don't exist:\n" + "\n".join(problems)
+
+
+def test_negative_examples_do_not_exist():
+    columns = _relation_columns()
+    everything = set(columns) | set().union(*columns.values())
+    for name in NEGATIVE_EXAMPLES:
+        table, _, column = name.rpartition(".")
+        if table:
+            assert column not in columns[table], name
+        else:
+            assert name not in everything, name
+        assert re.search(rf"\bno(?:\*\*)? `{re.escape(name)}`", _prompt()), name
+
+
+def test_allowlisted_tool_fields_exist():
+    source = Path(server.__file__).read_text()
+    for field in TOOL_OUTPUT_FIELDS:
+        assert re.search(rf"\[['\"]{field}['\"]\]", source), field
+
+
+def test_column_values_are_keyed_by_real_columns():
+    columns = _relation_columns()
+    documented = set().union(*(columns[t] for t in _documented_tables()))
+    for column in COLUMN_VALUES:
+        assert column in documented, column
 
 
 def test_precomputed_views_table_names_only_shipped_views():
@@ -381,15 +640,18 @@ def test_precomputed_views_table_names_only_shipped_views():
 
 
 def test_recipe_sql_reads_only_existing_relations():
-    known = _known_relations() | PLACEHOLDER_RELATIONS
-    snippets = _sql_snippets(_prompt())
-    for snippet in snippets:
-        unknown = sorted(_relations_read(snippet) - known)
-        assert not unknown, (
-            f"prompt SQL reads from {unknown}, which is not a table in the DDL fixture "
-            f"or a table/view created by sql/:\n{snippet}"
-        )
-    read = set().union(*(_relations_read(s) for s in snippets))
+    relations = set(_relation_columns())
+    read = set()
+    for line, raw in _prompt_snippets():
+        sql = _unquote(raw)
+        local = _local_names(sql) | SYNTAX_EXAMPLES.get(raw, set())
+        for target in _relations_read(raw):
+            at = line + sql.count("\n", 0, sql.find(target))
+            assert _is_relation(target, relations, local), (
+                f"line {at}: prompt SQL reads from {target!r}, which is not a table in the "
+                f"DDL fixture or a table/view created by sql/:\n{raw}"
+            )
+            read.add(target)
     assert {"genomic_event_derived", "gene_mutation_frequency_in_study"} <= read, sorted(read)
 
 

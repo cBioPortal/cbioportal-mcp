@@ -24,7 +24,7 @@ Conventions used everywhere:
 `cancer_study_id` Int (internal; join key to raw tables), `cancer_study_identifier` (**use this for filtering**), `type_of_cancer_id` (lowercase OncoTree code; `'mixed'` for multi-cancer studies such as msk_chord_2024, msk_impact_*, GENIE), `name`, `description`, `pmid`, `citation`, `public`.
 Precomputed counts (same numbers as the portal study list / "Data type" filter): `sample_count`, `mutation_sample_count`, `cna_sample_count`, `structural_variant_sample_count`, `mrna_expression_sample_count` (any mRNA profile — use for "has expression data"), `rna_seq_sample_count`, `mrna_microarray_sample_count`, `mirna_sample_count`, `rppa_sample_count`, `mass_spectrometry_sample_count`, `treatment_patient_count` (patients, not samples), `resource_sample_counts` Map(String, UInt32) keyed by resource display name (`resource_sample_counts['Slide Microscopy'] > 0`). `0` = no data of that type. There is **no** `patient_count` column.
 
-**`type_of_cancer`** — OncoTree codes. `type_of_cancer_id` (lowercase code), `name`, `short_name`, `parent`, `main_type`, `tissue`, `level`, `revocations` Array(String), `precursors` Array(String). Resolve names/abbreviations with `search_oncotree(term)`, not `LIKE`.
+**`type_of_cancer`** — OncoTree codes. `type_of_cancer_id` (lowercase code), `name`, `short_name`, `parent`, `main_type`, `tissue`, `level`, `revocations` Array(String), `precursors` Array(String). Resolve names/abbreviations with `search_oncotree(search_term)`, not `LIKE`.
 
 **`patient`** — `internal_id`, `stable_id`, `cancer_study_id` (→ `cancer_study.cancer_study_id`).
 **`sample`** — `internal_id`, `stable_id`, `patient_id` (→ `patient.internal_id`). `sample.sample_type` was removed on purpose.
@@ -189,7 +189,7 @@ Call `read_guide(uri)` directly with the URI below that matches the query type �
 - `cbioportal://common-pitfalls` — when unsure; `#16` for mutation terminology / typo-like variants, `#21` for enumeration questions. Fragments (`cbioportal://common-pitfalls#N`) return one pitfall.
 - `get_study_guide(study_id)` — when the question names a study and `list_studies` shows `has_guide: true`.
 
-**Enumeration / catalog questions** ("what cancer types are in the database", "what studies do you have", "show me all X"): use one list tool directly — `list_studies(limit=100)`, `list_study_guides()`, `list_guides()`, `search_oncotree(term)`. For cancer types run one query: `SELECT tc.name, count() AS studies, sum(cs.sample_count) AS samples FROM cancer_study cs JOIN type_of_cancer tc ON cs.type_of_cancer_id = tc.type_of_cancer_id GROUP BY tc.name ORDER BY studies DESC`. See `cbioportal://common-pitfalls#21`.
+**Enumeration / catalog questions** ("what cancer types are in the database", "what studies do you have", "show me all X"): use one list tool directly — `list_studies(limit=100)`, `list_study_guides()`, `list_guides()`, `search_oncotree(search_term)`. For cancer types run one query: `SELECT tc.name, count() AS studies, sum(cs.sample_count) AS samples FROM cancer_study cs JOIN type_of_cancer tc ON cs.type_of_cancer_id = tc.type_of_cancer_id GROUP BY tc.name ORDER BY studies DESC`. See `cbioportal://common-pitfalls#21`.
 
 ## Study Discovery and Cancer Type Resolution
 
