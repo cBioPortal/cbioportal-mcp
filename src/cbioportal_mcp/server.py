@@ -605,9 +605,17 @@ def run_select_query(query: str, *, query_label: str, max_rows: int | None = Non
     if max_rows is not None:
         query = _with_row_cap(query, max_rows)
     logger.debug("run_select_query: delegate the query to run_query tool of ClickHouse MCP")
-    settings = query_cache_settings(query_label, query)
-    with traced_db_query(query_label, query_cache=settings is not None):
-        ch_query_result = json.loads(run_query(query, settings=settings))
+    try:
+        settings = query_cache_settings(query_label, query)
+    except ValueError:
+        # Rejected before reaching ClickHouse; still record it as a failed query.
+        with traced_db_query(query_label):
+            raise
+    with traced_db_query(query_label, query_cache=settings is not None) as db_query:
+        raw_result, cached = run_query(query, settings=settings)
+        if settings is not None and not cached:
+            db_query.query_cache = "fallback"
+        ch_query_result = json.loads(raw_result)
         result = zip_select_query_result(ch_query_result)
     return result
 

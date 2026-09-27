@@ -9,6 +9,7 @@ import os
 import socket
 import time
 from contextlib import contextmanager
+from types import SimpleNamespace
 from typing import Any, NamedTuple
 
 import mcp.types as mt
@@ -157,7 +158,7 @@ def _emit_db_query_metrics(
     query_label: str,
     duration_ms: float,
     success: bool,
-    query_cache: bool = False,
+    query_cache: str | None = None,
 ) -> None:
     """Emit aggregate Datadog metrics for one ClickHouse SELECT, tagged by call
     site. run_select_query() is a single funnel for every SELECT the server
@@ -173,7 +174,7 @@ def _emit_db_query_metrics(
         "success": str(success).lower(),
     }
     if query_cache:
-        tags["query_cache"] = "on"
+        tags["query_cache"] = query_cache
     try:
         client.increment("db_query.calls", tags)
         client.distribution("db_query.duration_ms", round(duration_ms, 3), tags)
@@ -183,6 +184,19 @@ def _emit_db_query_metrics(
         logger.debug("DogStatsD db_query metric emit failed: %s", exc)
 
 
+def emit_query_cache_disabled() -> None:
+    """Count the query cache pilot turning itself off after ClickHouse refused
+    its settings (see query_cache.run_query), so a misconfigured profile shows
+    up in Datadog rather than only in pod logs."""
+    client = _get_dogstatsd_client()
+    if client is None:
+        return
+    try:
+        client.increment("db_query.cache_disabled", {})
+    except Exception as exc:
+        logger.debug("DogStatsD query cache metric emit failed: %s", exc)
+
+
 @contextmanager
 def traced_db_query(query_label: str, *, query_cache: bool = False):
     """Wrap one ClickHouse SELECT with an OTel span (``db.query/<label>``) and
@@ -190,36 +204,43 @@ def traced_db_query(query_label: str, *, query_cache: bool = False):
     be broken down by call site in Datadog instead of averaged into one
     run_select_query number. Re-raises on failure after recording it as a
     failed call; does not suppress or alter the underlying exception.
+
+    Yields a holder whose ``query_cache`` ("on" when cache settings were sent,
+    else None) the caller may change before exit, e.g. to "fallback" when the
+    server refused the settings and an uncached retry served the result.
     """
     tracer = trace.get_tracer(__name__)
     started = time.perf_counter()
+    db_query = SimpleNamespace(query_cache="on" if query_cache else None)
     with tracer.start_as_current_span(f"db.query/{query_label}") as span:
         span.set_attribute("db.query.label", query_label)
-        if query_cache:
-            span.set_attribute("db.query.cache", "on")
         try:
-            yield
+            yield db_query
         except Exception as exc:
             duration_ms = (time.perf_counter() - started) * 1000
             span.set_attribute("db.query.duration_ms", duration_ms)
             span.set_attribute("db.query.success", False)
             span.set_attribute("error.type", type(exc).__name__)
+            if db_query.query_cache:
+                span.set_attribute("db.query.cache", db_query.query_cache)
             _emit_db_query_metrics(
                 query_label=query_label,
                 duration_ms=duration_ms,
                 success=False,
-                query_cache=query_cache,
+                query_cache=db_query.query_cache,
             )
             raise
         else:
             duration_ms = (time.perf_counter() - started) * 1000
             span.set_attribute("db.query.duration_ms", duration_ms)
             span.set_attribute("db.query.success", True)
+            if db_query.query_cache:
+                span.set_attribute("db.query.cache", db_query.query_cache)
             _emit_db_query_metrics(
                 query_label=query_label,
                 duration_ms=duration_ms,
                 success=True,
-                query_cache=query_cache,
+                query_cache=db_query.query_cache,
             )
 
 

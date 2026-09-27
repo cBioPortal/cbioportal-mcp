@@ -2,6 +2,8 @@
 
 import logging
 import os
+import threading
+import time
 import uuid
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -25,6 +27,8 @@ VIEW_QUERIES = [
     "select * from TOP_MUTATED_GENES_IN_STUDY (study='msk_chord_2024')",
     "WITH t AS (SELECT * FROM gene_mutation_frequency_in_study(study='x', gene='KRAS'))"
     " SELECT * FROM t",
+    "SELECT a.hugo_gene_symbol FROM `top_mutated_genes_in_study`(study='x') AS a"
+    " JOIN top_cna_genes_in_study(study='x') b USING hugo_gene_symbol -- system.tables",
 ]
 
 
@@ -128,6 +132,40 @@ def test_allowlisted_label_is_cached(enabled, request_context, database):
         (LLM, "SELECT hugo_gene_symbol FROM genomic_event_derived LIMIT 5"),
         (LLM, "WITH x AS (SELECT 42 AS n) SELECT n FROM x"),
         (LLM, "SELECT 'top_mutated_genes_in_cohort' AS name"),
+        # Bypasses of a raw-text view match: view name only in a comment ...
+        (LLM, "SELECT * FROM genomic_event_derived -- top_mutated_genes_in_cohort(x)"),
+        (LLM, "SELECT * FROM genomic_event_derived /* top_mutated_genes_in_study( */"),
+        (LLM, "SELECT * FROM genomic_event_derived # gene_mutation_frequency_in_study("),
+        # ... or only in a string literal ...
+        (LLM, "SELECT 'top_mutated_genes_in_cohort(' AS s FROM genomic_event_derived"),
+        # ... quoted system database ...
+        (
+            LLM,
+            "SELECT * FROM top_mutated_genes_in_cohort(preference='public')"
+            " WHERE 1 IN (SELECT 1 FROM `system`.tables)",
+        ),
+        (LLM, "SELECT * FROM top_mutated_genes_in_cohort(preference='p') JOIN \"system\" . parts"),
+        # ... or a standard view joined to an arbitrary table.
+        (
+            LLM,
+            "SELECT * FROM top_mutated_genes_in_cohort(preference='public') t"
+            " JOIN genomic_event_derived g ON t.hugo_gene_symbol = g.hugo_gene_symbol",
+        ),
+        (
+            LLM,
+            "SELECT * FROM top_mutated_genes_in_cohort(preference='public') v,"
+            " clinical_data_derived c",
+        ),
+        (
+            LLM,
+            "SELECT * FROM top_mutated_genes_in_cohort(preference='public')"
+            " WHERE hugo_gene_symbol IN (SELECT hugo_gene_symbol FROM gene)",
+        ),
+        (LLM, "SELECT * FROM top_mutated_genes_in_cohort(preference='public') WHERE x IN gene"),
+        (LLM, "SELECT * FROM other_db.top_mutated_genes_in_cohort(preference='public')"),
+        (LLM, "SELECT dictGet('d', 'v', 1) FROM top_mutated_genes_in_cohort(preference='p')"),
+        (LLM, "SELECT * FROM remote('host', system.tables)"),
+        (LLM, "SELECT * FROM top_mutated_genes_in_cohort(preference='public') WHERE x = 'open"),
     ],
 )
 def test_not_cached_when_flag_on(enabled, request_context, database, metrics, query_label, query):
@@ -155,7 +193,8 @@ def test_disabled_delegates_unchanged(monkeypatch, request_context):
     query = " SELECT * FROM top_mutated_genes_in_cohort(preference='public'); -- x\n"
     settings = query_cache.query_cache_settings(LLM, query)
     assert settings is None
-    assert query_cache.run_query(query, settings=settings) is payload
+    result, cached = query_cache.run_query(query, settings=settings)
+    assert result is payload and cached is False
     delegate.assert_called_once_with(query)
 
 
@@ -196,7 +235,7 @@ def test_overrides_restored_on_failure(enabled, request_context, database, metri
     ],
 )
 def test_server_rejection_falls_back_uncached_once(
-    enabled, request_context, database, caplog, message
+    enabled, request_context, database, metrics, caplog, message
 ):
     def query(sql, settings):
         if database.configs[-1].get("settings", {}).get("use_query_cache"):
@@ -211,6 +250,34 @@ def test_server_rejection_falls_back_uncached_once(
     assert [bool(c.get("settings")) for c in database.configs] == [True, False, False, False]
     assert len([r for r in caplog.records if "rejected" in r.getMessage()]) == 1
     assert query_cache.query_cache_settings(LLM, VIEW_QUERIES[0]) is None
+    metrics.increment.assert_any_call("db_query.cache_disabled", {})
+    calls = [c.args for c in metrics.increment.call_args_list if c.args[0] == "db_query.calls"]
+    # The retried call is tagged as a fallback; later calls run with the pilot off.
+    assert [tags.get("query_cache") for _, tags in calls] == ["fallback", None, None]
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Code: 115. DB::Exception: Unknown setting 'max_replication_threads'. (UNKNOWN_SETTING)",
+        "Code: 452. DB::Exception: Setting readonly shouldn't be greater than 0."
+        " (SETTING_CONSTRAINT_VIOLATION)",
+        "Code: 452. DB::Exception: Setting max_block_size shouldn't be greater than 100",
+        "Setting foo_bar is unknown or readonly",
+        "Code: 164. DB::Exception: Cannot modify 'readonly' setting in readonly mode",
+        # A cache setting named elsewhere in the message, not as the refused one.
+        "Unknown setting 'max_threadz' in SELECT 1 SETTINGS use_query_cache_x = 1",
+    ],
+)
+def test_other_setting_errors_do_not_disable_pilot(
+    enabled, request_context, database, metrics, message
+):
+    database.client.query.side_effect = ProgrammingError(message)
+    with pytest.raises(upstream.ToolError):
+        server.run_select_query(VIEW_QUERIES[0], query_label=LLM)
+    assert len(database.configs) == 1  # no uncached retry
+    assert query_cache.query_cache_settings(LLM, VIEW_QUERIES[0]) == CACHE_SETTINGS
+    assert all(c.args[0] != "db_query.cache_disabled" for c in metrics.increment.call_args_list)
 
 
 def test_other_errors_do_not_disable_pilot(enabled, request_context, database):
@@ -227,15 +294,25 @@ def test_other_errors_do_not_disable_pilot(enabled, request_context, database):
         VIEW_QUERIES[0] + " SETTINGS use_query_cache = 1, query_cache_ttl = 86400",
         "SELECT 1 SETTINGS query_cache_share_between_users = 1",
         "SELECT 1 SETTINGS Enable_Reads_From_Query_Cache=0",
+        "SELECT 1 SETTINGS `use_query_cache` = 1",
     ],
 )
-def test_agent_query_cache_settings_rejected_when_on(enabled, request_context, database, query):
+def test_agent_query_cache_settings_rejected_when_on(
+    enabled, request_context, database, metrics, query
+):
     result = server.clickhouse_run_select_query.fn(query)
     assert "query_cache settings are managed by the server" in result["error_message"]
     assert database.configs == []
+    metrics.increment.assert_any_call("db_query.errors", {"query_label": LLM, "success": "false"})
+
+
+def test_query_cache_text_in_comment_or_literal_is_not_an_assignment(enabled, request_context):
+    query = VIEW_QUERIES[0] + " -- SETTINGS use_query_cache = 0\n AND 'query_cache_ttl = 1' = ''"
+    assert query_cache.query_cache_settings(LLM, query) == CACHE_SETTINGS
 
 
 def test_agent_query_cache_settings_untouched_when_off(request_context, database):
+    # Pilot off means pre-pilot behavior: the model's SETTINGS pass through.
     query = "SELECT 1 SETTINGS use_query_cache = 1"
     assert server.clickhouse_run_select_query.fn(query) == {"rows": [{"n": 42}]}
 
@@ -246,6 +323,58 @@ def test_enabled_preserves_row_cap(enabled, request_context, database):
     assert _client_settings(database) == CACHE_SETTINGS
 
 
+def test_cached_query_still_times_out(enabled, request_context, database, monkeypatch):
+    monkeypatch.setattr(upstream, "get_mcp_config", lambda: SimpleNamespace(query_timeout=0.2))
+    monkeypatch.setattr(upstream, "_cancel_query_with_bounded_wait", Mock())
+
+    def slow_query(sql, settings):
+        time.sleep(1)
+        return SimpleNamespace(column_names=["n"], result_rows=[[42]])
+
+    database.client.query.side_effect = slow_query
+    with pytest.raises(upstream.ToolError, match="timed out after 0.2 seconds"):
+        server.run_select_query(VIEW_QUERIES[0], query_label=LLM)
+    assert _client_settings(database) == CACHE_SETTINGS
+    assert request_context.get_state(upstream.CLIENT_CONFIG_OVERRIDES_KEY) is None
+
+
+def test_concurrent_queries_sharing_a_request_do_not_leak_settings(
+    enabled, request_context, database
+):
+    """Threads given the same request context (as get_study_guide does) must not
+    see each other's temporary cache overrides."""
+    release = threading.Event()
+    started = threading.Event()
+
+    def query(sql, settings):
+        if "top_mutated" in sql:
+            started.set()
+            release.wait(5)
+        return SimpleNamespace(column_names=["n"], result_rows=[[42]])
+
+    database.client.query.side_effect = query
+    import contextvars
+
+    cached = threading.Thread(
+        target=contextvars.copy_context().run,
+        args=(server.run_select_query, VIEW_QUERIES[1]),
+        kwargs={"query_label": LLM},
+    )
+    cached.start()
+    assert started.wait(5)
+    uncached = threading.Thread(
+        target=contextvars.copy_context().run,
+        args=(server.run_select_query, "SELECT 1"),
+        kwargs={"query_label": "study_guide.counts"},
+    )
+    uncached.start()
+    time.sleep(0.1)
+    release.set()
+    cached.join(5)
+    uncached.join(5)
+    assert [c.get("settings", {}) for c in database.configs] == [CACHE_SETTINGS, {}]
+
+
 def test_study_guide_caches_only_top_genes(enabled, request_context, monkeypatch):
     seen = {}
 
@@ -253,7 +382,7 @@ def test_study_guide_caches_only_top_genes(enabled, request_context, monkeypatch
         overrides = query_cache._request_context()
         state = overrides and overrides.get_state(upstream.CLIENT_CONFIG_OVERRIDES_KEY)
         seen[query] = (settings, state)
-        return '{"columns": ["cancer_study_identifier"], "rows": [["x"]]}'
+        return '{"columns": ["cancer_study_identifier"], "rows": [["x"]]}', False
 
     monkeypatch.setattr(query_cache, "run_query", fake_run_query)
     labels = []
@@ -307,15 +436,26 @@ def test_config_validated_once(monkeypatch, request_context):
 
 @pytest.mark.skipif(
     not os.getenv("CBIOPORTAL_MCP_TEST_CLICKHOUSE_URL"),
-    reason="set CBIOPORTAL_MCP_TEST_CLICKHOUSE_URL=http://user:pass@host:port to run",
+    reason=(
+        "set CBIOPORTAL_MCP_TEST_CLICKHOUSE_URL=http://user:pass@host:port (the MCP user, "
+        "with the recommended readonly=2 profile) and optionally "
+        "CBIOPORTAL_MCP_TEST_CLICKHOUSE_ADMIN_URL (defaults to the same URL) for query_log"
+    ),
 )
 def test_real_clickhouse_second_query_hits_cache(monkeypatch, enabled, request_context):
+    """Runs through mcp-clickhouse's real readonly handling (get_readonly_setting
+    on a live client), so it fails if the profile/readonly combination refuses
+    the cache settings: the pilot would then self-disable and log no hit."""
     from urllib.parse import urlparse
 
     import clickhouse_connect
     from mcp_clickhouse import mcp_env
 
     url = urlparse(os.environ["CBIOPORTAL_MCP_TEST_CLICKHOUSE_URL"])
+    admin_url = urlparse(
+        os.getenv("CBIOPORTAL_MCP_TEST_CLICKHOUSE_ADMIN_URL")
+        or os.environ["CBIOPORTAL_MCP_TEST_CLICKHOUSE_URL"]
+    )
     env = {
         "CLICKHOUSE_HOST": url.hostname,
         "CLICKHOUSE_PORT": str(url.port or 8123),
@@ -336,16 +476,17 @@ def test_real_clickhouse_second_query_hits_cache(monkeypatch, enabled, request_c
     assert first == second and len(first) == 5
 
     admin = clickhouse_connect.get_client(
-        host=env["CLICKHOUSE_HOST"],
-        port=int(env["CLICKHOUSE_PORT"]),
-        username=env["CLICKHOUSE_USER"],
-        password=env["CLICKHOUSE_PASSWORD"],
-        secure=url.scheme == "https",
+        host=admin_url.hostname,
+        port=admin_url.port or 8123,
+        username=admin_url.username or "default",
+        password=admin_url.password or "",
+        secure=admin_url.scheme == "https",
     )
     try:
         admin.command("SYSTEM FLUSH LOGS")
         rows = admin.query(
-            "SELECT query_cache_usage, ProfileEvents['QueryCacheHits'] FROM system.query_log"
+            "SELECT query_cache_usage, ProfileEvents['QueryCacheHits'], Settings['readonly'],"
+            " Settings['use_query_cache'], user FROM system.query_log"
             " WHERE type = 'QueryFinish' AND query LIKE {pattern:String}"
             " AND query NOT LIKE '%system.query_log%' ORDER BY event_time_microseconds",
             parameters={"pattern": f"%{marker}%"},
@@ -353,5 +494,8 @@ def test_real_clickhouse_second_query_hits_cache(monkeypatch, enabled, request_c
     finally:
         admin.close()
     assert len(rows) == 2
+    for _, _, readonly, use_query_cache, user in rows:
+        # Upstream's readonly enforcement is in effect on the cached queries.
+        assert readonly in ("1", "2") and use_query_cache == "1" and user == env["CLICKHOUSE_USER"]
     assert rows[0][0] == "Write"
     assert rows[1][0] == "Read" and rows[1][1] > 0

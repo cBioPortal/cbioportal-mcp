@@ -47,6 +47,42 @@ export CLICKHOUSE_MCP_SERVER_TRANSPORT=stdio # or http or sse
 # export CLICKHOUSE_MCP_HTTP_PATH=/db/mcp
 ```
 
+### ClickHouse Query Cache Pilot (optional, off by default)
+
+Repeated mutation-frequency and top-gene queries can use ClickHouse's query
+cache:
+
+```bash
+export CBIOPORTAL_MCP_QUERY_CACHE_ENABLED=1   # only the exact value 1 enables it
+export CBIOPORTAL_MCP_QUERY_CACHE_TTL=300     # seconds; default and maximum 3600
+```
+
+Only allowlisted queries are cached: the `get_study_guide` top-genes section,
+and `clickhouse_run_select_query` SQL whose every `FROM`/`JOIN` source is one
+of the standard frequency / top-gene views from
+`sql/4-mutation-frequency-views.sql` and that does not reference `system.*`.
+While the pilot is on, SQL that sets `use_query_cache` or any `query_cache*`
+setting itself is rejected. Both variables are validated at startup: TTLs above
+3600 are clamped, and non-positive or non-integer values stop the server.
+
+Server requirements:
+- ClickHouse 24.4 or later.
+- The MCP user's settings profile must let it change the cache settings: use
+  `readonly = 2` (recommended), or `readonly = 1` plus `CHANGEABLE_IN_READONLY`
+  constraints on `use_query_cache`, `query_cache_ttl` and
+  `query_cache_nondeterministic_function_handling`. With a plain
+  `readonly = 1`, ClickHouse refuses the settings; the server then logs one
+  warning, counts `cbioportal_mcp.db_query.cache_disabled`, and runs uncached.
+- Recommended constraints: `query_cache_ttl` max 3600 and
+  `query_cache_share_between_users` readonly.
+
+Cached queries carry `query_cache:on` on the `db_query.*` metrics, or
+`query_cache:fallback` when ClickHouse refused the settings and an uncached
+retry answered. Measure actual hits in `system.query_log`
+(`query_cache_usage`, `ProfileEvents['QueryCacheHits']`). The cache is not
+invalidated when the database behind the MCP changes; the deployment should
+run `SYSTEM DROP QUERY CACHE` when it switches databases.
+
 ### Datadog Tool Metrics
 
 The server emits one OpenTelemetry span per MCP tool call and can also emit
