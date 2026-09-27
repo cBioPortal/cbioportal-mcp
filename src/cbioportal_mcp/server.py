@@ -238,6 +238,10 @@ def main():
 
     # Get config
     config = get_mcp_config()
+    # Validate the query cache pilot env once, before serving any query.
+    from cbioportal_mcp.query_cache import load_config as load_query_cache_config
+
+    load_query_cache_config()
 
     try:
         ensure_db_permissions(config=config)
@@ -601,7 +605,7 @@ def run_select_query(query: str, *, query_label: str, max_rows: int | None = Non
     if max_rows is not None:
         query = _with_row_cap(query, max_rows)
     logger.debug("run_select_query: delegate the query to run_query tool of ClickHouse MCP")
-    settings = query_cache_settings()
+    settings = query_cache_settings(query_label, query)
     with traced_db_query(query_label, query_cache=settings is not None):
         ch_query_result = json.loads(run_query(query, settings=settings))
         result = zip_select_query_result(ch_query_result)
@@ -915,6 +919,8 @@ def get_study_guide(study_id: str) -> str:
         # clock, while six concurrent ones cost roughly one. Results are
         # still consumed in the original section order below, so the guide's
         # output is unchanged regardless of which query finishes first.
+        from contextvars import copy_context
+
         with ThreadPoolExecutor(max_workers=6) as executor:
             counts_future = executor.submit(
                 run_select_query,
@@ -964,7 +970,12 @@ def get_study_guide(study_id: str) -> str:
                 """,
                 query_label="study_guide.attrs",
             )
+            # Only this section is query-cache eligible, and the cache settings
+            # ride on the FastMCP request context, which pool threads don't
+            # inherit. It's the only worker given the context, so no other
+            # section can observe its temporary cache overrides.
             top_genes_future = executor.submit(
+                copy_context().run,
                 run_select_query,
                 f"""
                     SELECT
