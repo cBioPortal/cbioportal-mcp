@@ -10,6 +10,7 @@ Read this guide when the user mentions:
 - GENIE, AACR GENIE, MSK private cohorts, institutional cohorts
 - "download study", "which study", "find cohort", "data from [portal]"
 - a named cohort that `list_studies(search=...)` does not find
+- HTAN, or an HTAN center (OHSU, MSK, Vanderbilt, ...)
 
 ## Core Rules
 
@@ -27,6 +28,18 @@ These are not necessarily queryable from this MCP server, but they are useful re
 | PBTA, Pediatric Brain Tumor Atlas, pediatric brain tumors | https://pedcbioportal.kidsfirstdrc.org/ | Pediatric cancer studies, including pediatric brain tumor cohorts |
 | GENIE | https://genie.cbioportal.org/ | AACR GENIE data access, depending on release and permissions |
 | MSK private / institutional cohorts | private institutional cBioPortal deployments | Not queryable from public cBioPortal unless exported to the public database |
+
+## HTAN Studies
+
+HTAN study ids carry the atlas code (`hta9`, `hta8`, ...), and the names don't always name the center, so `list_studies(search="OHSU HTAN")` finds nothing. Search `list_studies(search="HTAN")` and match the center by atlas code:
+
+| Atlas code | Center | Study |
+|---|---|---|
+| `hta8` | MSK | `crc_hta8_htan_2024` |
+| `hta9` | OHSU | `brca_hta9_htan_2022` ("Breast Cancer (HTAN, 2022)") |
+| `hta11` | Vanderbilt | `crc_hta11_htan_2021` |
+
+For HTAN imaging (Minerva, MxIF, H&E), continue with the external-resources-guide.
 
 ## Study Resolution Workflow
 

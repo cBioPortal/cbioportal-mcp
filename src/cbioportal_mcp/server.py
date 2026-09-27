@@ -34,29 +34,30 @@ import mcp.types as mt
 from cbioportal_mcp.env import get_mcp_config, TransportType
 from cbioportal_mcp.authentication.permissions import ensure_db_permissions
 from cbioportal_mcp.auth import _build_auth_provider
-from cbioportal_mcp.db_client import execute_query
-from cbioportal_mcp.metadata_cache import MetadataCache
 from cbioportal_mcp.telemetry import (
     TelemetryMiddleware,
     configure_telemetry,
     dogstatsd_metrics_configured,
     traced_db_query,
 )
+from cbioportal_mcp.metadata_cache import MetadataCache  # noqa: E402 (after LLMObs.enable)
 
 logger = logging.getLogger(__name__)
+
+# Schema listings and generated study guides only change when the database is
+# refreshed; see metadata_cache for the TTL knob. Only successes are stored.
 _schema_cache = MetadataCache()
 _study_guide_cache = MetadataCache()
 
 
 def _clear_schema_cache() -> None:
-    """Clear cached table lists and column descriptions."""
+    """Reset cached table lists and column descriptions. Test hook; not used at runtime."""
     _schema_cache.clear()
 
 
 def _clear_study_guide_cache() -> None:
-    """Clear generated study guides after data refresh or in tests."""
+    """Reset cached dynamic study guides. Test hook; not used at runtime."""
     _study_guide_cache.clear()
-
 
 # Regex pattern for valid cBioPortal study identifiers
 # Allows alphanumeric characters, underscores, and hyphens
@@ -332,6 +333,54 @@ def _sample_filtering_guide_text() -> str:
 def _common_pitfalls_guide_text() -> str:
     return _load_resource("common-pitfalls.md")
 
+# Pitfall headers look like "### 1. 🚨 TITLE" or "### 5b. 🚨 TITLE".
+_PITFALL_HEADER_RE = re.compile(r'^### (\d+[a-z]?)\.\s*.*$', re.MULTILINE)
+
+def _pitfall_sort_key(number: str) -> tuple[int, str]:
+    m = re.match(r'(\d+)(.*)', number)
+    return (int(m.group(1)), m.group(2))
+
+@lru_cache(maxsize=1)
+def _common_pitfall_sections() -> dict[str, str]:
+    """Split common-pitfalls.md into individually addressable sections by
+    pitfall number.
+
+    The full guide is ~4,300 words (~5,700 tokens), but callers that already
+    know which pitfall applies — including system-prompt.md's own routing
+    rules — only need one ~100-400 token section. Cached because the file is
+    baked into the image and doesn't change at runtime.
+    """
+    text = _common_pitfalls_guide_text()
+    headers = list(_PITFALL_HEADER_RE.finditer(text))
+    sections: dict[str, str] = {}
+    for i, m in enumerate(headers):
+        start = m.start()
+        end = headers[i + 1].start() if i + 1 < len(headers) else len(text)
+        sections[m.group(1)] = text[start:end].rstrip()
+    return sections
+
+def _common_pitfall_fragment(number: str) -> str | None:
+    """Return one pitfall's section text plus a short footer, or None if unknown."""
+    section = _common_pitfall_sections().get(number)
+    if section is None:
+        return None
+    return (
+        f"{section}\n\n"
+        f"---\n"
+        f"(Excerpt of pitfall #{number} from cbioportal://common-pitfalls. "
+        f"Read the full guide for the others.)"
+    )
+
+def _unknown_pitfall_message(number: str) -> str:
+    available = ", ".join(
+        sorted(_common_pitfall_sections().keys(), key=_pitfall_sort_key)
+    )
+    return (
+        f"No pitfall numbered '{number}' in cbioportal://common-pitfalls.\n"
+        f"Available pitfall numbers: {available}\n\n"
+        'Use read_guide("cbioportal://common-pitfalls") for the full guide.'
+    )
+
 def _treatment_guide_text() -> str:
     return _load_resource("treatment-guide.md")
 
@@ -352,6 +401,9 @@ def _gene_resolution_guide_text() -> str:
 
 def _study_resolution_guide_text() -> str:
     return _load_resource("study-resolution-guide.md")
+
+def _germline_guide_text() -> str:
+    return _load_resource("germline-guide.md")
 
 # --- MCP resources (decorator registers them) --------------------------------
 @mcp.resource("cbioportal://mutation-frequency-guide")
@@ -399,8 +451,20 @@ def study_resolution_guide() -> str:
     return _study_resolution_guide_text()
 
 
+@mcp.resource("cbioportal://germline-guide")
+def germline_guide() -> str:
+    return _germline_guide_text()
+
+
+# Default and maximum rows clickhouse_run_select_query will return. A missing
+# or overly broad LIMIT in agent-written SQL should not be able to flood the
+# agent's context with an unbounded result set (mirrors MAX_LIST_LIMIT below).
+DEFAULT_SELECT_MAX_ROWS = 100
+MAX_SELECT_MAX_ROWS = 10000
+
+
 @mcp.tool(
-    description="""
+    description=f"""
     Execute a ClickHouse SQL SELECT query.
 
     For complex analysis patterns, consult these query guides:
@@ -412,15 +476,43 @@ def study_resolution_guide() -> str:
     - cbioportal://study-resolution-guide - Missing studies, external portals, and substitute cohorts
     - cbioportal://common-pitfalls - Common query mistakes and how to avoid them
 
+    Args:
+        max_rows: Maximum rows to return (default {DEFAULT_SELECT_MAX_ROWS}, max {MAX_SELECT_MAX_ROWS}).
+            Prefer narrowing the query itself (add a LIMIT, aggregate, or filter) over raising this.
+
     Returns:
-        - On success: an object with a single field "rows" containing an array of result rows.
+        - On success: an object with field "rows" containing an array of result rows. If the
+          query produced more rows than max_rows, "rows" is truncated and "truncated": true,
+          "returned_rows", and a "note" are included.
         - On failure: an object with a single field "error_message" containing a string describing the error.
 """
 )
-def clickhouse_run_select_query(query: str) -> dict[str, list[dict] | str]:
+def clickhouse_run_select_query(
+    query: str, max_rows: int = DEFAULT_SELECT_MAX_ROWS
+) -> dict[str, list[dict] | str | bool | int]:
     try:
-        result = run_select_query(query, query_label="clickhouse_run_select_query")
+        safe_max_rows = max(1, min(int(max_rows), MAX_SELECT_MAX_ROWS))
+        # run_select_query returns at most safe_max_rows + 1 rows (capped in
+        # ClickHouse), so one extra row signals that the result was truncated.
+        result = run_select_query(
+            query, query_label="clickhouse_run_select_query", max_rows=safe_max_rows
+        )
         logger.debug("clickhouse_run_select_query returns %s", result)
+        if len(result) > safe_max_rows:
+            return {
+                "rows": result[:safe_max_rows],
+                "truncated": True,
+                "returned_rows": safe_max_rows,
+                # No total_rows here: once ClickHouse stops scanning early, the
+                # true total is unknown without a separate full COUNT(*), which
+                # would defeat the point of stopping early.
+                "note": (
+                    f"Result truncated to {safe_max_rows} rows; more rows matched but the "
+                    f"exact total is unknown because the query was capped during execution "
+                    f"for efficiency. Narrow the query (add a LIMIT, aggregate, or filter) or "
+                    f"pass a larger max_rows (up to {MAX_SELECT_MAX_ROWS}) to see more."
+                ),
+            }
         return {"rows": result}
     except Exception as e:
         error_message = str(e)
@@ -445,7 +537,8 @@ def clickhouse_list_tables() -> dict[str, list[dict] | str]:
         cached = _schema_cache.get(("tables",))
         if cached is not None:
             return cached
-        raw = execute_query("SHOW TABLES")
+        from mcp_clickhouse.mcp_server import run_query
+        raw = json.loads(run_query("SHOW TABLES"))
         rows = raw.get("rows", [])
         result = [{"name": row[0]} for row in rows if row]
         logger.debug("clickhouse_list_tables result: %s", result)
@@ -478,7 +571,8 @@ def clickhouse_list_table_columns(table: str) -> dict[str, list[dict] | str]:
         cached = _schema_cache.get(("columns", table))
         if cached is not None:
             return cached
-        raw = execute_query(f"DESCRIBE TABLE {table}")
+        from mcp_clickhouse.mcp_server import run_query
+        raw = json.loads(run_query(f"DESCRIBE TABLE {table}"))
         columns_list = raw.get("columns", [])
         rows = raw.get("rows", [])
         # DESCRIBE TABLE returns: name, type, default_type, default_expression, comment, ...
@@ -505,7 +599,7 @@ def clickhouse_list_table_columns(table: str) -> dict[str, list[dict] | str]:
         return {"error_message": error_message}
 
 
-def run_select_query(query: str, *, query_label: str) -> list[dict]:
+def run_select_query(query: str, *, query_label: str, max_rows: int | None = None) -> list[dict]:
     """
     Execute arbitrary ClickHouse SQL SELECT query.
 
@@ -519,18 +613,35 @@ def run_select_query(query: str, *, query_label: str) -> list[dict]:
             per-call-site label its own latency metric would average a cheap
             lookup together with an expensive multi-table aggregate. Use
             "area.purpose", not the raw SQL text.
+        max_rows: When given, ClickHouse returns at most max_rows + 1 rows (see
+            _with_row_cap), so callers can detect truncation without fetching
+            the full result.
 
     Returns:
         list: A list of rows, where each row is a dictionary with column names as keys and corresponding values.
     """
+    from mcp_clickhouse.mcp_server import run_query
 
     # DB-level read-only permissions (enforced on startup) prevent non-SELECT queries,
     # so we don't need application-level query filtering. This allows CTEs (WITH ... AS).
-    logger.debug("run_select_query: execute on a reusable ClickHouse worker")
+    if max_rows is not None:
+        query = _with_row_cap(query, max_rows)
+    logger.debug("run_select_query: delegate the query to run_query tool of ClickHouse MCP")
     with traced_db_query(query_label):
-        ch_query_result = execute_query(query)
+        ch_query_result = json.loads(run_query(query))
         result = zip_select_query_result(ch_query_result)
     return result
+
+
+def _with_row_cap(query: str, max_rows: int) -> str:
+    """Wrap a SELECT so ClickHouse returns at most max_rows + 1 rows.
+
+    A LIMIT on an outer query works for any SELECT (CTEs, UNIONs, queries that already have their own
+    LIMIT) and lets the engine stop early. Query-level settings such as max_result_rows can't be used
+    here: mcp-clickhouse runs queries with readonly=1, which forbids changing settings.
+    """
+    inner = query.strip().rstrip(";").strip()
+    return f"SELECT * FROM ({inner}) LIMIT {int(max_rows) + 1}"
 
 
 def zip_select_query_result(ch_query_result) -> list[dict]:
@@ -582,7 +693,7 @@ def list_guides() -> list[dict]:
         },
         {
             "uri": "cbioportal://common-pitfalls",
-            "description": "Guide to avoid common mistakes when querying cBioPortal data"
+            "description": "Guide to avoid common mistakes when querying cBioPortal data. If you already know which numbered pitfall applies, fetch just that section via read_guide(\"cbioportal://common-pitfalls#<number>\") (e.g. #16) instead of the full guide"
         },
         {
             "uri": "cbioportal://treatment-guide",
@@ -613,6 +724,10 @@ def list_guides() -> list[dict]:
             "description": "Guide for resolving requested studies, avoiding silent substitute cohorts, and redirecting to known external cBioPortal instances when data is not in this deployment"
         },
         {
+            "uri": "cbioportal://germline-guide",
+            "description": "Guide for querying germline variant data — storage columns, study discovery, query patterns, and somatic vs germline considerations"
+        },
+        {
             "uri": "cbioportal://study-guide/{study_id}",
             "description": "Dynamic study-specific guide - use get_study_guide(study_id) tool to generate"
         }
@@ -626,8 +741,16 @@ def read_guide(uri: str) -> str:
     Use this after calling list_guides() to read the detailed content of guides.
 
     Args:
-        uri: The guide URI (e.g., "cbioportal://mutation-frequency-guide")
+        uri: The guide URI (e.g., "cbioportal://mutation-frequency-guide"). For
+            cbioportal://common-pitfalls, append "#<number>" (e.g.
+            "cbioportal://common-pitfalls#16") to fetch a single pitfall
+            instead of the full guide, when you already know which one applies.
     """
+    if uri.startswith("cbioportal://common-pitfalls#"):
+        number = uri.split("#", 1)[1]
+        fragment = _common_pitfall_fragment(number)
+        return fragment if fragment is not None else _unknown_pitfall_message(number)
+
     # Resource content mapping
     resources = {
         "cbioportal://mutation-frequency-guide": _mutation_frequency_guide_text(),
@@ -640,7 +763,8 @@ def read_guide(uri: str) -> str:
         "cbioportal://gene-expression-guide": _gene_expression_guide_text(),
         "cbioportal://external-resources-guide": _external_resources_guide_text(),
         "cbioportal://gene-resolution-guide": _gene_resolution_guide_text(),
-        "cbioportal://study-resolution-guide": _study_resolution_guide_text()
+        "cbioportal://study-resolution-guide": _study_resolution_guide_text(),
+        "cbioportal://germline-guide": _germline_guide_text()
     }
 
     if uri not in resources:
@@ -776,6 +900,7 @@ def get_study_guide(study_id: str) -> str:
         logger.info(f"Loaded static study guide for {study_id}")
         return static_guide
 
+    # Study ids match case-insensitively below, so key the cache the same way.
     cache_key = study_id.lower()
     cached = _study_guide_cache.get(cache_key)
     if cached is not None:
@@ -813,8 +938,14 @@ def get_study_guide(study_id: str) -> str:
 **Description:** {info.get('description', 'N/A')}
 """)
 
-        # Sections 2-7 are independent. Fetch concurrently, then assemble in
-        # section order. DB work uses persistent workers with reusable clients.
+        # Sections 2-7 below only depend on study_id, not on each other or on
+        # section order, so they're fired concurrently here instead of one
+        # ClickHouse round trip at a time -- each pays the same fixed
+        # per-call connection overhead (see run_select_query), so six
+        # sequential calls cost roughly six times that overhead in wall
+        # clock, while six concurrent ones cost roughly one. Results are
+        # still consumed in the original section order below, so the guide's
+        # output is unchanged regardless of which query finishes first.
         with ThreadPoolExecutor(max_workers=6) as executor:
             counts_future = executor.submit(
                 run_select_query,
@@ -986,6 +1117,11 @@ WHERE cancer_study_identifier = '{study_id}'
 
 # Maximum allowed limit for list queries to prevent expensive unbounded queries
 MAX_LIST_LIMIT = 100
+CBIOPORTAL_STUDY_SUMMARY_URL_TEMPLATE = "https://www.cbioportal.org/study/summary?id={study_id}"
+
+
+def _study_summary_url(study_id: str) -> str:
+    return CBIOPORTAL_STUDY_SUMMARY_URL_TEMPLATE.format(study_id=study_id)
 
 
 # How long a cached study snapshot is served before an on-demand call
@@ -1019,9 +1155,9 @@ def _fetch_and_store_studies() -> tuple[tuple[tuple[str, object], ...], ...]:
     """Query ClickHouse for every study's full detail and store it as the
     cache snapshot. Caller must hold _studies_cache_lock.
 
-    Use sample/patient for counts instead of clinical_data_derived. The latter
-    has many clinical-attribute rows per sample and makes first-connect study
-    discovery slower than it needs to be.
+    sample_count is precomputed onto cancer_study by
+    sql/6-add-study-data-type-counts.sql in the daily clone pipeline, so this
+    is a single-table scan with no joins or aggregation.
     """
     global _studies_cache_rows, _studies_cache_fetched_at
     query = """
@@ -1030,12 +1166,9 @@ def _fetch_and_store_studies() -> tuple[tuple[tuple[str, object], ...], ...]:
                     cs.name,
                     cs.description,
                     cs.type_of_cancer_id,
-                    COUNT(DISTINCT s.internal_id) as sample_count
+                    cs.sample_count
                 FROM cancer_study cs
-                LEFT JOIN patient p ON p.cancer_study_id = cs.cancer_study_id
-                LEFT JOIN sample s ON s.patient_id = p.internal_id
-                GROUP BY cs.cancer_study_identifier, cs.name, cs.description, cs.type_of_cancer_id
-                ORDER BY sample_count DESC
+                ORDER BY cs.sample_count DESC
             """
     rows = run_select_query(query, query_label="list_studies.all_studies")
     _studies_cache_rows = tuple(tuple(row.items()) for row in rows)
@@ -1100,15 +1233,19 @@ def _filter_studies(search: str | None, limit: int, verbose: bool) -> list[dict]
     rows = [dict(row) for row in _all_studies_query()]
 
     if search:
-        needle = search.lower()
-        rows = [
-            row
-            for row in rows
-            if needle in row["cancer_study_identifier"].lower()
-            or needle in row["name"].lower()
-            or needle in row["type_of_cancer_id"].lower()
-            or needle in (row["description"] or "").lower()
-        ]
+        # Every word must appear somewhere ("TARGET neuroblastoma" matches "Pediatric
+        # Neuroblastoma (TARGET, 2018)"); rows containing the whole phrase come first.
+        needle = search.lower().strip()
+        tokens = re.findall(r"[a-z0-9]+", needle)
+
+        def haystack(row: dict) -> str:
+            return " ".join(
+                [row["cancer_study_identifier"], row["name"], row["type_of_cancer_id"], row["description"] or ""]
+            ).lower()
+
+        phrase = [row for row in rows if needle in haystack(row)]
+        words = [row for row in rows if needle not in haystack(row) and all(t in haystack(row) for t in tokens)]
+        rows = phrase + words
 
     rows = rows[:limit]
 
@@ -1126,13 +1263,13 @@ def list_studies(search: str = None, limit: int = 20, verbose: bool = False) -> 
     Studies with pre-generated guides (in resources/study-guides/) will have has_guide=True.
 
     Args:
-        search: Optional search term to filter studies by name, identifier, cancer type, or description
+        search: Optional words to filter studies by; every word must appear in the name, identifier, cancer type, or description (any order). Search one study at a time.
         limit: Maximum number of studies to return (default 20, max 100)
         verbose: Include longer study description text. Defaults to false for faster first-connect discovery.
 
     Returns:
-        List of studies with identifiers, names, cancer types, sample counts, and guide availability.
-        Descriptions are included only when verbose=true.
+        List of studies with identifiers, names, cancer types, sample counts, cBioPortal URLs,
+        and guide availability. Descriptions are included only when verbose=true.
     """
     available_guides = set(_list_available_study_guides())
     
@@ -1146,6 +1283,8 @@ def list_studies(search: str = None, limit: int = 20, verbose: bool = False) -> 
         for study in results:
             study_id = study.get('cancer_study_identifier', '')
             study['has_guide'] = study_id in available_guides
+            if study_id:
+                study['url'] = _study_summary_url(study_id)
         
         return results
         
@@ -1184,6 +1323,7 @@ def search_oncotree(search_term: str) -> list[dict]:
     term_lower = search_term.strip().lower()
     if not term_lower:
         return [{"error": "search_term cannot be empty"}]
+    term_tokens = re.findall(r"[a-z0-9]+", term_lower)
 
     entries_by_code = {e["code"]: e for e in entries if "code" in e}
 
@@ -1197,6 +1337,7 @@ def search_oncotree(search_term: str) -> list[dict]:
         main_type_lower = main_type.lower()
         tissue = entry.get("tissue", "")
         tissue_lower = tissue.lower()
+        combined_text = f"{code_lower} {name_lower} {main_type_lower} {tissue_lower}"
         revocations = [r.lower() for r in entry.get("revocations", [])]
         precursors = [p.lower() for p in entry.get("precursors", [])]
 
@@ -1228,6 +1369,10 @@ def search_oncotree(search_term: str) -> list[dict]:
         # Tissue match
         elif term_lower in tissue_lower:
             score = 40
+        # Multi-word clinical phrasing often combines histology and site, e.g.
+        # "salivary adenoid cystic carcinoma" spans name + mainType.
+        elif term_tokens and all(token in combined_text for token in term_tokens):
+            score = 55
 
         if score > 0:
             result = {

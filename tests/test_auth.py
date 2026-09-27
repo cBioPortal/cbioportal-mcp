@@ -1,12 +1,24 @@
 import os
 from unittest.mock import Mock, patch
 
-from cbioportal_mcp.auth import _build_auth_provider
+from key_value.aio.stores.redis import RedisStore
+from key_value.aio.wrappers.encryption import FernetEncryptionWrapper
+
+from cbioportal_mcp.auth import (
+    _build_auth_provider,
+    _build_client_storage,
+    _derive_storage_encryption_key,
+)
 
 _ALL_GOOGLE_ENV = {
     "CBIOPORTAL_MCP_GOOGLE_CLIENT_ID": "123-abc.apps.googleusercontent.com",
     "CBIOPORTAL_MCP_GOOGLE_CLIENT_SECRET": "fake-secret",
     "CBIOPORTAL_MCP_GOOGLE_BASE_URL": "https://mcp.cbioportal.org",
+}
+
+_ALL_GOOGLE_AND_REDIS_ENV = {
+    **_ALL_GOOGLE_ENV,
+    "REDIS_URL": "redis://localhost:6379/9",
 }
 
 
@@ -56,3 +68,55 @@ def test_builds_google_provider_when_all_three_set():
         required_scopes=["openid", "email", "profile"],
         require_authorization_consent=False,
     )
+
+
+def test_builds_google_provider_without_client_storage_when_redis_url_unset():
+    # No REDIS_URL: falls back to GoogleProvider's own default (disk) store,
+    # so no client_storage kwarg should be passed at all.
+    fake_provider = Mock(name="GoogleProvider instance")
+    with (
+        patch.dict(os.environ, _ALL_GOOGLE_ENV, clear=True),
+        patch(
+            "cbioportal_mcp.auth.GoogleProvider", return_value=fake_provider
+        ) as mock_google_provider,
+    ):
+        provider = _build_auth_provider()
+
+    assert provider is fake_provider
+    _, kwargs = mock_google_provider.call_args
+    assert "client_storage" not in kwargs
+
+
+def test_builds_google_provider_with_redis_client_storage_when_redis_url_set():
+    fake_provider = Mock(name="GoogleProvider instance")
+    with (
+        patch.dict(os.environ, _ALL_GOOGLE_AND_REDIS_ENV, clear=True),
+        patch(
+            "cbioportal_mcp.auth.GoogleProvider", return_value=fake_provider
+        ) as mock_google_provider,
+    ):
+        provider = _build_auth_provider()
+
+    assert provider is fake_provider
+    _, kwargs = mock_google_provider.call_args
+    assert isinstance(kwargs["client_storage"], FernetEncryptionWrapper)
+    assert isinstance(kwargs["client_storage"].key_value, RedisStore)
+
+
+def test_derive_storage_encryption_key_is_deterministic():
+    assert _derive_storage_encryption_key("fake-secret") == _derive_storage_encryption_key(
+        "fake-secret"
+    )
+
+
+def test_derive_storage_encryption_key_differs_per_secret():
+    assert _derive_storage_encryption_key("fake-secret") != _derive_storage_encryption_key(
+        "other-secret"
+    )
+
+
+def test_build_client_storage_wraps_redis_store_with_fernet_encryption():
+    storage = _build_client_storage("fake-secret", "redis://localhost:6379/9")
+
+    assert isinstance(storage, FernetEncryptionWrapper)
+    assert isinstance(storage.key_value, RedisStore)

@@ -212,6 +212,65 @@ FROM top_mutated_genes_in_cohort(
 
 Returns `(hugo_gene_symbol, altered_samples, profiled_samples, frequency_pct, total_mutation_events)`, sorted by `altered_samples DESC` then gene symbol ASC (matching the backend's tiebreaker). Per-gene `profiled_samples` correctly reflects which samples were assayed for that gene — for targeted-panel cohorts (`large_genomic_cohort` = msk_impact_50k_2026), the denominator is samples on a panel that includes the gene; for WES cohorts (`pan_cancer_tcga`), every gene gets the same WES-sample denominator.
 
+`top_mutated_genes_in_cohort` spans the whole preference cohort — with `pan_cancer_tcga` that is all 32 TCGA studies, not one cancer type. For one study use `top_mutated_genes_in_study`.
+
+### Variant: top-N most-mutated genes in one study (`top_mutated_genes_in_study`)
+
+For "top N mutated genes in study X", use this view. Same columns, ordering and WES-aware denominator as the cohort view; do not compute your own denominator.
+
+```sql
+SELECT *
+FROM top_mutated_genes_in_study(
+    study = 'brca_tcga_pan_can_atlas_2018',
+    top_n = 5
+);
+-- PIK3CA 347/1066, TP53 347/1066, TTN 187, CDH1 130, GATA3 127
+```
+
+### Single-study views matching the portal's study-view charts
+
+Each returns the portal's numbers with the correct profiled denominator — use them instead of hand-writing counts.
+
+**`gene_mutation_variants_in_study(study, gene)`** — protein changes of one gene (the Mutations tab). Use for "most common KRAS mutation", "how often is IDH1 R132H".
+
+```sql
+SELECT * FROM gene_mutation_variants_in_study(study = 'luad_tcga_pan_can_atlas_2018', gene = 'KRAS');
+-- G12C 70/566 = 12.4%, G12V 40 (7.1%), G12D 20 (3.5%), G12A 17
+```
+
+Columns: `mutation_variant` (protein change), `mutation_type`, `altered_samples`, `profiled_samples` (samples profiled for the gene, same on every row), `frequency_pct`, `total_mutation_events`.
+
+**`top_cna_genes_in_study(study, top_n)`** — the CNA Genes table: genes ranked by samples with AMP (+2) or HOMDEL (−2).
+
+```sql
+SELECT * FROM top_cna_genes_in_study(study = 'gbm_tcga_pan_can_atlas_2018', top_n = 20);
+-- CDKN2A HOMDEL 322/575 = 56.0%, CDKN2B HOMDEL 317, EGFR AMP 255/575 = 44.3%, MTAP HOMDEL 244
+```
+
+Columns: `hugo_gene_symbol`, `cytoband`, `cna_type` (`AMP` / `HOMDEL`; a gene can appear once per type), `altered_samples`, `profiled_samples` (samples profiled for discrete CNA in that gene, panel-aware), `frequency_pct`. Neighbouring genes in one amplicon/deletion (CDKN2A, CDKN2B, MTAP; EGFR, EGFR-AS1) appear as separate rows.
+
+**`gene_cna_distribution_in_study(study, gene)`** — every discrete CNA level for one gene (the per-gene CNA chart), including gains, shallow deletions and diploid, which `genomic_event_derived` does not store.
+
+```sql
+SELECT * FROM gene_cna_distribution_in_study(study = 'gbm_tcga_pan_can_atlas_2018', gene = 'CDKN2A');
+-- Gained 20, Diploid 119, Heterozygously deleted 114, Homozygously deleted 322 (575 profiled), NA 17
+```
+
+Columns: `profile_type` (the discrete CNA profile, `gistic` or `cna`), `cna_value` (`2`..`-2`, `NA`), `cna_label`, `samples`, `profiled_samples` (samples with a value), `pct_of_profiled` (NULL on the `NA` row = study samples without a value).
+
+**`top_sv_genes_in_study(study, top_n)`** — the Structural Variant Genes table. Each fusion counts for both partner genes.
+
+```sql
+SELECT * FROM top_sv_genes_in_study(study = 'prad_tcga_pan_can_atlas_2018', top_n = 10);
+-- TMPRSS2 204/494 = 41.3%, ERG 203 (41.1%), SLC45A3 26, ACP3 14, ETV4 12
+```
+
+Columns: `hugo_gene_symbol`, `altered_samples`, `profiled_samples` (samples profiled for SVs in that gene), `frequency_pct`, `total_sv_events`.
+
+For custom CNA/SV denominators, the coverage views `cna_panel_gene_coverage` / `cna_wes_coverage` (discrete CNA profiles only) and `sv_panel_gene_coverage` / `sv_wes_coverage` work like the mutation ones.
+
+**`co_altered_genes_in_study(study, gene, top_n)`** — "what else is mutated in X-mutant tumors": each other gene's mutation % in X-mutant vs X-wild-type samples, ranked by the difference. See [Mutant vs Wild-Type Groups](#mutant-vs-wild-type-groups).
+
 ### Variant: Spearman correlation between two genes
 
 Gene expression / copy-number correlation questions ("are TP53 and MYC expression correlated in METABRIC?") belong in `cbioportal://gene-expression-guide`, which covers the `genetic_alteration_derived` table and the `gene_pair_coexpression(study, gene_a, gene_b, profile_type)` view. Don't try to express expression queries through the mutation-frequency views.
@@ -279,6 +338,11 @@ ORDER BY frequency_pct DESC;
 - **Top-N most-mutated genes per cancer type**: drop the `hugo_gene_symbol = '…'` filter and group by `(cancer_type, hugo_gene_symbol)`. Same CTEs.
 - **Comparing two specific cancer types**: filter `sct.cancer_type IN ('Cancer A', 'Cancer B')` after resolving via `search_oncotree`.
 - **Treatment-related cross-cancer questions**: switch to `preference_name = 'treatment_outcomes'` and pull treatment context from `clinical_event_derived` (see `treatment-guide`).
+- **Requested OncoTree subtype is absent from TCGA** (chondrosarcoma, intrahepatic cholangiocarcinoma, IDH-mutant astrocytoma, …): do **not** substitute the parent `CANCER_TYPE` (e.g. TCGA "Sarcoma" for chondrosarcoma). Switch to `preference_name = 'large_genomic_cohort'` and use `attribute_name = 'CANCER_TYPE_DETAILED'` in the CTE form above, filtering all requested subtypes in one query (e.g. IDH1 in msk_impact_50k_2026: Astrocytoma, IDH-Mutant 412/420; Oligodendroglioma, IDH-mutant, and 1p/19q-Codeleted 186/210; Chondrosarcoma 20/67 = 29.9%; Intrahepatic Cholangiocarcinoma 129/525 = 24.6%). Lower the `>= 50` threshold if a requested subtype is smaller.
+
+### Reading the result
+- **TCGA PanCan `CANCER_TYPE` merges histologies.** LUAD and LUSC both map to "Non-Small Cell Lung Cancer" (TP53: 699/1050 = 66.6% pooled vs LUAD 295/566 = 52.1%, LUSC 404/484 = 83.5%). For a single-organ question ("TP53 in lung cancer"), break down by `CANCER_TYPE_DETAILED` or run `gene_mutation_frequency_in_study` per study, and report the range.
+- **Hypermutated types inflate large genes.** Frequencies of large / passenger-prone genes (ATM, BRCA2, TTN, …) are high in hypermutated types (UCEC POLE/MSI, MSI colorectal, melanoma, bladder, stomach). Say so when those types top the list; "enriched" or "significant" claims need a statistical test.
 
 ### What NOT to do
 - **DO NOT** hand-build a `cancer_study_identifier IN ('luad_tcga', 'coadread_tcga', ...)` list — look it up in `cancer_study_query_preferences` so the canonical cohort definition stays consistent across queries.
@@ -381,6 +445,100 @@ WHERE alteration_type = 'MUTATION_EXTENDED'
 - **Profiled Samples** = gene-specific profiled samples from Step 2
 - **Sample %** = (# Samples / Profiled Samples) × 100
 
+## Driver / Oncogenic Mutations Only
+
+"Oncogenic", "driver" or "pathogenic" narrows the question to annotated drivers. The database can only partly answer it:
+
+- `genomic_event_derived.driver_filter` holds the study's own custom driver annotation: `'Putative_Driver'`, `'Putative_Passenger'`, or `''` (not annotated). `driver_filter_annotation` has the free-text reason (e.g. "Pathogenic or Likely-Pathogenic"). Only a few studies supply it — mainly clonal hematopoiesis studies (`msk_ch_*`); TCGA, MSK-IMPACT and MSK-CHORD do not.
+- OncoKB oncogenicity is computed by the cBioPortal web app at view time and is **not stored** in the database.
+
+Check the study first:
+
+```sql
+SELECT driver_filter, count() AS mutations
+FROM genomic_event_derived
+WHERE cancer_study_identifier = 'your_study_id' AND variant_type = 'mutation'
+GROUP BY driver_filter;
+```
+
+- **Annotations present:** add `AND driver_filter = 'Putative_Driver'` to the numerator and say the counts use the study's own driver annotation.
+- **Only `''`:** say the database has no driver annotation for this study, report the all-mutation numbers labelled as such (never as "oncogenic"), and give an OncoPrint / results-view link with the OQL `DRIVER` modifier (e.g. `KRAS: DRIVER`), where cBioPortal applies OncoKB and hotspot annotations.
+
+## Mutant vs Wild-Type Groups
+
+**Wild-type = profiled for the gene AND no mutation of any kind in it.** Never "patients with some mutation row in the gene" (that makes WT tiny), never unprofiled samples, never "not this variant" (R132G/R132C carriers are neither R132H nor WT).
+
+Profiled patients — `sample_to_gene_panel_derived` has no patient column, so map through `clinical_data_derived`:
+
+```sql
+SELECT uniqExact(c.patient_unique_id) AS profiled_patients
+FROM sample_to_gene_panel_derived s
+JOIN (SELECT DISTINCT sample_unique_id, patient_unique_id FROM clinical_data_derived
+      WHERE cancer_study_identifier = 'gbm_tcga_pan_can_atlas_2018') c USING sample_unique_id
+WHERE s.cancer_study_identifier = 'gbm_tcga_pan_can_atlas_2018' AND s.alteration_type = 'MUTATION_EXTENDED';
+-- 390 profiled; IDH1 R132H 22, R132G 1, R132C 1 → R132H 22 vs WT 366
+```
+
+This is correct for WES studies. For targeted-panel studies, restrict to samples whose panel covers the gene (the `gene_panel` join in Step 2, or `mutation_panel_gene_coverage`).
+
+**"What else is altered in X-mutant tumors?"** Frequencies inside the mutant group alone are dominated by large passenger genes (TTN, MUC16) that are just as common in WT. Use `co_altered_genes_in_study`, which reports each gene's % in X-mutant AND X-WT and ranks by the difference:
+
+```sql
+SELECT * FROM co_altered_genes_in_study(study = 'luad_tcga_pan_can_atlas_2018', gene = 'KRAS', top_n = 20);
+-- 168 KRAS-mutant / 398 WT: TP53 36.9 vs 58.5, EGFR 0.6 vs 17.3, STK11 22.6 vs 9.3,
+-- KEAP1 20.8 vs 16.8 (not in top 20), TTN 48.8 vs 47.7 (not in top 20)
+```
+
+Columns: `hugo_gene_symbol`, `mutant_altered` / `mutant_profiled` / `mutant_pct`, `wildtype_altered` / `wildtype_profiled` / `wildtype_pct`, `pct_difference` (mutant − WT, percentage points). Both groups are samples profiled for `gene`; each other gene's denominator counts only group samples profiled for it (panel-aware). Genes mutated in fewer than 10 samples in total are dropped. Mutation-only (no CNA/SV). In multi-cancer studies (msk_chord_2024) differences also reflect cancer-type composition (KRAS-mutant vs APC: colorectal enrichment) — say so, or use a single-cancer study.
+
+Whether a difference is significant needs Fisher's exact — hand off to cBioPortal's Comparison / Mutual Exclusivity tab (see `statistical-tests-guide`).
+
+## Combined Mutation + CNA Rate (Pathway / OncoPrint-Style)
+
+For "% of tumors with an alteration in genes A, B, C" (mutation OR amplification/deep deletion), use the **`<study>_cnaseq` sample list** as the denominator — samples profiled for both mutation and CNA, which is cBioPortal's default case set for mutation+CNA queries. Count only AMP (`2`) and HOMDEL (`-2`), not gains/shallow losses.
+
+```sql
+WITH cs AS (
+    SELECT concat('gbm_tcga_pan_can_atlas_2018_', s.stable_id) AS sid
+    FROM sample_list_list sll
+    JOIN sample_list sl ON sl.list_id = sll.list_id
+    JOIN sample s ON s.internal_id = sll.sample_id
+    WHERE sl.stable_id = 'gbm_tcga_pan_can_atlas_2018_cnaseq'
+)
+SELECT (SELECT count() FROM cs) AS n,
+       uniqExact(sample_unique_id) AS altered,
+       round(altered * 100 / n, 1) AS pct
+FROM genomic_event_derived
+WHERE cancer_study_identifier = 'gbm_tcga_pan_can_atlas_2018'
+  AND hugo_gene_symbol IN ('CDKN2A', 'CDK4', 'RB1')
+  AND ((variant_type = 'mutation' AND mutation_status != 'UNCALLED')
+       OR (variant_type = 'cna' AND cna_alteration IN (2, -2)))
+  AND sample_unique_id IN (SELECT sid FROM cs);
+-- 304 / 378 = 80.4% (CDKN2A 217, CDK4 60, RB1 47). The `_all` list (592) as denominator would give 435/592 = 73.5%.
+```
+
+A navigator link for this should use `case_set_id=<study>_cnaseq`. An "any-profiled" denominator is also defensible — state which one you used.
+
+## Top Co-Occurring Gene Pairs (Raw Counts)
+
+Dedupe to one row per (sample, gene) **before** the self-join; self-joining mutation rows counts a sample once per mutation pair and inflates the counts.
+
+```sql
+WITH cohort AS (SELECT DISTINCT sample_unique_id FROM clinical_data_derived
+                WHERE cancer_study_identifier = 'msk_chord_2024' AND attribute_name = 'CANCER_TYPE'
+                  AND attribute_value = 'Breast Cancer'),
+sg AS (SELECT DISTINCT sample_unique_id, hugo_gene_symbol FROM genomic_event_derived
+       WHERE cancer_study_identifier = 'msk_chord_2024' AND variant_type = 'mutation'
+         AND mutation_status != 'UNCALLED' AND off_panel = 0
+         AND sample_unique_id IN (SELECT sample_unique_id FROM cohort))
+SELECT a.hugo_gene_symbol AS g1, b.hugo_gene_symbol AS g2, count() AS both_mutated
+FROM sg a JOIN sg b ON a.sample_unique_id = b.sample_unique_id AND a.hugo_gene_symbol < b.hugo_gene_symbol
+GROUP BY g1, g2 ORDER BY both_mutated DESC LIMIT 10;
+-- 5,368 samples: PIK3CA+TP53 597, CDH1+PIK3CA 346, MAP3K1+PIK3CA 256, GATA3+PIK3CA 230, KMT2C+PIK3CA 218
+```
+
+These are raw counts; common genes pair often by chance. Co-occurrence/exclusivity significance → cBioPortal's Mutual Exclusivity tab (see `statistical-tests-guide`).
+
 ## WORKFLOW REQUIREMENTS
 
 ### Critical Requirements for Accurate Analysis:
@@ -397,47 +555,13 @@ WHERE alteration_type = 'MUTATION_EXTENDED'
 
 ## Complete Analysis Example
 
-### Method 1: Automated Query (If Supported)
+### Method 1: Automated Query
+Use the `top_mutated_genes_in_study` view. It adds WES samples (`gene_panel_id = 'WES'`, profiled for every gene) to the per-gene panel coverage; a denominator built only through `gene_panel` / `gene_panel_list` drops them.
+
 ```sql
--- Complete mutation frequency analysis with gene-specific denominators
-WITH mutation_counts AS (
-    SELECT
-        hugo_gene_symbol,
-        entrez_gene_id,
-        COUNT(DISTINCT sample_unique_id) AS numberOfAlteredSamples,
-        COUNT(DISTINCT CASE WHEN off_panel = 0 THEN sample_unique_id END) AS numberOfAlteredSamplesOnPanel,
-        COUNT(*) AS totalMutationEvents
-    FROM genomic_event_derived
-    WHERE
-        variant_type = 'mutation'
-        AND mutation_status != 'UNCALLED'
-        AND cancer_study_identifier = 'your_study_id'
-    GROUP BY entrez_gene_id, hugo_gene_symbol
-),
--- Gene-specific profiled samples
-profiled_counts AS (
-    SELECT
-        g.hugo_gene_symbol,
-        COUNT(DISTINCT stgp.sample_unique_id) as gene_profiled_samples
-    FROM sample_to_gene_panel_derived stgp
-    JOIN gene_panel gp ON stgp.gene_panel_id = gp.stable_id
-    JOIN gene_panel_list gpl ON gp.internal_id = gpl.internal_id
-    JOIN gene g ON gpl.gene_id = g.entrez_gene_id
-    WHERE
-        stgp.alteration_type = 'MUTATION_EXTENDED'
-        AND stgp.cancer_study_identifier = 'your_study_id'
-    GROUP BY g.hugo_gene_symbol
-)
--- Calculate frequencies with proper denominators
-SELECT
-    m.hugo_gene_symbol,
-    m.totalMutationEvents as mutations,
-    m.numberOfAlteredSamplesOnPanel as altered_samples,
-    p.gene_profiled_samples as profiled_samples,
-    ROUND((m.numberOfAlteredSamplesOnPanel * 100.0) / p.gene_profiled_samples, 1) as sample_frequency_percent
-FROM mutation_counts m
-JOIN profiled_counts p ON m.hugo_gene_symbol = p.hugo_gene_symbol
-ORDER BY sample_frequency_percent DESC;
+SELECT hugo_gene_symbol, total_mutation_events AS mutations, altered_samples, profiled_samples, frequency_pct
+FROM top_mutated_genes_in_study(study = 'your_study_id', top_n = 20);
+-- os_target_gdc (WES): TP53 32/143 = 22.4%, MUC16 16/143, TTN 16/143
 ```
 
 ### Method 2: Manual Per-Gene Queries (More Reliable)
@@ -470,6 +594,20 @@ GROUP BY hugo_gene_symbol
 ORDER BY amp_count DESC;
 ```
 
+For ranked AMP/HOMDEL genes in a study use `top_cna_genes_in_study`; for one gene's full distribution use `gene_cna_distribution_in_study` (see [Single-study views](#single-study-views-matching-the-portals-study-view-charts)).
+
+**`genomic_event_derived` stores only AMP (2) and HOMDEL (-2).** Shallow deletion / HETLOSS (-1), diploid (0) and gain (1) are only in `genetic_alteration_derived` with `profile_type = 'gistic'`, where `alteration_value` is a String. Never conclude "no shallow deletions" from `cna_alteration = -1` returning 0 rows.
+
+```sql
+-- Full GISTIC distribution for one gene (all values -2..2)
+SELECT alteration_value, count() AS samples
+FROM genetic_alteration_derived
+WHERE cancer_study_identifier = 'gbm_tcga_pan_can_atlas_2018' AND hugo_gene_symbol = 'CDKN2A'
+  AND profile_type = 'gistic' AND alteration_value NOT IN ('', 'NA')
+GROUP BY alteration_value;
+-- -2: 322, -1: 114, 0: 119, 1: 20  (575 profiled)
+```
+
 ## Key Column Names in genomic_event_derived
 
 | Column | Description |
@@ -479,7 +617,7 @@ ORDER BY amp_count DESC;
 | `mutation_type` | Mutation type (Missense_Mutation, Nonsense_Mutation, etc.) |
 | `mutation_status` | SOMATIC, UNKNOWN, UNCALLED |
 | `variant_type` | mutation, cna, structural_variant |
-| `cna_alteration` | 2 (AMP) or -2 (HOMDEL) |
+| `cna_alteration` | 2 (AMP) or -2 (HOMDEL) only; -1/0/1 are in `genetic_alteration_derived` (`profile_type = 'gistic'`) |
 | `off_panel` | 0 (on-panel) or 1 (off-panel) |
 
 ## Common Mistakes to Avoid

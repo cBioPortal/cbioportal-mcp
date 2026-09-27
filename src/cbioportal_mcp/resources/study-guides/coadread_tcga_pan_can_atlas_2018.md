@@ -6,21 +6,32 @@ See `_tcga_pancan_template.md` for common TCGA clinical attributes.
 
 ## Study-Specific Attributes
 
-### Microsatellite Status
-| Attribute | Description | Values |
-|-----------|-------------|--------|
-| `MSI_STATUS` | Microsatellite instability | MSI-H (high), MSI-L (low), MSS (stable) |
+### Microsatellite Instability (MSI)
+There is no `MSI_STATUS` attribute. Three attributes carry MSI (594 patients, one sample each):
 
-### Molecular Classification
-| Attribute | Description | Values |
-|-----------|-------------|--------|
-| `HYPERMUTATED` | Hypermutation status | Yes, No |
-| `CMS_SUBTYPE` | Consensus Molecular Subtype | CMS1, CMS2, CMS3, CMS4 |
+| Attribute | Definition | MSI-high count |
+|-----------|------------|----------------|
+| `SUBTYPE` | TCGA molecular classification: `COAD_MSI` 60 + `READ_MSI` 3 | **63** |
+| `MSI_SENSOR_SCORE` | MSIsensor score ≥10 (indeterminate 4–10: 10 more) | 78 of 584 scored |
+| `MSI_SCORE_MANTIS` | MANTIS score >0.4 (>0.6 = MSI: 67; 0.4–0.6 indeterminate) | 89 of 557 scored |
+
+**For "MSI-high" questions, use `SUBTYPE` IN (`COAD_MSI`, `READ_MSI`)** (the TCGA molecular classification) and state which definition you used; mention the score-based alternatives if the counts matter. Do not switch to `coadread_tcga_pub` to find MSI; this study has it.
+```sql
+SELECT count(DISTINCT patient_unique_id) AS msi_patients   -- 63
+FROM clinical_data_derived
+WHERE cancer_study_identifier = 'coadread_tcga_pan_can_atlas_2018'
+  AND attribute_name = 'SUBTYPE' AND attribute_value IN ('COAD_MSI', 'READ_MSI');
+```
+
+### Molecular Classification (`SUBTYPE`, patients)
+`COAD_CIN` 226, `READ_CIN` 102, `COAD_MSI` 60, `COAD_GS` 49, `READ_GS` 9, `COAD_POLE` 6, `READ_POLE` 4, `READ_MSI` 3, blank 135.
+- **Hypermutated**: no `HYPERMUTATED` attribute. Use `SUBTYPE` MSI + POLE (73 patients), or `TMB_NONSYNONYMOUS` ≥10 (83 samples; all MSI and POLE tumors exceed it).
+- **CMS (consensus molecular subtypes)** are not available in this study.
 
 ### Anatomic Location
-| Attribute | Description |
-|-----------|-------------|
-| `TUMOR_LOCATION` | Colon vs rectum, right vs left |
+There is no `TUMOR_LOCATION` attribute.
+- Colon vs rectum: `TUMOR_TISSUE_SITE` — Colon 436, Rectum 152, blank 6.
+- Subsite (for left vs right): `ICD_O_3_SITE` — right: C18.0 cecum 81, C18.2 ascending 100, C18.3 hepatic flexure 10; transverse C18.4 20; left: C18.5 splenic flexure 5, C18.6 descending 16, C18.7 sigmoid 106, C19.9 rectosigmoid 72, C20.9 rectum 81; C18.9 colon NOS 97 (side unknown).
 
 ## Key Genes
 | Gene | Frequency | Clinical Relevance |
@@ -31,12 +42,6 @@ See `_tcga_pancan_template.md` for common TCGA clinical attributes.
 | PIK3CA | ~15% | May predict aspirin benefit |
 | BRAF | ~10% | V600E poor prognosis (MSS context) |
 | SMAD4 | ~10% | TGF-β pathway |
-
-## Molecular Subtypes (CMS)
-- **CMS1 (MSI-immune)**: MSI-H, hypermutated, strong immune infiltration
-- **CMS2 (Canonical)**: WNT/MYC activation, epithelial
-- **CMS3 (Metabolic)**: KRAS mutations, metabolic dysregulation
-- **CMS4 (Mesenchymal)**: Stromal infiltration, poor prognosis
 
 ## Notes
 - MSI-H tumors respond well to immunotherapy

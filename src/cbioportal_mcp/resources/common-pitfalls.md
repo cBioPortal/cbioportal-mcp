@@ -112,6 +112,8 @@ WHERE variant_type = 'mutation' AND mutation_status != 'UNCALLED';
 ```
 **Key**: Include ALL statuses ('SOMATIC', 'UNKNOWN', etc.) except 'UNCALLED'
 
+**Germline-only**: filter with `upper(mutation_status) = 'GERMLINE'`. Spellings vary by study ('Germline', 'GERMLINE'); `= 'Germline'` drops whole studies (e.g. pog570_bcgsc_2020).
+
 ### 4. 🚨 MISSING STUDY FILTERS
 
 #### ❌ Wrong: Querying across all studies
@@ -246,17 +248,22 @@ WHERE cancer_study_identifier = 'coadread_mskcc_2017'
 -- and look for columns with "driver" in the name
 
 -- Step 2: If driver columns exist, use them to filter
+-- driver_filter holds '' when unannotated, so IS NOT NULL matches every row
 SELECT hugo_gene_symbol, mutation_variant, driver_filter
 FROM genomic_event_derived
-WHERE cancer_study_identifier = 'coadread_mskcc_2017'
+WHERE cancer_study_identifier = 'msk_impact_2017'
     AND hugo_gene_symbol = 'BRAF'
     AND variant_type = 'mutation'
-    AND driver_filter IS NOT NULL;
+    AND driver_filter != '';
 
--- Step 3: If driver columns do NOT exist, inform the user:
+-- Step 3: If driver columns do NOT exist or are empty for the study, inform the user:
 -- "Driver mutation annotations are not available in the current database.
---  Use the cBioPortal web interface with OQL DRIVER syntax (e.g., BRAF: MUT_DRIVER)"
+--  Use the cBioPortal web interface with OQL DRIVER syntax (e.g., BRAF: DRIVER)"
 ```
+
+`driver_filter` values and the full oncogenic-only workflow: mutation-frequency-guide, "Driver / Oncogenic Mutations Only".
+
+If the driver query returns no rows (e.g. `driver_filter` is '' in all 78,142 msk_impact_2017 mutation rows), still return the full per-variant table, labelled "not filtered for OncoKB status", together with the OQL `MUT_DRIVER` link suggestion.
 
 **OQL DRIVER syntax (for reference — used in cBioPortal web UI, not SQL):**
 - `TP53: DRIVER` — all OncoKB-annotated driver alterations (mutations, fusions, CNAs)
@@ -349,6 +356,47 @@ JOIN clinical_data_derived c ON g.sample_unique_id = c.sample_unique_id
 WHERE g.cancer_study_identifier = 'your_study_id';
 ```
 
+### 22. 🚨 LEFT JOIN DOES NOT PRODUCE NULLs IN CLICKHOUSE
+
+Unmatched right-side columns get their type's default value (`''` for String, `0` for numbers), not NULL. `WHERE r.col IS NULL` matches nothing and `CASE WHEN r.col IS NOT NULL` is always true, so every row silently lands in one group. `SETTINGS join_use_nulls=1` is rejected (queries run read-only).
+
+#### ❌ Wrong: anti-join / group label via IS NULL
+```sql
+-- KRAS-mutant patients with vs without TP53 (pancan_pcawg_2020)
+SELECT CASE WHEN t.patient_unique_id IS NOT NULL THEN 'TP53 + KRAS' ELSE 'KRAS only' END AS grp, count()
+FROM (SELECT DISTINCT patient_unique_id FROM genomic_event_derived
+      WHERE cancer_study_identifier = 'pancan_pcawg_2020' AND hugo_gene_symbol = 'KRAS'
+        AND variant_type = 'mutation' AND mutation_status != 'UNCALLED') k
+LEFT JOIN (SELECT DISTINCT patient_unique_id FROM genomic_event_derived
+      WHERE cancer_study_identifier = 'pancan_pcawg_2020' AND hugo_gene_symbol = 'TP53'
+        AND variant_type = 'mutation' AND mutation_status != 'UNCALLED') t
+  ON k.patient_unique_id = t.patient_unique_id
+GROUP BY grp;
+-- Returns 'TP53 + KRAS' = 272, no 'KRAS only' row. Wrong.
+```
+
+#### ✅ Correct: test membership with IN / NOT IN (or countIf)
+```sql
+SELECT
+    multiIf(patient_unique_id IN (
+        SELECT patient_unique_id FROM genomic_event_derived
+        WHERE cancer_study_identifier = 'pancan_pcawg_2020' AND hugo_gene_symbol = 'TP53'
+          AND variant_type = 'mutation' AND mutation_status != 'UNCALLED'),
+      'TP53 + KRAS', 'KRAS only') AS grp,
+    count() AS patients,
+    countIf(patient_unique_id IN (
+        SELECT patient_unique_id FROM clinical_data_derived
+        WHERE cancer_study_identifier = 'pancan_pcawg_2020' AND attribute_name = 'OS_MONTHS'
+          AND toFloat64OrNull(attribute_value) IS NOT NULL)) AS with_os
+FROM (SELECT DISTINCT patient_unique_id FROM genomic_event_derived
+      WHERE cancer_study_identifier = 'pancan_pcawg_2020' AND hugo_gene_symbol = 'KRAS'
+        AND variant_type = 'mutation' AND mutation_status != 'UNCALLED')
+GROUP BY grp;
+-- KRAS only = 85 (3 with OS), TP53 + KRAS = 187 (1 with OS)
+```
+
+If you must LEFT JOIN, test the default value instead: `WHERE t.patient_unique_id = ''` (String) or `= 0` (numeric).
+
 ## Performance Pitfalls
 
 ### 10. 🚨 INEFFICIENT QUERIES
@@ -372,6 +420,45 @@ FROM genomic_event_derived
 GROUP BY hugo_gene_symbol;
 ```
 
+### 10b. 🚨 RESOLVING STUDY IDENTIFIERS VIA A SUBQUERY ON A FACT TABLE
+
+`cancer_study` is a 539-row dimension table with every `cancer_study_identifier`
+in the deployment. `genetic_alteration_derived`, `genomic_event_derived`, and
+`clinical_data_derived` are multi-billion-row fact tables. Never use a fact
+table to look up which study identifiers match a pattern — resolve against
+`cancer_study` (or `list_studies()` / `search_oncotree()`) first.
+
+#### ❌ Wrong: subquery on a fact table just to find study identifiers
+```sql
+-- INCORRECT - scans the whole 10.29B-row fact table to resolve study IDs
+SELECT hugo_gene_symbol, alteration_value
+FROM genetic_alteration_derived
+WHERE cancer_study_identifier IN (
+    SELECT DISTINCT cancer_study_identifier
+    FROM genetic_alteration_derived
+    WHERE cancer_study_identifier LIKE '%brca%'
+)
+AND profile_type = 'mrna';
+```
+
+#### ✅ Correct: resolve against the small dimension table, then pass a literal list
+```sql
+-- Step 1: resolve against cancer_study (539 rows)
+SELECT cancer_study_identifier FROM cancer_study
+WHERE cancer_study_identifier LIKE '%brca%';
+
+-- Step 2: use the resolved identifiers as a literal IN (...) list
+SELECT hugo_gene_symbol, alteration_value
+FROM genetic_alteration_derived
+WHERE cancer_study_identifier IN ('brca_metabric', 'brca_tcga_pan_can_atlas_2018')
+AND profile_type = 'mrna';
+```
+
+**Key rule:** If you need to know *which* studies match something, ask
+`cancer_study` (or `list_studies`/`search_oncotree`), never a fact table —
+even a `DISTINCT` subquery still has to scan every row of the fact table to
+find the distinct values.
+
 ## CNA and Column Name Pitfalls
 
 ### 11. 🚨 CNA VALUES ARE NUMERIC, NOT STRINGS
@@ -391,6 +478,8 @@ WHERE cna_alteration = 2;   -- 2 = Amplification
 -- OR
 WHERE cna_alteration = -2;  -- -2 = Homozygous Deletion
 ```
+
+`genomic_event_derived` stores only 2 and -2. For shallow deletion (-1), gain (1) or diploid (0), query `genetic_alteration_derived WHERE profile_type = 'gistic'` — see the CNA section of `cbioportal://mutation-frequency-guide`. Zero rows for `cna_alteration = -1` does not mean no shallow deletions.
 
 ### 12. 🚨 WRONG COLUMN NAMES
 
@@ -494,25 +583,23 @@ WHERE attribute_name = 'TUMOR_GRADE' AND cancer_study_identifier = 'brca_tcga';
 
 **Key rule:** Never assume a table or column exists. Always check with `clickhouse_list_tables` and `clickhouse_list_table_columns` first.
 
-#### ❌ Wrong: `cancer_study.sample_count` — this column doesn't exist
+#### ❌ Wrong: counting a study's samples through patient/sample joins
 ```sql
--- INCORRECT - cancer_study has no sample_count column
-SELECT cancer_study_identifier, sample_count
-FROM cancer_study
-WHERE cancer_study_identifier = 'brca_metabric';
-```
-
-#### ✅ Correct: derive the count from patient/sample, or call list_studies()
-```sql
--- CORRECT - count via cancer_study -> patient -> sample
+-- INCORRECT - can differ from the portal's study list by a few samples
 SELECT cs.cancer_study_identifier, COUNT(DISTINCT s.internal_id) as sample_count
 FROM cancer_study cs
 JOIN patient p ON p.cancer_study_id = cs.cancer_study_id
 JOIN sample s ON s.patient_id = p.internal_id
 WHERE cs.cancer_study_identifier = 'brca_metabric'
 GROUP BY cs.cancer_study_identifier;
+```
 
--- OR simply call the list_studies() tool, which already returns sample_count
+#### ✅ Correct: read the precomputed columns on cancer_study
+```sql
+-- CORRECT - the same numbers the portal shows; see sample-filtering-guide §4 for the other data-type columns
+SELECT cancer_study_identifier, sample_count, mutation_sample_count, cna_sample_count
+FROM cancer_study
+WHERE cancer_study_identifier = 'brca_metabric';
 ```
 
 #### ❌ Wrong: `corrSpearman(...)` — not a real ClickHouse function
@@ -589,6 +676,74 @@ Use this pattern when:
 
 Do not query unrelated genes or "helpful" substitutes unless you state why and the user accepts the substitution.
 
+### 17b. 🚨 IMPLIED LITERATURE REVIEW FOR RARE VARIANTS
+
+Do not present a rare-variant answer as though you reviewed papers or clinical guidelines when the only available evidence came from cBioPortal.
+
+#### ❌ Wrong: imply external literature support
+
+> User: *"I received a report with PIK3CA p.*1069Wext*3. Can you provide details?"*
+> Agent: *"The literature indicates that C-terminal extension mutations are poorly characterized..."*
+
+#### ✅ Correct: keep the source boundary visible
+
+> I can check cBioPortal for occurrences of `PIK3CA p.*1069Wext*3` and any mutation annotations exposed in this deployment. cBioPortal occurrence data does not establish biological significance by itself. For functional or clinical interpretation, you would need an external curated source such as OncoKB, ClinVar, UniProt, or the primary literature.
+
+Correct workflow:
+
+1. Query the literal variant, gene, and study/cancer scope the user asked for.
+2. Report counts and study/cancer contexts with denominators when available.
+3. Check only annotation fields that actually exist in the schema; do not invent OncoKB or driver status.
+4. If no external-source tool was used, do not say "in the literature" or "studies have shown."
+5. End with a clear handoff for biological significance or clinical interpretation.
+
+### 17c. 🚨 AMBIGUOUS ACC / ADENOID CYSTIC CARCINOMA SCOPES
+
+`ACC` is ambiguous. It can mean adrenocortical carcinoma (`ACC`), adenoid cystic carcinoma of the salivary gland (`ACYC`), adenoid cystic breast cancer (`ACBC`), or other site-specific entities. When the user names an anatomical site, lock every downstream query and narrative summary to the matching OncoTree code.
+
+Common examples:
+
+| User wording | Use this scope |
+|---|---|
+| "salivary cancer (adenoid cystic carcinoma)" | `ACYC` — Adenoid Cystic Carcinoma, Salivary Gland Cancer |
+| "adenoid cystic breast cancer" | `ACBC` |
+| "adrenocortical carcinoma" or exact code `ACC` | `ACC` |
+
+#### ❌ Wrong: split scopes inside one answer
+
+> The OncoPrint link is filtered to salivary ACC, but the driver summary aggregates all ACC-labeled cancer types.
+
+#### ✅ Correct: keep one scope
+
+After resolving the site-specific OncoTree code, quote it back to the user and use it for every query in that turn:
+
+> I am treating this as salivary gland adenoid cystic carcinoma (`ACYC`), not every cancer abbreviated ACC.
+
+If any result row or narrative claim comes from another `cancer_type_detailed`, drop it or explicitly label it as outside the requested scope.
+
+### 17d. 🚨 LEFT- VS RIGHT-SIDED COLORECTAL CANCER
+
+Left-sided vs right-sided colorectal cancer is an anatomical/embryological distinction. It is not the same as colon vs rectum.
+
+- Right-sided CRC generally refers to cecum, ascending colon, and hepatic flexure.
+- Left-sided CRC generally refers to splenic flexure, descending colon, sigmoid colon, and rectum.
+- `TUMOR_TISSUE_SITE` values such as `Colon` and `Rectum` do not encode enough subsite detail to split left vs right.
+
+#### ❌ Wrong: substitute colon vs rectum
+
+> User: *"Compare mutation frequency between left-sided and right-sided CRC."*
+> Agent: *"I'll compare colon vs rectum as a rough proxy."*
+
+That comparison is misleading because colon contains both left- and right-sided subsites, and rectum is not the opposite of colon.
+
+#### ✅ Correct: require subsite-level evidence
+
+First inspect available clinical attributes and values for subsite fields such as `TUMOR_LOCATION`, `TUMOR_SITE`, `PRIMARY_SITE`, or study-specific colon subsite annotations. Only build left/right groups if values identify specific subsites such as ascending, cecum, hepatic flexure, descending, sigmoid, splenic flexure, or rectum.
+
+If the deployment/study only has `Colon` and `Rectum`, answer:
+
+> I do not see the anatomical subsite detail needed to compare left- vs right-sided CRC in this study. I should not substitute colon-vs-rectum, because that is a different comparison.
+
 ### 18. 🚨 OUT-OF-SCOPE DRIFT AFTER USER PUSHBACK
 
 If you decline a request because it is outside cBioPortal scope, hold that boundary when the user rephrases or pushes gently.
@@ -652,8 +807,12 @@ Example:
 17. **Never fabricate OncoKB/driver annotations** — check for driver columns first
 18. **Never silently rewrite the user's query** — if "point mutation" or "V600V" is ambiguous or unusual, surface the normalization or ask, don't substitute. See pitfall #16.
 19. **Validate flawed premises early** — if the gene, alteration, study, or data field is absent, say so before running adjacent analyses.
-20. **Hold scope boundaries after refusal** — do not provide paper critiques, slide outlines, external pipeline code, or medical advice after user pushback.
-21. **Do not promise unavailable outputs** — provide data/handoffs instead of claiming to create plots, CSV files, or external apps.
+20. **Do not imply literature review** — rare-variant significance requires explicit external evidence; cBioPortal occurrence counts alone are not literature or clinical interpretation.
+21. **Lock site-specific cancer scopes** — if the user specifies salivary ACC, use `ACYC` throughout and do not mix in breast/lung/adrenal ACC rows.
+22. **Do not substitute colon-vs-rectum for CRC sidedness** — left/right requires anatomical subsite values.
+23. **Hold scope boundaries after refusal** — do not provide paper critiques, slide outlines, external pipeline code, or medical advice after user pushback.
+24. **Do not promise unavailable outputs** — provide data/handoffs instead of claiming to create plots, CSV files, or external apps.
+25. **LEFT JOIN yields '' / 0, not NULL** — use `IN (SELECT …)` / `NOT IN (SELECT …)` for group membership (pitfall #22)
 
 ### 21. 🚨 ENUMERATION / CATALOG QUESTIONS TRIGGER SCHEMA EXPLORATION
 
@@ -674,7 +833,7 @@ User: *"What kind of cancer are there in the database?"*
 
 | User asks | Call this once | Then answer |
 |---|---|---|
-| "What cancer types are in the database?" | `list_studies(limit=100)` | GROUP BY `type_of_cancer_id` in the returned rows |
+| "What cancer types are in the database?" | `SELECT tc.name, count() AS studies, sum(cs.sample_count) AS samples FROM cancer_study cs JOIN type_of_cancer tc ON cs.type_of_cancer_id = tc.type_of_cancer_id GROUP BY tc.name ORDER BY studies DESC` | report the total number of cancer types and studies plus the top rows. Do not derive it from `list_studies(limit=100)` — 100 studies cover only a fraction of the cancer types |
 | "What studies do you have?" | `list_studies(limit=100)` (or with a `search`) | list them |
 | "What guides do you have?" | `list_guides()` | list them |
 | "What study-specific guides are available?" | `list_study_guides()` | list them |
@@ -699,6 +858,7 @@ Before trusting your results, ask:
 - [ ] Am I comparing the right data types?
 - [ ] Did I handle NULL values appropriately?
 - [ ] Do my join conditions make biological sense?
+- [ ] Did I avoid `IS NULL` / `IS NOT NULL` tests on LEFT JOIN columns (they get '' / 0 in ClickHouse)?
 - [ ] Are my sample counts reasonable for the study?
 - [ ] Did I use numeric values for CNA alterations (not strings)?
 - [ ] Am I using the correct column names (mutation_variant, not protein_change)?
@@ -708,6 +868,9 @@ Before trusting your results, ask:
 - [ ] Did I verify all tables and columns exist before querying them?
 - [ ] Did I answer the literal question, or did I silently rewrite it? If I normalized a term ("point mutation" → SNV set, "V600V" → V600E), did I surface that to the user?
 - [ ] Did I validate the user's premise before querying adjacent data?
+- [ ] Did I avoid claiming literature, guideline, or external-database support unless a tool or user-provided source supplied it?
+- [ ] If the user named an anatomical site with an ambiguous abbreviation like ACC, did every query use the same site-specific OncoTree scope?
+- [ ] If the user asked for left- vs right-sided CRC, did I verify subsite-level location values instead of using colon-vs-rectum?
 - [ ] Did I keep scope boundaries after any refusal?
 - [ ] Did I avoid promising plots, downloads, or external-code debugging that this MCP server cannot perform?
 - [ ] For enumeration/catalog questions ("what cancer types", "what studies", "what guides"), did I use a first-class list tool once instead of exploring the schema?

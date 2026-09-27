@@ -169,9 +169,31 @@ ORDER BY name;
 - `CANCER_TYPE`: Broad cancer category
 - `CANCER_TYPE_DETAILED`: Specific cancer subtype
 - `SEX`: Patient gender
-- `AGE`: Age at diagnosis
+- `AGE`: Age at diagnosis — can be floored or capped for de-identification (see "Age statistics" below)
 - `OS_MONTHS`: Overall survival time in months
 - `OS_STATUS`: Overall survival status (0:LIVING, 1:DECEASED or similar)
+
+### Comparing a Clinical Metric Across Cancer Types (e.g. TMB)
+
+- **One consistently processed cohort.** Never average an attribute across hundreds of heterogeneous studies — pipelines, panels and units differ. Use `cancer_study_query_preferences` `'pan_cancer_tcga'` and group by study (or per-sample `CANCER_TYPE`).
+- **Report mean AND median.** TMB is skewed by hypermutators, so the rankings disagree (pan_cancer_tcga: highest mean is UCEC 35.7; highest median is SKCM 14.9, then LUSC 7.7, LUAD 6.7, BLCA 5.8). Name the attribute you used.
+- **TMB = `TMB_NONSYNONYMOUS`** (mutations/Mb, parse with `toFloat64OrNull`). Never `COUNT(*)` of mutation rows or `MUTATION_COUNT` as a TMB proxy.
+
+```sql
+SELECT cancer_study_identifier AS study,
+       count(v) AS n,
+       round(avg(v), 2) AS mean_tmb,
+       round(quantile(0.5)(v), 2) AS median_tmb
+FROM (
+    SELECT cancer_study_identifier, toFloat64OrNull(attribute_value) AS v
+    FROM clinical_data_derived
+    WHERE attribute_name = 'TMB_NONSYNONYMOUS'
+      AND cancer_study_identifier IN (SELECT cancer_study_identifier FROM cancer_study_query_preferences
+                                      WHERE preference_name = 'pan_cancer_tcga')
+)
+GROUP BY study
+ORDER BY median_tmb DESC;
+```
 
 ## Survival Analysis Queries
 
@@ -188,21 +210,33 @@ WHERE cancer_study_identifier = 'your_study'
 GROUP BY patient_unique_id;
 ```
 
+**Never report a median or average of `OS_MONTHS` (or any `*_MONTHS`) as "median survival".** Survival data is censored (`0:LIVING` patients have not had the event yet), so `median()`, `quantile(0.5)`, and `AVG()` over `OS_MONTHS` are wrong. Median OS, log-rank p-values, and hazard ratios require Kaplan-Meier / Cox — hand off to cBioPortal Group Comparison → Survival (link via the navigator) or R (`survival::survfit`) / Python (`lifelines`). See the HARD RULES in `cbioportal://statistical-tests-guide`. If fewer than half of a group's patients have an event, the KM median is likely **not reached** — say so; never substitute a raw median.
+
+What ClickHouse can give is a descriptive per-group summary (one row per patient; patients without OS are excluded):
+
 ```sql
--- Compare survival between groups (e.g., mutated vs wild-type)
-WITH patient_mutation AS (
-    SELECT DISTINCT patient_unique_id, 1 as is_mutated
-    FROM genomic_event_derived
-    WHERE hugo_gene_symbol = 'TP53' AND variant_type = 'mutation'
-        AND cancer_study_identifier = 'your_study'
+-- Describe survival data per group (e.g., mutated vs wild-type) — no median
+WITH mut AS (
+    SELECT DISTINCT patient_unique_id FROM genomic_event_derived
+    WHERE cancer_study_identifier = 'your_study' AND hugo_gene_symbol = 'TP53' AND variant_type = 'mutation'
+),
+os AS (
+    SELECT patient_unique_id,
+        maxIf(toFloat64OrNull(attribute_value), attribute_name = 'OS_MONTHS') AS os_months,
+        maxIf(attribute_value, attribute_name = 'OS_STATUS') AS os_status
+    FROM clinical_data_derived
+    WHERE cancer_study_identifier = 'your_study' AND attribute_name IN ('OS_MONTHS', 'OS_STATUS')
+    GROUP BY patient_unique_id
 )
-SELECT 
-    CASE WHEN m.is_mutated = 1 THEN 'Mutated' ELSE 'Wild-type' END as group_name,
-    median(toFloat64OrNull(c.attribute_value)) as median_os_months
-FROM clinical_data_derived c
-LEFT JOIN patient_mutation m ON c.patient_unique_id = m.patient_unique_id
-WHERE c.cancer_study_identifier = 'your_study'
-    AND c.attribute_name = 'OS_MONTHS'
+SELECT
+    if(patient_unique_id IN (SELECT patient_unique_id FROM mut), 'Mutated', 'Wild-type') AS group_name,
+    count() AS n_patients,
+    countIf(startsWith(os_status, '1')) AS n_events,
+    countIf(startsWith(os_status, '0')) AS n_censored,
+    min(os_months) AS min_followup_months,
+    max(os_months) AS max_followup_months
+FROM os
+WHERE os_months IS NOT NULL AND os_status != ''
 GROUP BY group_name;
 ```
 
@@ -212,6 +246,58 @@ GROUP BY group_name;
 - **CANCER_TYPE_DETAILED**: specific subtypes like 'Spindle Cell Carcinoma of the Lung', 'Invasive Ductal Carcinoma'
 - **Decision**: Match the attribute to the level of detail requested in the question
 - **When unsure**: start with CANCER_TYPE for broader matching
+
+## Study-View Chart Counts (views)
+
+To reproduce a cBioPortal study-view pie/bar chart for one study, use these parameterized views instead of hand-writing the aggregation. They apply the portal's counting unit, NA rules and "patients with samples only" scope.
+
+### Categorical attribute: `clinical_attribute_counts(study, attribute)`
+
+```sql
+SELECT * FROM clinical_attribute_counts(study='msk_chord_2024', attribute='SAMPLE_TYPE')
+ORDER BY count DESC;
+-- Primary 15,928 | Metastasis 8,878 | Unknown 136 | Local Recurrence 98  (level = sample)
+```
+
+- `value` — attribute value as stored; `'NA'` row = study patients/samples with no value or a value of `''`, `NA`, `NAN`, `N/A` (portal rule). `Unknown` stays its own value.
+- `count` — distinct patients for a patient attribute, distinct samples for a sample attribute (`level` says which, from `clinical_attribute_meta.patient_attribute`).
+- `pct_of_study` — `count` / all patients (or samples) in the study.
+- `attribute` is the exact `attr_id` (case-sensitive). No rows = attribute not in this study.
+- Patients without samples are not counted, as in the portal: `os_target_gdc` has `SEX` for 383 patients but only 153 have samples, so the view returns Male 87, Female 66.
+
+### Treatments: `treatment_counts_in_study(study)` and `treatment_regimens_in_study(study)`
+
+```sql
+SELECT agent, treatment_subtypes, patients
+FROM treatment_counts_in_study(study='msk_chord_2024')
+ORDER BY patients DESC LIMIT 10;
+-- FLUOROURACIL ['Chemo'] 6,319 | LEUCOVORIN 5,573 | OXALIPLATIN 5,489 | ...
+```
+
+- One row per `AGENT` = the portal's Treatment (patient) chart. `patients` = distinct patients who received the agent.
+- `treatment_types` / `treatment_subtypes` — arrays of the type/subtype values on that agent's events (keys differ by study: MSK-CHORD uses `SUBTYPE` = Chemo, Targeted, Immuno, Investigational…; TCGA uses `TREATMENT_TYPE` = Chemotherapy, Radiation Therapy…).
+- `pct_of_treated_patients` — share of patients with any treatment event. Never divide by all study patients (see `cbioportal://treatment-guide`).
+- For systemic therapy only, drop investigational and radiation rows: `WHERE agent != 'INVESTIGATIONAL' AND NOT arrayExists(t -> t ILIKE '%radiation%' OR t = 'Investigational', arrayConcat(treatment_types, treatment_subtypes))`. In TCGA studies radiation is recorded as an agent (e.g. `Radiation 1` in `brca_tcga_pan_can_atlas_2018`).
+- `treatment_regimens_in_study` groups agents a patient started on the same day into one regimen (`CARBOPLATIN + PEMETREXED`), already excluding investigational, prior-medication and radiation events. A patient is counted under every regimen they received. Needs real start dates: studies where all `start_date` = 0 collapse into one regimen per patient.
+
+The views are study-wide. For a subgroup (e.g. one cancer type in a multi-cancer study), filter the event table directly:
+
+```sql
+SELECT value AS agent, count(DISTINCT patient_unique_id) AS patients
+FROM clinical_event_data_derived
+WHERE cancer_study_identifier = 'msk_chord_2024'
+  AND lower(event_type) = 'treatment'
+  AND key = 'AGENT'
+  AND patient_unique_id IN (
+      SELECT patient_unique_id FROM clinical_data_derived
+      WHERE cancer_study_identifier = 'msk_chord_2024'
+        AND attribute_name = 'CANCER_TYPE'
+        AND attribute_value = 'Non-Small Cell Lung Cancer')
+GROUP BY agent
+ORDER BY patients DESC
+LIMIT 10;
+-- CARBOPLATIN 3,371 | PEMETREXED 3,347 | PEMBROLIZUMAB 1,569 | INVESTIGATIONAL 1,479 | ...
+```
 
 ## Query Patterns
 
@@ -254,12 +340,13 @@ ORDER BY sample_count DESC;
 WITH patient_data AS (
     SELECT DISTINCT
         patient_unique_id,
-        CASE WHEN attribute_name = 'SEX' THEN attribute_value END as sex,
-        CASE WHEN attribute_name = 'AGE' THEN CAST(attribute_value AS Float64) END as age
+        anyIf(attribute_value, attribute_name = 'SEX') as sex,
+        anyIf(toFloat64OrNull(attribute_value), attribute_name = 'AGE') as age
     FROM clinical_data_derived
     WHERE
         cancer_study_identifier = 'your_study_id'
         AND attribute_name IN ('SEX', 'AGE')
+    GROUP BY patient_unique_id
 )
 SELECT
     sex,
@@ -271,6 +358,24 @@ FROM patient_data
 WHERE sex IS NOT NULL AND age IS NOT NULL
 GROUP BY sex;
 ```
+
+### Age statistics: check for a floor or cap first
+
+Some studies floor or cap `AGE` for de-identification — e.g. every child recorded as 18, or everyone 89+ as 89 or 90. A median or mean over such a column is wrong. Before reporting age statistics, check how many patients sit exactly at the minimum or maximum:
+
+```sql
+SELECT
+    arrayMin(ages) AS min_age, arrayMax(ages) AS max_age,
+    countEqual(ages, min_age) AS at_min, countEqual(ages, max_age) AS at_max, length(ages) AS patients
+FROM (
+    SELECT groupArray(toFloat64OrNull(attribute_value)) AS ages
+    FROM clinical_data_derived
+    WHERE cancer_study_identifier = 'your_study_id' AND attribute_name = 'AGE'
+      AND toFloat64OrNull(attribute_value) IS NOT NULL
+);
+```
+
+If a large share of patients sits at one boundary, compute age from `DAYS_TO_BIRTH` instead (negative days from birth to diagnosis): age in years = `-toFloat64OrNull(attribute_value) / 365.25`. Tell the user which attribute you used and why. Check the study guide too — it may already name the right attribute. All TARGET GDC studies (`*_target_gdc`) floor `AGE` at 18 — use `DAYS_TO_BIRTH` for them.
 
 ## Raw Table Queries (Advanced)
 
@@ -309,7 +414,7 @@ WHERE
 
 ## Treatment and Clinical Events Data
 
-Treatment data is stored separately from clinical attributes, in the clinical events tables:
+Treatment data is stored separately from clinical attributes, in the clinical events tables. For per-agent or per-regimen patient counts in one study, use `treatment_counts_in_study` / `treatment_regimens_in_study` (see Study-View Chart Counts above). Details: `cbioportal://treatment-guide`.
 
 ### Key Tables for Treatment Data
 - `clinical_event`: Contains event records (Treatment, Diagnosis, Surgery, etc.)
