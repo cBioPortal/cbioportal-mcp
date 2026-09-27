@@ -1,10 +1,15 @@
+import importlib.util
+import os
 import re
 from pathlib import Path
+
+import pytest
 
 from cbioportal_mcp import server
 
 REPO = Path(__file__).resolve().parent.parent
 SQL_DIR = REPO / "sql"
+DDL_FIXTURE = REPO / "tests" / "fixtures" / "cbioportal_clickhouse_ddl.sql"
 
 # Baseline system-prompt.md before the schema/recipes were inlined was ~20k
 # characters (~5-6k tokens). The inlined schema, views and recipes may add at
@@ -164,33 +169,172 @@ def test_clinical_guide_survival_section_hands_off_to_kaplan_meier():
 
 
 
-def test_system_prompt_names_cna_distribution_denominator_exception():
-    views = _section(_prompt(), "## Precomputed Views")
-
-    assert "**Exception:** `gene_cna_distribution_in_study`" in views
-    assert "no `off_panel` filter" in views
+# --- Cross-checks against the DDL and view SQL ------------------------------
+# The prompt tells the model its schema is authoritative, so each claim below
+# is derived from the SQL rather than restated by hand.
 
 
-def test_system_prompt_names_nullable_string_exceptions():
+def _ddl_tables() -> dict[str, dict[str, str]]:
+    tables: dict[str, dict[str, str]] = {}
+    ddl = DDL_FIXTURE.read_text()
+    for name, body in re.findall(r"^CREATE TABLE (\w+) \((.*?)\n\);", ddl, re.M | re.S):
+        for column, col_type in re.findall(r"^\s*`?([\w.]+)`?\s+(\w+(?:\(.*?\))?)", body, re.M):
+            if column.upper() not in ("PRIMARY", "INDEX", "CONSTRAINT"):
+                tables.setdefault(name, {})[column] = col_type
+    return tables
+
+
+def _view_bodies() -> dict[str, str]:
+    views = {}
+    for path in sorted(SQL_DIR.glob("[0-9]-*.sql")):
+        sql = re.sub(r"--[^\n]*", "", path.read_text())
+        pattern = r"^CREATE VIEW (\w+) AS(.*?)(?=^DROP VIEW |^CREATE VIEW |\Z)"
+        for name, body in re.findall(pattern, sql, re.M | re.S):
+            views[name] = body
+    return views
+
+
+def _prompt_line(prefix: str) -> str:
+    lines = [ln for ln in _prompt().splitlines() if ln.startswith(prefix)]
+    assert len(lines) == 1, f"expected one prompt line starting with {prefix!r}, got {len(lines)}"
+    return lines[0]
+
+
+def _named(line: str, names) -> list[str]:
+    return [n for n in re.findall(r"`(\w+)`", line) if n in names]
+
+
+def _documented_tables() -> set[str]:
+    # A table is documented where the Core Schema introduces it: **`t`** or a `- `t`` bullet.
     schema = _section(_prompt(), "## Core Schema")
-
-    assert "Most String columns hold `''` (not NULL)" in schema
-    for column in ["cancer_study_identifier", "pmid", "citation"]:
-        assert f"`cancer_study.{column}`" in schema
+    return {a or b for a, b in re.findall(r"^(?:\*\*`(\w+)`\*\*|- `(\w+)`)", schema, re.M)}
 
 
-def test_system_prompt_marks_public_portal_only_preferences():
-    schema = _section(_prompt(), "## Core Schema")
-    public_sql = (SQL_DIR / "portal-specific" / "public-portal" / "0-preferences.sql").read_text()
-
-    assert "Public portal only" in schema
-    for preference in ["large_genomic_cohort", "treatment_outcomes", "all_studies_non_redundant"]:
-        assert f"'{preference}'" in public_sql
-        assert schema.index("Public portal only") < schema.index(f"`{preference}`")
+def _sql_created_tables() -> set[str]:
+    return {
+        t for path in SQL_DIR.rglob("*.sql")
+        for t in re.findall(r"^CREATE TABLE (\w+) \(", path.read_text(), re.M)
+    }
 
 
-def test_system_prompt_lists_clinical_event_derived_patient_id():
-    schema = _section(_prompt(), "## Core Schema")
-    line = next(ln for ln in schema.splitlines() if ln.startswith("- `clinical_event_derived`"))
+def test_documented_tables_exist_in_ddl():
+    ddl = _ddl_tables()
+    documented = _documented_tables() & (set(ddl) | _sql_created_tables())
 
-    assert "`patient_id`" in line
+    assert len(documented) >= 20, sorted(documented)
+    for table in ["cancer_study", "clinical_data_derived", "genomic_event_derived",
+                  "resource_sample", "clinical_event_derived", "cancer_study_query_preferences"]:
+        assert table in documented, table
+
+
+def test_nullable_string_list_equals_ddl_for_documented_tables():
+    ddl = _ddl_tables()
+    expected = {
+        (table, column)
+        for table in _documented_tables() & set(ddl)
+        for column, col_type in ddl[table].items()
+        if "Nullable(String)" in col_type
+    }
+    line = _prompt_line("- Most String columns hold `''` (not NULL)")
+
+    assert "are `Nullable(String)` instead" in line
+    assert set(re.findall(r"`(\w+)\.(\w+)`", line)) == expected
+    assert "This list covers only the documented tables" in line
+    assert "DESCRIBE TABLE" in line
+    # sql/ migrations must not add Nullable(String) columns the DDL doesn't show.
+    for path in SQL_DIR.rglob("*.sql"):
+        assert not re.search(r"ADD COLUMN[^\n]*Nullable\(String\)", path.read_text()), path
+
+
+def test_view_off_panel_and_uncalled_lists_match_view_sql():
+    views = _view_bodies()
+    off_panel = {v for v, b in views.items() if re.search(r"off_panel\s*=\s*0", b)}
+    uncalled = {v for v, b in views.items() if re.search(r"mutation_status\s*!=\s*'UNCALLED'", b)}
+    branched = {v for v, b in views.items() if "{alteration:String} = 'mutation'" in b}
+    uncalled_in_branch = (
+        r"\(\{alteration:String\} = 'mutation'[^()]*mutation_status != 'UNCALLED'\)"
+    )
+    uncalled_branch_only = {v for v in branched if re.search(uncalled_in_branch, views[v])}
+    off_panel_in_branch_re = r"\(\{alteration:String\} = '\w+'[^()]*off_panel"
+    off_panel_in_branch = {v for v in branched if re.search(off_panel_in_branch_re, views[v])}
+
+    off_panel_line = _prompt_line("- `off_panel = 0`:")
+    uncalled_line = _prompt_line("- `mutation_status != 'UNCALLED'`:")
+    no_status_line = _prompt_line("- No `mutation_status` filter:")
+
+    assert set(_named(off_panel_line, views)) == off_panel
+    assert set(_named(uncalled_line, views)) == uncalled
+    for v in branched & off_panel:
+        assert (f"`{v}` (all branches)" in off_panel_line) == (v not in off_panel_in_branch), v
+    for v in uncalled:
+        assert (f"`{v}` (`alteration='mutation'` branch only)" in uncalled_line) == (
+            v in uncalled_branch_only
+        ), v
+
+    listed_no_status = set(_named(no_status_line, views))
+    assert off_panel - uncalled <= listed_no_status
+    assert not listed_no_status & (uncalled - uncalled_branch_only)
+    for v in uncalled_branch_only:
+        assert f"CNA branches of `{v}`" in no_status_line, v
+
+
+def test_profiled_denominator_claims_match_view_sql():
+    views = _view_bodies()
+    denominator_line = _prompt_line("- Profiled denominator = samples profiled for the gene")
+    assert "every view in the `off_panel = 0` list" in denominator_line
+    for v in (v for v, b in views.items() if re.search(r"off_panel\s*=\s*0", b)):
+        body = views[v]
+        assert re.search(r"\w+_wes_coverage|gene_panel_id = 'WES'", body), v
+        assert re.search(r"\w+_panel_gene_coverage|JOIN gene_panel_list", body), v
+
+    cna = views["gene_cna_distribution_in_study"]
+    assert "FROM genetic_alteration_derived" in cna
+    assert "alteration_value NOT IN ('', 'NA')" in cna
+    assert "sum(samples) AS profiled_samples" in cna
+    assert "_coverage" not in cna and "'WES'" not in cna and "off_panel" not in cna
+
+    exception = _prompt_line("- **Exception:** `gene_cna_distribution_in_study`")
+    assert "from `genetic_alteration_derived`" in exception
+    assert "no `off_panel` filter" in exception
+    assert "`profiled_samples` = samples with a non-empty, non-NA value for the gene" in exception
+    assert "all samples" not in exception and "study samples" not in exception
+
+
+def test_public_portal_preference_wording_matches_sql():
+    public_dir = SQL_DIR / "portal-specific" / "public-portal"
+    public_sql = "".join(p.read_text() for p in public_dir.glob("*.sql"))
+    public = set(re.findall(r"SELECT\s+'(\w+)'", public_sql))
+    shared_sql = (SQL_DIR / "3-add-cancer-study-query-preferences.sql").read_text()
+    everywhere = set(re.findall(r"SELECT '(\w+)'", shared_sql))
+    assert public and "pan_cancer_tcga" in everywhere and not public & everywhere
+
+    line = _prompt_line("**`cancer_study_query_preferences`**")
+    marker = (
+        "Defined in the public-portal SQL (`sql/portal-specific/public-portal/`); "
+        "present only where that directory is applied:"
+    )
+    before, _, after = line.partition(marker)
+    assert after, "public-portal wording missing"
+    assert set(_named(after, public | everywhere)) == public
+    assert set(_named(before, public | everywhere)) == everywhere
+
+
+def test_clinical_event_derived_columns_match_ddl():
+    ddl = _ddl_tables()["clinical_event_derived"]
+    line = _prompt_line("- `clinical_event_derived` has **no** `key`/`value` columns")
+
+    assert "key" not in ddl and "value" not in ddl
+    listed = re.search(r"columns \((.*?)\)\.", line).group(1)
+    assert set(re.findall(r"`(\w+)`", listed)) == set(ddl)
+
+
+def test_ddl_fixture_matches_cbioportal_checkout():
+    root = os.environ.get("CBIOPORTAL_REPO")
+    if not root:
+        pytest.skip("set CBIOPORTAL_REPO to a cbioportal checkout to check the DDL fixture")
+    script = REPO / "scripts" / "extract_clickhouse_ddl.py"
+    spec = importlib.util.spec_from_file_location("extract_clickhouse_ddl", script)
+    extract = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(extract)
+
+    assert extract.extract(root) == DDL_FIXTURE.read_text()
