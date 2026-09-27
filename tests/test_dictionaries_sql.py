@@ -9,13 +9,14 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).parent.parent
-SQL = (ROOT / "sql/10-dictionaries.sql").read_text()
+SQL_PATH = ROOT / "sql/99-dictionaries.sql"
+SQL = SQL_PATH.read_text()
 SCHEMA = (ROOT / "tests/fixtures/dictionary_upstream_schema.sql").read_text()
 DDL = re.sub(r"--[^\n]*", "", SQL)
 DICTIONARIES = re.findall(
     r"CREATE OR REPLACE DICTIONARY (\w+)\s*\((.*?)\)\s*"
-    r"PRIMARY KEY (\w+)\s*SOURCE\(CLICKHOUSE\(TABLE '(\w+)'\)\)"
-    r"\s*LAYOUT\(COMPLEX_KEY_HASHED\(\)\)\s*LIFETIME\(0\);",
+    r"PRIMARY KEY (\w+)\s*SOURCE\s*\(CLICKHOUSE\s*\(TABLE '(\w+)'\)\)"
+    r"\s*LAYOUT\s*\(COMPLEX_KEY_HASHED\s*\(\)\)\s*LIFETIME\s*\(0\);",
     DDL,
     re.S,
 )
@@ -26,9 +27,53 @@ TABLES = {
 VIEWS = dict(re.findall(r"CREATE OR REPLACE VIEW (\w+) AS\s*(.*?);", DDL, re.S))
 
 
+def test_dictionaries_run_last_under_both_sql_runners_and_version_sort(tmp_path):
+    sql_dir = tmp_path / "sql"
+    sql_dir.mkdir()
+    filenames = {path.name for path in (ROOT / "sql").glob("*.sql")} | {
+        "8-precomputed-aggregates.sql",
+        "9-projections.sql",
+    }
+    for filename in filenames:
+        (sql_dir / filename).touch()
+    # Exercise the real manual runner without contacting ClickHouse.
+    client = tmp_path / "clickhouse-client"
+    client.write_text('#!/bin/bash\nfor arg in "$@"; do\n  echo "$arg"\ndone\n')
+    client.chmod(0o755)
+    env = dict(
+        os.environ,
+        PATH=f"{tmp_path}:{os.environ['PATH']}",
+        CLICKHOUSE_HOST="unused",
+        CLICKHOUSE_DATABASE="unused",
+        CLICKHOUSE_ADMIN_USER="unused",
+        CLICKHOUSE_ADMIN_PASSWORD="unused",
+        SQL_DIR=str(sql_dir),
+    )
+    result = subprocess.run(
+        ["bash", str(ROOT / "scripts/apply_sql.sh")],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    applied = re.findall(r"^apply  (.*)$", result.stdout, re.M)
+    assert set(applied) == filenames
+    assert applied[-1] == SQL_PATH.name
+    # The clone uses plain sort; also support a future switch to version sort.
+    for flags in ([], ["-V"]):
+        result = subprocess.run(
+            ["sort", *flags],
+            input="\n".join(filenames) + "\n",
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        assert result.stdout.splitlines()[-1] == SQL_PATH.name
+
+
 def test_all_objects_are_replaceable_and_daily_snapshots():
     assert len(DICTIONARIES) == 4
-    assert len(VIEWS) == 2
+    assert set(VIEWS) == {"dictionary_gene_symbol_source", "dictionary_study_source"}
     assert len(re.findall(r"\bCREATE\b", DDL)) == 6
     assert not re.search(r"\b(DROP|ALTER|INSERT|DELETE)\b", DDL)
     assert {name for name, *_ in DICTIONARIES} == {
@@ -79,6 +124,7 @@ def test_clickhouse_dictionary_results_and_refresh():
     if not container:
         pytest.skip("set CH_DICTIONARY_TEST_CONTAINER to run Docker integration")
     database = "dict_test_" + uuid.uuid4().hex
+    green_database = database + "_green"
 
     def query(sql, db=database):
         result = subprocess.run(
@@ -183,5 +229,49 @@ def test_clickhouse_dictionary_results_and_refresh():
         )
         for direct, lookup in comparisons:
             assert query(direct) == query(lookup)
+
+        # Mirror the clone's pointer flip, then reuse a previously loaded color.
+        def build_snapshot(db, identifier):
+            query(f"CREATE DATABASE {db}", "default")
+            query(SCHEMA, db)
+            query(
+                f"INSERT INTO gene VALUES ({identifier}, 'TP53', {identifier}, NULL);"
+                "INSERT INTO cancer_study (cancer_study_id, cancer_study_identifier, "
+                f"name, type_of_cancer_id) VALUES ({identifier}, 'study_a', 'Study', 'brca');"
+                "INSERT INTO genetic_profile (genetic_profile_id, stable_id, cancer_study_id, "
+                f"genetic_alteration_type) VALUES ({identifier}, 'study_a_mutations', "
+                f"{identifier}, 'MUTATION_EXTENDED');",
+                db,
+            )
+            query(SQL, db)
+
+        def snapshot_ids(db):
+            return query(
+                "SELECT dictGet('gene_by_symbol_dict', 'entrez_gene_ids', tuple('TP53')), "
+                "dictGet('study_by_identifier_dict', 'cancer_study_id', tuple('study_a')), "
+                "dictGet('genetic_profile_by_stable_id_dict', 'genetic_profile_id', "
+                "tuple('study_a_mutations'))",
+                db,
+            )
+
+        assert snapshot_ids(database) == "[7157]\t1\t10"
+        build_snapshot(green_database, 200)
+        assert snapshot_ids(green_database) == "[200]\t200\t200"
+        assert snapshot_ids(database) == "[7157]\t1\t10"
+        query(f"DROP DATABASE {database} SYNC", "default")
+        build_snapshot(database, 300)
+        assert snapshot_ids(database) == "[300]\t300\t300"
+        assert snapshot_ids(green_database) == "[200]\t200\t200"
+        for db, identifier in ((green_database, 200), (database, 300)):
+            assert query("SELECT dictHas('gene_by_entrez_dict', tuple(toInt64(7157)))", db) == "0"
+            assert (
+                query(
+                    f"SELECT dictGet('{db}.gene_by_entrez_dict', 'hugo_gene_symbol', "
+                    f"tuple(toInt64({identifier})))",
+                    "default",
+                )
+                == "TP53"
+            )
     finally:
+        query(f"DROP DATABASE IF EXISTS {green_database} SYNC", "default")
         query(f"DROP DATABASE IF EXISTS {database} SYNC", "default")

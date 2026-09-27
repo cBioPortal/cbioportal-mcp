@@ -1,7 +1,7 @@
 # LLM-prep SQL
 
 The daily clone CronJob (see `knowledgesystems-k8s-deployment`) executes every
-`*.sql` file in this directory **in numeric order** against the freshly-cloned
+`*.sql` file in this directory **in lexicographic (text) order** against the freshly-cloned
 LLM database. The files re-shape and annotate the schema so the cBioPortal
 MCP agent can reason about it.
 
@@ -17,7 +17,7 @@ MCP agent can reason about it.
 | 5 | `5-gene-expression-views.sql` | Gene-expression / copy-number-value / methylation views, backed by `genetic_alteration_derived`. Currently `gene_pair_coexpression(study, gene_a, gene_b, profile_type)` for Spearman correlation between two genes. See `cbioportal://gene-expression-guide`. |
 | 6 | `6-add-study-data-type-counts.sql` | Per-study sample counts by data type on `cancer_study` (`sample_count`, `mutation_sample_count`, `cna_sample_count`, …, `treatment_patient_count`, `resource_sample_counts`), computed like cBioPortal's DETAILED study projection so they match the portal's study list and "Data type" filter. Rebuilds the table and swaps it in with `EXCHANGE TABLES`. See `cbioportal://sample-filtering-guide` §4. |
 | 7 | `7-clinical-views.sql` | Study-view chart views for one study: `treatment_counts_in_study(study)` (patients per treatment agent, with type/subtype arrays — the portal's Treatment chart), `treatment_regimens_in_study(study)` (same-day agent combinations), and `clinical_attribute_counts(study, attribute)` (categorical clinical chart with the portal's NA row). See `cbioportal://clinical-data-guide`. |
-| 10 | `10-dictionaries.sql` | ID lookup dictionaries for `dictGet`/`dictHas`: genes (Entrez ID ↔ Hugo symbol), studies (identifier → name, cancer type, sample counts) and genetic profiles (stable ID → study, alteration type). Recreated on every daily clone; existing views unchanged. See [ID lookup dictionaries](#id-lookup-dictionaries-10-dictionariessql). |
+| 99 | `99-dictionaries.sql` | ID lookup dictionaries for `dictGet`/`dictHas`: genes (Entrez ID ↔ Hugo symbol), studies (identifier → name, cancer type, sample counts) and genetic profiles (stable ID → study, alteration type). Recreated on every daily clone; existing views unchanged. See [ID lookup dictionaries](#id-lookup-dictionaries-99-dictionariessql). |
 
 Everything under `sql/` directly is **portable** — works against any cBioPortal deployment. Deployment-specific SQL lives under `sql/portal-specific/<portal-name>/`:
 
@@ -25,7 +25,7 @@ Everything under `sql/` directly is **portable** — works against any cBioPorta
 |------|-------|
 | `sql/portal-specific/public-portal/0-preferences.sql` | Public cBioPortal (`cbioportal.org`). Loads `all_studies_non_redundant`, `large_genomic_cohort`, `treatment_outcomes` preferences. All INSERTs gated on `cancer_study` existence, so on other deployments this is a no-op rather than an error. |
 
-`apply_sql.sh` and the daily clone cron apply the portable files first (in numeric order), then iterate every subdirectory of `portal-specific/`. A deployer image can ship multiple subdirs if it needs to, but typically only contains the one for that portal.
+`apply_sql.sh` and the daily clone cron apply the portable files first (in text order), then iterate every subdirectory of `portal-specific/`. A deployer image can ship multiple subdirs if it needs to, but typically only contains the one for that portal.
 
 ## Applying these files manually
 
@@ -75,7 +75,15 @@ Two options for adding your own preferences:
   `SELECT DISTINCT preference_name FROM cancer_study_query_preferences` —
   no hardcoded list anywhere outside SQL.
 
-## ID lookup dictionaries (`10-dictionaries.sql`)
+## ID lookup dictionaries (`99-dictionaries.sql`)
+
+`scripts/apply_sql.sh` uses Bash's sorted glob; the public clone job uses
+`ls /workdir/sql/*.sql | sort`. Both use text order, not numeric order.
+The `99-` prefix sorts after portable scripts 0–7 and the reserved
+`8-precomputed-aggregates.sql` (#154) and `9-projections.sql` (#156), under both
+text and version (`sort -V`) order. A `10-` prefix would sort between `1-` and
+`2-`. Portal-specific SQL remains a separate, later phase; these dictionaries
+do not depend on portal-specific preferences.
 
 This optional lookup layer adds four `COMPLEX_KEY_HASHED` dictionaries. Existing
 views and their results are unchanged; no join-to-`dictGet` rewrite is included.
@@ -114,12 +122,22 @@ A dictionary lookup does not preserve the row multiplicity of a join.
 All objects use `CREATE OR REPLACE`. `LIFETIME(0)` disables periodic refresh:
 rerunning the daily clone's prep scripts replaces the dictionaries, and their
 first subsequent lookup loads the new snapshot. After manual source changes,
-rerun this file or use `SYSTEM RELOAD DICTIONARY <name>`. No dependency on script
-6's added columns is required: the dictionaries also work with the current
-manual apply script's lexicographic order, where `10-` precedes `6-`.
+rerun this file or use `SYSTEM RELOAD DICTIONARY <name>`.
+
+The blue/green clone job drops and recreates the **inactive** database, applies
+all prep SQL with `--database DST_DB`, then updates `CLICKHOUSE_DATABASE` in the
+active ConfigMap and rolls the MCP deployment. It does not rename databases or
+move an old dictionary into the new database. Each color therefore owns fresh
+dictionaries sourced from its own completed clone; `LIFETIME(0)` does not carry
+an old color's cached IDs into the new color. Reusing a color on the next cycle
+also recreates its dictionaries. Existing requests on the old deployment can
+still use the old database until the rollout finishes; this is not an atomic
+cutover of all clients. In-place source mutation requires an explicit reload.
 
 Local `CLICKHOUSE(TABLE ...)` sources bind to the database containing the dictionary,
-so no deployment database name or remote password is embedded. In ClickHouse 24.8
+so no deployment database name or remote password is embedded. This follows the
+[ClickHouse 24.8 source's default database handling](https://github.com/ClickHouse/ClickHouse/blob/v24.8.14.39-lts/src/Dictionaries/ClickHouseDictionarySource.cpp)
+and the [zero-lifetime refresh policy](https://clickhouse.com/docs/reference/statements/create/dictionary/lifetime). In ClickHouse 24.8
 these sources authenticate as the local `default` user; it must be enabled with
 an empty password and have SELECT access to the source tables/views. Deployments
 that disable or password-protect that account must configure dictionary source
@@ -149,10 +167,13 @@ CH_DICTIONARY_TEST_CONTAINER=ch-dict-test uv run pytest -q tests/test_dictionari
 docker rm -f ch-dict-test
 ```
 
-The integration test creates and removes its own isolated database. It compares
+The integration test creates and removes its own isolated databases. It compares
 all four dictionaries with source SELECTs on synthetic data, checks known study
 counts (including an empty study), duplicate symbols, negative IDs, null study
 identifiers, missing keys, a lookup from another database, and replacement after
-source changes. This validates the new lookups, not equivalence of rewritten views:
+source changes. It also switches between two databases with different IDs for the
+same lookup keys, then drops/recreates the first database to exercise color reuse.
+These live checks require a working ClickHouse container and are not covered by
+the static tests. This validates the new lookups, not equivalence of rewritten views:
 no existing views are rewritten. The Docker test is skipped unless the container
 environment variable is set.

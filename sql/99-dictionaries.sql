@@ -12,7 +12,6 @@ FROM gene AS g
 GROUP BY g.hugo_gene_symbol;
 
 -- Match script 6's standard-list counts, using only base-schema columns.
--- This also works with apply_sql.sh's lexicographic order (10 before 6).
 CREATE OR REPLACE VIEW dictionary_study_source AS
 SELECT assumeNotNull(cs.cancer_study_identifier) AS cancer_study_identifier,
        cs.cancer_study_id AS cancer_study_id,
@@ -41,9 +40,9 @@ CREATE OR REPLACE DICTIONARY gene_by_entrez_dict
     hugo_gene_symbol String
 )
 PRIMARY KEY entrez_gene_id
-SOURCE(CLICKHOUSE(TABLE 'gene'))
-LAYOUT(COMPLEX_KEY_HASHED())
-LIFETIME(0);
+SOURCE (CLICKHOUSE (TABLE 'gene'))
+LAYOUT (COMPLEX_KEY_HASHED ())
+LIFETIME (0);
 
 CREATE OR REPLACE DICTIONARY gene_by_symbol_dict
 (
@@ -51,9 +50,9 @@ CREATE OR REPLACE DICTIONARY gene_by_symbol_dict
     entrez_gene_ids Array(Int64)
 )
 PRIMARY KEY hugo_gene_symbol
-SOURCE(CLICKHOUSE(TABLE 'dictionary_gene_symbol_source'))
-LAYOUT(COMPLEX_KEY_HASHED())
-LIFETIME(0);
+SOURCE (CLICKHOUSE (TABLE 'dictionary_gene_symbol_source'))
+LAYOUT (COMPLEX_KEY_HASHED ())
+LIFETIME (0);
 
 CREATE OR REPLACE DICTIONARY study_by_identifier_dict
 (
@@ -66,9 +65,9 @@ CREATE OR REPLACE DICTIONARY study_by_identifier_dict
     cna_sample_count UInt64
 )
 PRIMARY KEY cancer_study_identifier
-SOURCE(CLICKHOUSE(TABLE 'dictionary_study_source'))
-LAYOUT(COMPLEX_KEY_HASHED())
-LIFETIME(0);
+SOURCE (CLICKHOUSE (TABLE 'dictionary_study_source'))
+LAYOUT (COMPLEX_KEY_HASHED ())
+LIFETIME (0);
 
 CREATE OR REPLACE DICTIONARY genetic_profile_by_stable_id_dict
 (
@@ -78,6 +77,6 @@ CREATE OR REPLACE DICTIONARY genetic_profile_by_stable_id_dict
     genetic_alteration_type String
 )
 PRIMARY KEY stable_id
-SOURCE(CLICKHOUSE(TABLE 'genetic_profile'))
-LAYOUT(COMPLEX_KEY_HASHED())
-LIFETIME(0);
+SOURCE (CLICKHOUSE (TABLE 'genetic_profile'))
+LAYOUT (COMPLEX_KEY_HASHED ())
+LIFETIME (0);
