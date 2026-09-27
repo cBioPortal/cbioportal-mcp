@@ -334,7 +334,8 @@ WHERE p.profiled_samples >= 50;
 --                   'mutation'           — point mutations (UNCALLED excluded)
 --                   'amplification'      — CNA == +2 (high-level amp)
 --                   'deep_deletion'      — CNA == -2 (homozygous deletion)
---                   'structural_variant' — fusion / SV
+--                   'structural_variant' — fusion / SV (UNCALLED excluded,
+--                                          as in top_sv_genes_in_study)
 --
 -- Usage:
 --   SELECT * FROM gene_alteration_frequency_by_cancer_type(
@@ -382,7 +383,8 @@ altered AS (
             AND ged.variant_type = 'cna'
             AND ged.cna_alteration = -2)
         OR ({alteration:String} = 'structural_variant'
-            AND ged.variant_type = 'structural_variant')
+            AND ged.variant_type = 'structural_variant'
+            AND ged.mutation_status != 'UNCALLED')
       )
     GROUP BY sct.cancer_type
 ),
