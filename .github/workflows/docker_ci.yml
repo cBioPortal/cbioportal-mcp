@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - beta
   workflow_dispatch:
     inputs:
       ref:
@@ -35,8 +36,14 @@ jobs:
         run: |
           if [ -n "${{ github.event.inputs.ref }}" ]; then
             echo "IMAGE_TAG=${{ github.event.inputs.ref }}" >> $GITHUB_ENV
-          else
+          elif [ "${{ github.event_name }}" = "push" ] && [ "${{ github.ref_name }}" = "beta" ]; then
+            # Beta pushes publish only :beta and must never touch :latest.
+            echo "IMAGE_TAG=beta" >> $GITHUB_ENV
+          elif [ "${{ github.event_name }}" = "push" ] && [ "${{ github.ref_name }}" = "main" ]; then
             echo "IMAGE_TAG=latest" >> $GITHUB_ENV
+          else
+            echo "Unexpected trigger ${{ github.event_name }} on ${{ github.ref_name }}; refusing to pick a tag" >&2
+            exit 1
           fi
           echo "PLATFORM_PAIR=${platform//\//-}" >> $GITHUB_ENV
         env:
@@ -85,8 +92,14 @@ jobs:
         run: |
           if [ -n "${{ github.event.inputs.ref }}" ]; then
             echo "IMAGE_TAG=${{ github.event.inputs.ref }}" >> $GITHUB_ENV
-          else
+          elif [ "${{ github.event_name }}" = "push" ] && [ "${{ github.ref_name }}" = "beta" ]; then
+            # Beta pushes publish only :beta and must never touch :latest.
+            echo "IMAGE_TAG=beta" >> $GITHUB_ENV
+          elif [ "${{ github.event_name }}" = "push" ] && [ "${{ github.ref_name }}" = "main" ]; then
             echo "IMAGE_TAG=latest" >> $GITHUB_ENV
+          else
+            echo "Unexpected trigger ${{ github.event_name }} on ${{ github.ref_name }}; refusing to pick a tag" >&2
+            exit 1
           fi
 
       - name: Download digests
