@@ -243,11 +243,10 @@ WHERE cancer_study_identifier = 'coadread_mskcc_2017'
 
 #### ✅ Correct: Check for driver annotation columns first
 ```sql
--- Step 1: Check if driver annotation columns exist
--- Use clickhouse_list_table_columns('genomic_event_derived')
--- and look for columns with "driver" in the name
+-- Step 1: genomic_event_derived has driver_filter / driver_tiers_filter
+-- (see the Core Schema in the system prompt — no column check needed)
 
--- Step 2: If driver columns exist, use them to filter
+-- Step 2: Filter on them
 -- driver_filter holds '' when unannotated, so IS NOT NULL matches every row
 SELECT hugo_gene_symbol, mutation_variant, driver_filter
 FROM genomic_event_derived
@@ -256,7 +255,7 @@ WHERE cancer_study_identifier = 'msk_impact_2017'
     AND variant_type = 'mutation'
     AND driver_filter != '';
 
--- Step 3: If driver columns do NOT exist or are empty for the study, inform the user:
+-- Step 3: If no rows are annotated for the study, inform the user:
 -- "Driver mutation annotations are not available in the current database.
 --  Use the cBioPortal web interface with OQL DRIVER syntax (e.g., BRAF: DRIVER)"
 ```
@@ -568,20 +567,25 @@ SELECT * FROM oncokb_annotations WHERE gene = 'BRAF';
 SELECT tumor_grade FROM clinical_data_derived WHERE cancer_study_identifier = 'brca_tcga';
 ```
 
-#### ✅ Correct: Always verify schema before querying
+#### ✅ Correct: Use the schema in the system prompt; check only unlisted tables
 ```sql
--- Step 1: Verify the table exists
--- Use clickhouse_list_tables tool first
-
--- Step 2: Verify columns exist
--- Use clickhouse_list_table_columns(table) tool first
-
--- Step 3: Only then build your query using confirmed tables and columns
+-- The Core Schema section of the system prompt is authoritative for the core
+-- tables and views (clinical_data_derived, genomic_event_derived, cancer_study, ...).
+-- Clinical fields are ROWS in clinical_data_derived, not columns:
 SELECT attribute_value FROM clinical_data_derived
 WHERE attribute_name = 'TUMOR_GRADE' AND cancer_study_identifier = 'brca_tcga';
+
+-- Not sure a study has the attribute? Ask clinical_attribute_meta, not DESCRIBE:
+SELECT attr_id FROM clinical_attribute_meta
+WHERE cancer_study_id = (SELECT cancer_study_id FROM cancer_study
+                         WHERE cancer_study_identifier = 'brca_tcga')
+  AND attr_id ILIKE '%GRADE%';
+
+-- Only for a table NOT listed in the Core Schema (e.g. generic_assay_data_derived):
+-- clickhouse_list_table_columns('generic_assay_data_derived')
 ```
 
-**Key rule:** Never assume a table or column exists. Always check with `clickhouse_list_tables` and `clickhouse_list_table_columns` first.
+**Key rule:** Never assume a table or column exists that the Core Schema doesn't list. The listed schema is authoritative, so don't re-check it with `clickhouse_list_tables` / `clickhouse_list_table_columns`; call `clickhouse_list_table_columns` only for tables outside it. If the data isn't there, tell the user.
 
 #### ❌ Wrong: counting a study's samples through patient/sample joins
 ```sql
