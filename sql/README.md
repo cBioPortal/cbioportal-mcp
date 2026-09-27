@@ -17,7 +17,6 @@ MCP agent can reason about it.
 | 5 | `5-gene-expression-views.sql` | Gene-expression / copy-number-value / methylation views, backed by `genetic_alteration_derived`. Currently `gene_pair_coexpression(study, gene_a, gene_b, profile_type)` for Spearman correlation between two genes. See `cbioportal://gene-expression-guide`. |
 | 6 | `6-add-study-data-type-counts.sql` | Per-study sample counts by data type on `cancer_study` (`sample_count`, `mutation_sample_count`, `cna_sample_count`, …, `treatment_patient_count`, `resource_sample_counts`), computed like cBioPortal's DETAILED study projection so they match the portal's study list and "Data type" filter. Rebuilds the table and swaps it in with `EXCHANGE TABLES`. See `cbioportal://sample-filtering-guide` §4. |
 | 7 | `7-clinical-views.sql` | Study-view chart views for one study: `treatment_counts_in_study(study)` (patients per treatment agent, with type/subtype arrays — the portal's Treatment chart), `treatment_regimens_in_study(study)` (same-day agent combinations), and `clinical_attribute_counts(study, attribute)` (categorical clinical chart with the portal's NA row). See `cbioportal://clinical-data-guide`. |
-| 8 | `8-precomputed-aggregates.sql` | Precomputed alteration-frequency tables backing the `get_alteration_frequency`, `get_top_altered_genes`, `get_gene_frequency_by_cancer_type` and `get_profiled_counts` MCP tools: `study_gene_alteration_counts` (per study x gene x alteration type: altered + gene-specific profiled samples), `cancer_type_gene_alteration_counts` (per preference x CANCER_TYPE x gene, no >= 50 threshold stored) and `study_profiled_counts` (samples / patients per profiled data type). Same numerators and denominators as the `sql/4` recipes; plain tables rebuilt on every apply, so they must be re-applied after any `*_derived` rebuild (the clone job does). |
 
 Everything under `sql/` directly is **portable** — works against any cBioPortal deployment. Deployment-specific SQL lives under `sql/portal-specific/<portal-name>/`:
 
@@ -25,7 +24,15 @@ Everything under `sql/` directly is **portable** — works against any cBioPorta
 |------|-------|
 | `sql/portal-specific/public-portal/0-preferences.sql` | Public cBioPortal (`cbioportal.org`). Loads `all_studies_non_redundant`, `large_genomic_cohort`, `treatment_outcomes` preferences. All INSERTs gated on `cancer_study` existence, so on other deployments this is a no-op rather than an error. |
 
-`apply_sql.sh` and the daily clone cron apply the portable files first (in numeric order), then iterate every subdirectory of `portal-specific/`. A deployer image can ship multiple subdirs if it needs to, but typically only contains the one for that portal.
+`apply_sql.sh` and the daily clone cron apply the portable files first (in numeric order), then iterate every subdirectory of `portal-specific/`, then apply `final/`. A deployer image can ship multiple subdirs if it needs to, but typically only contains the one for that portal.
+
+### `final/`: aggregates built after every preference exists
+
+Files in `sql/final/` are portable too, but they run in a **third phase, after `portal-specific/`**, because they aggregate over `cancer_study_query_preferences`. That table only holds the portal-specific cohorts (`all_studies_non_redundant`, `large_genomic_cohort`, `treatment_outcomes`, …) once phase 2 has run.
+
+| Path | Scope |
+|------|-------|
+| `sql/final/0-precomputed-aggregates.sql` | Precomputed tables behind the `get_alteration_frequency`, `get_top_altered_genes`, `get_gene_frequency_by_cancer_type` and `get_profiled_counts` MCP tools: `study_gene_alteration_counts` (study x gene x alteration type: altered samples + gene-specific profiled samples), `cancer_type_gene_alteration_counts` (preference x CANCER_TYPE x gene; the >= 50 threshold is applied at query time, not stored) and `study_profiled_counts` (samples / patients per profiled data type). Each table reproduces a named `sql/4` recipe: the per-study table matches `top_{mutated,cna,sv}_genes_in_study` (DISCRETE-only CNA denominator), the per-cancer-type table matches `gene_alteration_frequency_by_cancer_type` (every CNA profile, including log2). The two differ on CNA denominators because those recipes do. Plain tables rebuilt on every apply: re-apply after any `*_derived` rebuild or preference change. A clone job without the final phase never builds them, and the tools then use live SQL. |
 
 ## Applying these files manually
 

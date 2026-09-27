@@ -3,11 +3,12 @@
 -- get_alteration_frequency / get_top_altered_genes /
 -- get_gene_frequency_by_cancer_type / get_profiled_counts MCP tools)
 -- ============================================================================
--- The recipe views in sql/4-mutation-frequency-views.sql are correct but
--- scan genomic_event_derived + sample_to_gene_panel_derived on every call,
--- and the agent usually needs several exploratory queries before it finds
--- them. These tables hold the SAME numerators and denominators, computed
--- once per database build, so one tool call answers the common templates:
+-- The recipe views in sql/4-mutation-frequency-views.sql scan
+-- genomic_event_derived + sample_to_gene_panel_derived on every call, and
+-- the agent usually needs several exploratory queries before it finds
+-- them. These tables hold the recipes' numerators and denominators,
+-- computed once per database build, so one tool call answers the common
+-- templates:
 --
 --   study_gene_alteration_counts        per study x gene x alteration type
 --   cancer_type_gene_alteration_counts  per preference x CANCER_TYPE x gene
@@ -15,7 +16,19 @@
 --   study_profiled_counts               per study x profile type
 --                                       (profiled samples / patients)
 --
--- Semantics are copied from the recipe views, not reinvented:
+-- WHY THIS FILE IS IN sql/final/ (apply order)
+-- ------------------------------------------------------------------------
+-- cancer_type_gene_alteration_counts is built for every preference in
+-- cancer_study_query_preferences. Portal-specific preferences
+-- (sql/portal-specific/<portal>/*.sql, e.g. all_studies_non_redundant,
+-- large_genomic_cohort, treatment_outcomes) are inserted AFTER every
+-- portable sql/*.sql file, so a portable file would never see them and
+-- those cohorts would always fall back to live SQL. sql/final/*.sql is a
+-- third phase, applied after sql/*.sql AND sql/portal-specific/*/*.sql by
+-- scripts/apply_sql.sh and by the daily clone job.
+--
+-- Semantics (the recipe each table reproduces is named per table below)
+-- ------------------------------------------------------------------------
 --   numerator    COUNT(DISTINCT sample_unique_id) over genomic_event_derived
 --                with off_panel = 0 and
 --                  mutation            variant_type = 'mutation'
@@ -23,24 +36,26 @@
 --                  amplification       variant_type = 'cna' AND cna_alteration = 2
 --                  deep_deletion       variant_type = 'cna' AND cna_alteration = -2
 --                  structural_variant  variant_type = 'structural_variant'
---                                      (per-study table: AND mutation_status
---                                      != 'UNCALLED', as top_sv_genes_in_study)
+--                                      AND mutation_status != 'UNCALLED'
 --                  any                 a sample matching ANY of the four above
 --   denominator  distinct samples profiled for the gene for the matching
 --                sample_to_gene_panel_derived.alteration_type
 --                (MUTATION_EXTENDED / COPY_NUMBER_ALTERATION /
 --                STRUCTURAL_VARIANT): on a named panel whose
---                gene_panel_list includes the gene, OR gene_panel_id = 'WES'.
---                Per-study table: CNA rows only from DISCRETE profiles, as
---                cna_*_coverage / top_cna_genes_in_study. Per-cancer-type
---                table: every COPY_NUMBER_ALTERATION profile, exactly as
---                gene_alteration_frequency_by_cancer_type does today.
---                For 'any', a sample counts if it is profiled for the gene
---                under at least one of the three alteration types.
+--                gene_panel_list includes the gene, OR gene_panel_id = 'WES'
+--                (all genes: whole exome, or a non-panel genome-wide CNA /
+--                SV profile). For 'any', a sample counts if it is profiled
+--                for the gene under at least one of the three types.
 --
--- Each table reproduces the recipe that answers the same question; where
--- the upstream recipes disagree (DISCRETE-only CNA and UNCALLED SVs above),
--- the tables inherit the disagreement rather than silently picking one.
+-- The one place the two scopes differ is the CNA denominator, inherited
+-- from the canonical views:
+--   - per-study table: DISCRETE CNA profiles only (cna_*_coverage,
+--     top_cna_genes_in_study). Continuous log2 profiles share
+--     alteration_type COPY_NUMBER_ALTERATION but carry no AMP / HOMDEL calls.
+--   - per-cancer-type table: every COPY_NUMBER_ALTERATION profile,
+--     including log2, as gene_alteration_frequency_by_cancer_type does. Its
+--     amplification / deep_deletion / any denominators can therefore be
+--     larger than the per-study ones for the same samples.
 --
 -- How the denominator stays exact without a samples x genes explosion
 -- ------------------------------------------------------------------------
@@ -59,22 +74,18 @@
 --
 -- The buckets partition the samples, so
 --   profiled(gene) = |WES bucket| + SUM(|signature| for signatures listing gene)
--- is the same number as the recipe's COUNT(DISTINCT ...) of the union — a
+-- is the same number as the recipes' COUNT(DISTINCT ...) of the union — a
 -- sum over disjoint sets, NOT a sum of overlapping per-block distinct
--- counts. (top_mutated_genes_in_cohort / top_*_genes_in_study add WES +
--- panel counts directly, which double-counts a sample that is WES for one
--- profile and on a panel for another of the same type; the
--- gene_*_frequency_* and gene_mutation_variants_in_study views count the
--- union and cannot exceed 100%. These tables use the union. Where no sample
--- is in both, which is the usual case, the numbers are identical.)
+-- counts. A sample with both a WES and a panel profile of one type is
+-- counted once, as in every sql/4 view.
 --
 -- Only rows with altered_samples > 0 are stored, exactly like the recipes'
 -- INNER JOIN of altered to profiled. A gene with no row for a study is
 -- either unaltered there or not a valid symbol; the MCP tools fall back to
 -- the live recipe SQL for that case so they can report 0 / N and tell the
 -- two apart. The >= 50 profiled-samples threshold of the by-cancer-type
--- recipe is NOT applied here; the tool applies it at query time
--- (min_profiled, default 50) so the stored counts stay threshold-free.
+-- recipe is NOT stored; get_gene_frequency_by_cancer_type applies the same
+-- fixed threshold (50) at query time.
 --
 -- Refresh / rebuild coupling
 -- ------------------------------------------------------------------------
@@ -85,7 +96,7 @@
 --      daily), and production's *_derived tables are themselves rebuilt by
 --      cbioportal's db-scripts/clickhouse/clickhouse.sql after each import.
 --      A timer-driven refresh would re-scan identical data all day.
---   2. The clone job applies sql/*.sql BEFORE it flips the MCP to the new
+--   2. The clone job applies the SQL BEFORE it flips the MCP to the new
 --      buffer, so an INSERT ... SELECT here is fully populated before any
 --      reader can see it. A refreshable MV populates asynchronously after
 --      CREATE, so the first reads after the flip could hit an empty table.
@@ -93,11 +104,12 @@
 --      before, behind allow_experimental_refreshable_materialized_view),
 --      while this file must also run on the 24.x self-hosted servers.
 -- Consequences:
---   - Any rebuild of the *_derived tables (re-running cbioportal's
---     clickhouse.sql, or a fresh clone) MUST be followed by re-applying this
---     file. The daily clone job already does that (step 6 of clone.sh runs
---     every sql/*.sql after the CLONE). For a manual rebuild, run
---     scripts/apply_sql.sh.
+--   - Any rebuild of the *_derived tables, or any change to
+--     cancer_study_query_preferences, MUST be followed by re-applying this
+--     file. The daily clone job does that on every run (final phase of
+--     clone.sh). For a manual rebuild, run scripts/apply_sql.sh.
+--   - A deployment whose clone job has no final phase never builds these
+--     tables; the tools then always use live SQL (source = "live").
 --   - Between the DROP and the end of the INSERT a manual re-apply on a
 --     buffer the MCP is actively reading leaves the table missing or
 --     partially filled. The tools fall back to live SQL when a table is
@@ -115,14 +127,9 @@
 -- Study-level counterpart of the single-study recipes
 -- (top_mutated_genes_in_study, top_cna_genes_in_study, top_sv_genes_in_study,
 -- gene_mutation_frequency_in_study) without the CANCER_TYPE split: every
--- sample of the study counts, as on the cBioPortal study view. It follows
--- the single-study recipes where they differ from the cross-study one:
---   - CNA denominators count only DISCRETE copy-number profiles
---     (cna_panel_gene_coverage / cna_wes_coverage). Continuous log2
---     profiles share alteration_type COPY_NUMBER_ALTERATION but carry no
---     AMP / HOMDEL calls.
---   - Structural variants with mutation_status (sv_status) = 'UNCALLED' are
---     excluded, as in top_sv_genes_in_study.
+-- sample of the study counts, as on the cBioPortal study view. CNA
+-- denominators count only DISCRETE copy-number profiles
+-- (cna_panel_gene_coverage / cna_wes_coverage).
 -- ============================================================================
 
 DROP TABLE IF EXISTS study_gene_alteration_counts;
@@ -132,10 +139,10 @@ CREATE TABLE study_gene_alteration_counts
     cancer_study_identifier LowCardinality(String) COMMENT 'cancer_study.cancer_study_identifier',
     hugo_gene_symbol        String                 COMMENT 'HUGO gene symbol',
     alteration_type         LowCardinality(String) COMMENT 'mutation | amplification | deep_deletion | structural_variant | any',
-    altered_samples         UInt64                 COMMENT 'Distinct samples with this alteration in this gene (off_panel = 0, UNCALLED mutations excluded)',
+    altered_samples         UInt64                 COMMENT 'Distinct samples with this alteration in this gene (off_panel = 0, UNCALLED mutations and SVs excluded)',
     profiled_samples        UInt64                 COMMENT 'Distinct samples profiled for this gene for the matching alteration_type (gene on the sample panel, or WES). Frequency denominator.',
     altered_events          UInt64                 COMMENT 'Number of qualifying event rows (e.g. total mutations, one sample can carry several)',
-    built_at                DateTime               COMMENT 'When sql/8-precomputed-aggregates.sql built this table'
+    built_at                DateTime               COMMENT 'When sql/final/0-precomputed-aggregates.sql built this table'
 )
 ENGINE = MergeTree
 ORDER BY (cancer_study_identifier, alteration_type, hugo_gene_symbol)
@@ -281,7 +288,7 @@ CREATE TABLE cancer_type_gene_alteration_counts
     alteration_type  LowCardinality(String) COMMENT 'mutation | amplification | deep_deletion | structural_variant | any',
     altered_samples  UInt64                 COMMENT 'Distinct cohort samples of this cancer type with this alteration in this gene',
     profiled_samples UInt64                 COMMENT 'Distinct cohort samples of this cancer type profiled for this gene (panel lists gene, or WES). Frequency denominator.',
-    built_at         DateTime               COMMENT 'When sql/8-precomputed-aggregates.sql built this table'
+    built_at         DateTime               COMMENT 'When sql/final/0-precomputed-aggregates.sql built this table'
 )
 ENGINE = MergeTree
 ORDER BY (preference_name, hugo_gene_symbol, alteration_type, cancer_type)
@@ -318,7 +325,8 @@ events AS (
                variant_type = 'mutation' AND mutation_status != 'UNCALLED', 'mutation',
                variant_type = 'cna' AND cna_alteration = 2,                  'amplification',
                variant_type = 'cna' AND cna_alteration = -2,                 'deep_deletion',
-               variant_type = 'structural_variant',                          'structural_variant',
+               variant_type = 'structural_variant' AND mutation_status != 'UNCALLED',
+                                                                             'structural_variant',
                '') AS event_type
     FROM genomic_event_derived
     WHERE off_panel = 0
@@ -448,7 +456,7 @@ CREATE TABLE study_profiled_counts
     samples                 UInt64                 COMMENT 'Distinct samples (profiled for profile_type, or all samples for ALL_SAMPLES)',
     patients                UInt64                 COMMENT 'Distinct patients of those samples',
     wes_samples             UInt64                 COMMENT 'Of those samples, how many are profiled by WES (all genes) rather than a named panel. Always 0 for ALL_SAMPLES.',
-    built_at                DateTime               COMMENT 'When sql/8-precomputed-aggregates.sql built this table'
+    built_at                DateTime               COMMENT 'When sql/final/0-precomputed-aggregates.sql built this table'
 )
 ENGINE = MergeTree
 ORDER BY (cancer_study_identifier, profile_type)

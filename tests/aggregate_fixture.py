@@ -108,7 +108,9 @@ DDL = [
 ]
 
 
-def _profiles_for(study: str, i: int, rng: random.Random) -> list[tuple[str, str, str]]:
+def _profiles_for(
+    study: str, i: int, rng: random.Random, ident: str | None = None
+) -> list[tuple[str, str, str]]:
     """(alteration_type, gene_panel_id, genetic_profile_id) rows for sample i."""
     m, c, s = "MUTATION_EXTENDED", "COPY_NUMBER_ALTERATION", "STRUCTURAL_VARIANT"
     rows = []
@@ -145,10 +147,20 @@ def _profiles_for(study: str, i: int, rng: random.Random) -> list[tuple[str, str
             rows.append(("MRNA_EXPRESSION", "WES", "mrna"))
     else:  # study_tiny
         rows += [(m, "WES", "mut"), (c, "WES", "cna")]
-    return [(t, p, f"{study}_{prof}") for t, p, prof in rows]
+    return [(t, p, f"{ident or study}_{prof}") for t, p, prof in rows]
 
 
-def generate(seed: int = 7) -> dict[str, list[tuple]]:
+def generate(
+    seed: int = 7, names: dict[str, str] | None = None, preferences: bool = True
+) -> dict[str, list[tuple]]:
+    """Build every fixture table.
+
+    names renames fixture studies (e.g. {"study_panel": "msk_impact_50k_2026"})
+    so the real public-portal preference file can pick them up. With
+    preferences=False no cancer_study_query_preferences rows are generated;
+    sql/3 and the portal-specific files create them instead.
+    """
+    names = names or {}
     rng = random.Random(seed)
     tables: dict[str, list[tuple]] = defaultdict(list)
     for sym, entrez in GENES.items():
@@ -157,17 +169,22 @@ def generate(seed: int = 7) -> dict[str, list[tuple]]:
         tables["gene_panel"].append((internal_id, stable))
         for g in genes:
             tables["gene_panel_list"].append((internal_id, GENES[g]))
-    study_ids = {ident: sid for sid, ident in STUDIES.items()}
-    for sid, ident in STUDIES.items():
+    study_ids = {names.get(key, key): sid for sid, key in STUDIES.items()}
+    for sid, key in STUDIES.items():
+        ident = names.get(key, key)
         tables["cancer_study"].append((sid, ident, ident.replace("_", " ")))
     profiles_seen = {}
-    for pref, studies in PREFERENCES.items():
-        for ident in studies:
-            tables["cancer_study_query_preferences"].append((pref, ident, "fixture"))
+    if preferences:
+        for pref, keys in PREFERENCES.items():
+            for key in keys:
+                tables["cancer_study_query_preferences"].append(
+                    (pref, names.get(key, key), "fixture")
+                )
 
     sizes = {"study_wes": 130, "study_panel": 160, "study_mixed": 140, "study_tiny": 10}
     internal_id = 0
-    for study, n in sizes.items():
+    for key, n in sizes.items():
+        study = names.get(key, key)
         for i in range(n):
             sample = f"{study}_S{i:04d}"
             patient = f"{study}_P{i // 2:04d}"  # two samples per patient
@@ -181,7 +198,7 @@ def generate(seed: int = 7) -> dict[str, list[tuple]]:
             tables["clinical_data_derived"].append(
                 (internal_id, sample, patient, "SAMPLE_TYPE", "Primary", study, "sample")
             )
-            profiles = _profiles_for(study, i, rng)
+            profiles = _profiles_for(key, i, rng, study)
             for alt_type, panel, profile_id in profiles:
                 tables["sample_to_gene_panel_derived"].append(
                     (sample, alt_type, panel, study, profile_id)
@@ -274,14 +291,14 @@ INSERT_COLUMNS = {
 # ---------------------------------------------------------------------------
 
 
-def _event_alteration(variant_type, status, cna, *, single_study):
+def _event_alteration(variant_type, status, cna):
     if variant_type == "mutation" and status != "UNCALLED":
         return "mutation"
     if variant_type == "cna" and cna == 2:
         return "amplification"
     if variant_type == "cna" and cna == -2:
         return "deep_deletion"
-    if variant_type == "structural_variant" and not (single_study and status == "UNCALLED"):
+    if variant_type == "structural_variant" and status != "UNCALLED":
         return "structural_variant"
     return None
 
@@ -309,7 +326,7 @@ def _profiled_sets(tables, *, single_study):
     return profiled
 
 
-def _altered_sets(tables, *, single_study):
+def _altered_sets(tables):
     """(study, alteration_type, gene) -> set(samples), alteration_type incl. 'any'."""
     altered = defaultdict(set)
     events = defaultdict(int)
@@ -317,7 +334,7 @@ def _altered_sets(tables, *, single_study):
         sample, gene, _, _, study, _, vtype, status, cna, _, off_panel = row
         if off_panel:
             continue
-        alt = _event_alteration(vtype, status, cna, single_study=single_study)
+        alt = _event_alteration(vtype, status, cna)
         if alt is None:
             continue
         for key in (alt, "any"):
@@ -342,7 +359,7 @@ def oracle_study_counts(tables) -> dict[tuple, tuple]:
     Single-study rules: DISCRETE CNA profiles only, UNCALLED SVs excluded.
     """
     profiled = _profiled_sets(tables, single_study=True)
-    altered, events = _altered_sets(tables, single_study=True)
+    altered, events = _altered_sets(tables)
     out = {}
     for (study, alt, gene), samples in altered.items():
         prof = profiled.get((study, profile_type_of(alt), gene), set())
@@ -354,14 +371,14 @@ def oracle_cancer_type_counts(tables) -> dict[tuple, tuple]:
     """(preference, cancer_type, gene, alteration_type) -> (altered, profiled), altered > 0.
 
     Cross-study rules of gene_alteration_frequency_by_cancer_type: every CNA
-    profile, every SV.
+    profile (incl. log2), UNCALLED SVs excluded.
     """
     cancer_type = {}
     for row in tables["clinical_data_derived"]:
         if row[3] == "CANCER_TYPE":
             cancer_type[row[1]] = row[4]
     profiled = _profiled_sets(tables, single_study=False)
-    altered, _ = _altered_sets(tables, single_study=False)
+    altered, _ = _altered_sets(tables)
     out = {}
     for pref, studies in PREFERENCES.items():
         buckets = defaultdict(lambda: [set(), set()])

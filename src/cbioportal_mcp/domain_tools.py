@@ -1,9 +1,9 @@
 """Purpose-built tools for the recurring gene-frequency / cohort-count questions.
 
 Each tool answers one question template in a single call, reading the
-precomputed tables from sql/8-precomputed-aggregates.sql. When a table is
+precomputed tables from sql/final/0-precomputed-aggregates.sql. When a table is
 missing, empty, or has no row for the request, the tool runs the live recipe
-SQL instead (same semantics as sql/4-mutation-frequency-views.sql) and says
+SQL instead (the sql/4-mutation-frequency-views.sql recipes) and says
 so with ``source: "live"`` plus a ``fallback_reason``.
 
 run_select_query() only accepts a SQL string (mcp_clickhouse has no bind
@@ -31,24 +31,16 @@ _PROFILE_TYPES = {
     "any": ("MUTATION_EXTENDED", "COPY_NUMBER_ALTERATION", "STRUCTURAL_VARIANT"),
 }
 
-# Numerator filters on genomic_event_derived. 'any' = any of the four.
-# Cross-study (by cancer type): copied from gene_alteration_frequency_by_cancer_type.
-_COHORT_EVENT_FILTERS = {
+# Numerator filters on genomic_event_derived, the same in every sql/4 view:
+# UNCALLED mutations and UNCALLED structural variants are not called
+# events. 'any' = any of the four.
+_EVENT_FILTERS = {
     "mutation": "(variant_type = 'mutation' AND mutation_status != 'UNCALLED')",
     "amplification": "(variant_type = 'cna' AND cna_alteration = 2)",
     "deep_deletion": "(variant_type = 'cna' AND cna_alteration = -2)",
-    "structural_variant": "(variant_type = 'structural_variant')",
+    "structural_variant": "(variant_type = 'structural_variant' AND mutation_status != 'UNCALLED')",
 }
-_COHORT_EVENT_FILTERS["any"] = "(" + " OR ".join(_COHORT_EVENT_FILTERS.values()) + ")"
-# Single study: as top_{mutated,cna,sv}_genes_in_study, which also drop
-# UNCALLED structural variants.
-_STUDY_EVENT_FILTERS = dict(
-    _COHORT_EVENT_FILTERS,
-    structural_variant="(variant_type = 'structural_variant' AND mutation_status != 'UNCALLED')",
-)
-_STUDY_EVENT_FILTERS["any"] = (
-    "(" + " OR ".join(_STUDY_EVENT_FILTERS[t] for t in ALTERATION_TYPES if t != "any") + ")"
-)
+_EVENT_FILTERS["any"] = "(" + " OR ".join(_EVENT_FILTERS.values()) + ")"
 
 # Same threshold as the by-cancer-type recipe views.
 MIN_PROFILED_SAMPLES = 50
@@ -62,11 +54,15 @@ VALID_PREFERENCE_PATTERN = re.compile(r"^[a-z0-9_]{1,128}$")
 _SAFE_LITERAL_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 
 _PROVENANCE = (
-    "numerator: distinct samples with the alteration (off-panel calls and UNCALLED "
-    "mutations excluded); denominator: distinct samples profiled for this gene "
-    "(gene on the sample's panel, or WES)"
+    "numerator: distinct samples with the alteration (off-panel calls, UNCALLED "
+    "mutations and UNCALLED SVs excluded); denominator: distinct samples profiled for "
+    "this gene (gene on the sample's panel, or WES = all genes)"
 )
-_STUDY_PROVENANCE = _PROVENANCE + "; CNA: discrete CNA profiles only"
+_STUDY_PROVENANCE = _PROVENANCE + "; CNA denominator: discrete CNA profiles only"
+_COHORT_PROVENANCE = _PROVENANCE + (
+    "; CNA denominator: every copy-number profile incl. log2, as "
+    "gene_alteration_frequency_by_cancer_type"
+)
 
 
 def _sql_str(value: str) -> str:
@@ -147,10 +143,17 @@ def _study_profile_filter(profile_types, prefix: str = "") -> str:
 
 
 def _frequency_pct(altered, profiled):
-    """Same rounding intent as the recipes: ROUND(altered * 100.0 / profiled, 1)."""
+    """Exactly the recipes' ROUND(altered * 100.0 / profiled, 1).
+
+    ClickHouse rounds a Float64 to N digits as nearbyint(x * 10^N) / 10^N:
+    half-to-even on the SCALED double. Python's round(x, 1) rounds the exact
+    binary value instead, and the two disagree at halves (1/2000: ClickHouse
+    0.0, round() 0.1). Python's round(float) with no digits is also
+    half-to-even, so this reproduces ClickHouse bit for bit.
+    """
     if not profiled:
         return None
-    return round(int(altered) * 100.0 / int(profiled), 1)
+    return round(int(altered) * 100.0 / int(profiled) * 10) / 10
 
 
 def _run_with_fallback(label: str, precomputed_sql: str, live_sql_factory):
@@ -209,7 +212,7 @@ def build_alteration_frequency_live_sql(genes, studies) -> str:
     gene reports 0 / N.
     """
     s, g = _sql_list(studies), _sql_list(genes)
-    f = _STUDY_EVENT_FILTERS
+    f = _EVENT_FILTERS
     return f"""
         WITH
         events AS (
@@ -305,7 +308,7 @@ def build_top_altered_genes_live_sql(studies, alteration_type, top_n) -> str:
             FROM genomic_event_derived
             WHERE cancer_study_identifier IN {s}
               AND off_panel = 0
-              AND {_STUDY_EVENT_FILTERS[alteration_type]}
+              AND {_EVENT_FILTERS[alteration_type]}
             GROUP BY hugo_gene_symbol
             ORDER BY altered_samples DESC, hugo_gene_symbol ASC
             LIMIT {int(top_n)}
@@ -339,19 +342,37 @@ def build_top_altered_genes_live_sql(studies, alteration_type, top_n) -> str:
     """
 
 
-def build_frequency_by_cancer_type_precomputed_sql(
-    genes, alteration_type, preference, top_n, min_profiled=MIN_PROFILED_SAMPLES
-) -> str:
+def build_frequency_by_cancer_type_precomputed_sql(genes, alteration_type, preference) -> str:
+    """Every stored cancer type for the gene, below the threshold too (one row each).
+
+    The >= 50 threshold, order and limit are applied by _select_cancer_types(),
+    so an empty result means the gene has no altered sample in the cohort (or
+    the cohort was not built) rather than "nothing reached 50 profiled".
+    """
     return f"""
         SELECT cancer_type, hugo_gene_symbol, altered_samples, profiled_samples, built_at
         FROM cancer_type_gene_alteration_counts
         WHERE preference_name = {_sql_str(preference)}
           AND hugo_gene_symbol IN {_sql_list(genes)}
           AND alteration_type = {_sql_str(alteration_type)}
-          AND profiled_samples >= {int(min_profiled)}
-        ORDER BY altered_samples / profiled_samples DESC, altered_samples DESC, cancer_type ASC
-        LIMIT {int(top_n)}
     """
+
+
+def _select_cancer_types(rows, top_n):
+    """The recipe's WHERE profiled_samples >= 50, ORDER BY and LIMIT, on stored rows.
+
+    Same order as the live SQL: altered / profiled as a double DESC, then
+    altered DESC, then cancer_type ASC (UTF-8 byte order == code point order).
+    """
+    kept = [r for r in rows if int(r["profiled_samples"]) >= MIN_PROFILED_SAMPLES]
+    kept.sort(
+        key=lambda r: (
+            -(int(r["altered_samples"]) / int(r["profiled_samples"])),
+            -int(r["altered_samples"]),
+            r["cancer_type"],
+        )
+    )
+    return kept[:top_n]
 
 
 def build_frequency_by_cancer_type_live_sql(genes, alteration_type, preference, top_n) -> str:
@@ -397,7 +418,7 @@ def build_frequency_by_cancer_type_live_sql(genes, alteration_type, preference, 
             JOIN sample_cancer_type sct USING (sample_unique_id)
             WHERE ged.hugo_gene_symbol IN {g}
               AND ged.off_panel = 0
-              AND {_COHORT_EVENT_FILTERS['any']}
+              AND {_EVENT_FILTERS['any']}
             GROUP BY sct.cancer_type, ged.hugo_gene_symbol
         ),
         profiled_samples_for_gene AS (
@@ -658,7 +679,9 @@ def get_top_altered_genes(
 
     Cancer types need >= 50 profiled samples (same rule as the recipe views).
     Rows sorted by frequency_pct desc: cancer_type, altered_samples,
-    profiled_samples, frequency_pct.
+    profiled_samples, frequency_pct. CNA denominators here count every
+    copy-number profile (incl. log2), as gene_alteration_frequency_by_cancer_type,
+    so they can exceed get_alteration_frequency's discrete-only ones.
     """
 )
 def get_gene_frequency_by_cancer_type(
@@ -675,13 +698,13 @@ def get_gene_frequency_by_cancer_type(
         genes = _gene_candidates(gene)
         rows, meta = _run_with_fallback(
             "domain_tools.gene_frequency_by_cancer_type",
-            build_frequency_by_cancer_type_precomputed_sql(
-                genes, alteration_type, preference, top_n
-            ),
+            build_frequency_by_cancer_type_precomputed_sql(genes, alteration_type, preference),
             lambda: build_frequency_by_cancer_type_live_sql(
                 genes, alteration_type, preference, top_n
             ),
         )
+        if meta["source"] == "precomputed":
+            rows = _select_cancer_types(rows, top_n)
         result = {
             "gene": rows[0].get("hugo_gene_symbol", gene) if rows else gene,
             "alteration_type": alteration_type,
@@ -697,7 +720,7 @@ def get_gene_frequency_by_cancer_type(
                 }
                 for r in rows
             ],
-            "provenance": _PROVENANCE + f"; cancer types with < {MIN_PROFILED_SAMPLES} "
+            "provenance": _COHORT_PROVENANCE + f"; cancer types with < {MIN_PROFILED_SAMPLES} "
             "profiled samples omitted",
         }
         if not rows:
@@ -713,15 +736,19 @@ def get_gene_frequency_by_cancer_type(
 
 @server.mcp.tool(
     description="""
-    Sample and patient counts for ONE study, overall and per profiled data type,
-    in one call. Prefer this over hand-written SQL for "how many samples /
-    patients / sequenced samples are in STUDY".
+    Study-wide sample and patient counts for ONE study: all samples, and samples
+    with a profile of each data type. Prefer this over hand-written SQL for "how
+    many samples / patients / sequenced samples are in STUDY". These are NOT
+    gene-frequency denominators (a panel may not cover a gene): for "% of
+    profiled samples with GENE altered" use get_alteration_frequency.
 
-    profile_type ALL_SAMPLES = every sample; ANY_MUT_CNA_SV = profiled for
-    mutation, discrete CNA or SV; COPY_NUMBER_ALTERATION_DISCRETE = the CNA
-    frequency denominator; other rows are per data type as stored
-    (MUTATION_EXTENDED, COPY_NUMBER_ALTERATION incl. log2, MRNA_EXPRESSION, ...).
-    wes_samples = how many of those are whole-exome (all genes profiled).
+    profile_type: ALL_SAMPLES (every sample; wes_samples is always 0 here);
+    ANY_MUT_CNA_SV (mutation, discrete CNA or SV profile);
+    COPY_NUMBER_ALTERATION_DISCRETE; and each stored type (MUTATION_EXTENDED,
+    COPY_NUMBER_ALTERATION incl. log2, STRUCTURAL_VARIANT, MRNA_EXPRESSION, ...).
+    wes_samples = samples whose profile covers all genes (whole exome, or a
+    non-panel genome-wide CNA / SV profile). Counts come from sample profiles
+    and can differ from the portal's case-list counts (cancer_study.*_sample_count).
     """
 )
 def get_profiled_counts(study_id: str) -> dict:
