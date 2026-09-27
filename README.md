@@ -70,7 +70,10 @@ Server requirements:
 - The MCP user's settings profile must let it change the cache settings: use
   `readonly = 2` (recommended), or `readonly = 1` plus `CHANGEABLE_IN_READONLY`
   constraints on `use_query_cache`, `query_cache_ttl` and
-  `query_cache_nondeterministic_function_handling`. With a plain
+  `query_cache_nondeterministic_function_handling`. That option also needs
+  `access_control_improvements.settings_constraints_replace_previous = true`
+  in the server config; without it the constraints are ignored and the pilot
+  turns itself off. With a plain
   `readonly = 1`, ClickHouse refuses the settings; the server then logs one
   warning, counts `cbioportal_mcp.db_query.cache_disabled`, and runs uncached.
 - Recommended constraints: `query_cache_ttl` max 3600 and

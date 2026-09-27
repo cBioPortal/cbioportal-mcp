@@ -25,7 +25,10 @@ Server preconditions: ClickHouse 24.4+, and a DB user profile that lets the
 MCP change the three cache settings: ``readonly=2`` (recommended), or
 ``readonly=1`` with ``CHANGEABLE_IN_READONLY`` constraints on
 ``use_query_cache``, ``query_cache_ttl`` and
-``query_cache_nondeterministic_function_handling``. With a plain
+``query_cache_nondeterministic_function_handling``. Those constraints only
+take effect when the server config sets
+``access_control_improvements.settings_constraints_replace_previous = true``;
+without it they are ignored and the pilot self-disables. With a plain
 ``readonly=1`` profile the server refuses the settings; the pilot then logs
 once, counts ``db_query.cache_disabled`` and turns itself off for the process.
 
@@ -111,8 +114,9 @@ _OTHER_TABLE_READS = re.compile(
     r"\bIN\s+(?!\()[A-Za-z_]|\b(?:dict\w*|joinGet\w*)\s*\(",
     re.IGNORECASE,
 )
-_CTE_FIRST = re.compile(r"\bWITH\s+(\w+)\s+AS\s*\(", re.IGNORECASE)
-_CTE_NEXT = re.compile(r"\)\s*,\s*(\w+)\s+AS\s*\(", re.IGNORECASE)
+_WITH = re.compile(r"\bWITH\b", re.IGNORECASE)
+_CTE_DEFINITION = re.compile(r"\s*(\w+)\s+AS\s*\(", re.IGNORECASE)
+_CTE_SEPARATOR = re.compile(r"\s*,")
 _IDENT = re.compile(r"\s*(\w+)")
 _ALIAS_STOPWORDS = frozenset(
     {
@@ -136,6 +140,27 @@ def _matching_paren(sql: str, open_index: int) -> int | None:
     return None
 
 
+def _cte_names(sql: str) -> set[str]:
+    """Names defined as ``name AS (subquery)`` in a WITH clause, walking each
+    clause definition by definition so a ``), name AS (`` elsewhere in the
+    query can't register a table. Stops at the first item it doesn't
+    recognize (e.g. a scalar ``WITH 5 AS x``), leaving later names undefined,
+    so FROM on them is treated as an unknown table."""
+    names = set()
+    for with_keyword in _WITH.finditer(sql):
+        pos = with_keyword.end()
+        while (definition := _CTE_DEFINITION.match(sql, pos)) is not None:
+            end = _matching_paren(sql, definition.end() - 1)
+            if end is None:
+                break
+            names.add(definition.group(1).lower())
+            separator = _CTE_SEPARATOR.match(sql, end + 1)
+            if separator is None:
+                break
+            pos = separator.end()
+    return names
+
+
 def _source_end_is_single(sql: str, end: int) -> bool:
     """After a FROM/JOIN source ending at ``end``, skip an optional alias and
     require that no comma-joined second source follows."""
@@ -150,10 +175,11 @@ def _source_end_is_single(sql: str, end: int) -> bool:
 
 
 def _only_standard_view_sources(sql: str) -> bool:
-    """True when every FROM/JOIN source is an allowlisted view call, a
-    parenthesized subquery, or a CTE name, and at least one view is called.
-    Errs toward False on anything it doesn't recognize."""
-    ctes = {name.lower() for name in _CTE_FIRST.findall(sql) + _CTE_NEXT.findall(sql)}
+    """True when every FROM/JOIN source is an allowlisted view (called with
+    parameters, or by bare name), a parenthesized subquery, or a CTE name, and
+    at least one view is referenced. Errs toward False on anything it doesn't
+    recognize."""
+    ctes = _cte_names(sql)
     saw_view = False
     for keyword in _SOURCE_KEYWORD.finditer(sql):
         pos = keyword.end()
@@ -177,6 +203,9 @@ def _only_standard_view_sources(sql: str) -> bool:
                     return False
                 saw_view = True
                 source_end = end + 1
+            elif name in CACHEABLE_VIEWS:
+                saw_view = True
+                source_end = match.end()
             elif name in ctes:
                 source_end = match.end()
             else:
