@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       ref:
-        description: "Git ref to build and tag the image (branch, tag, or commit SHA)"
+        description: "Docker tag / ref (no slashes) to build and tag the image: branch, tag, or commit SHA"
         type: string
         required: true
 
@@ -32,11 +32,13 @@ jobs:
           ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.ref != '' && github.event.inputs.ref || github.ref }}
 
       - name: Set image tag
-        id: set-tag
+        shell: bash
         run: |
           if [ -n "$INPUT_REF" ]; then
-            # Must be a valid Docker tag; this also rejects newlines that could inject into $GITHUB_ENV.
-            if ! printf '%s' "$INPUT_REF" | grep -Eqx '[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}'; then
+            # Whole-string match (not per-line like grep -x): the ref must be exactly one
+            # Docker tag, so a newline can't smuggle extra lines into $GITHUB_ENV.
+            tag_re='^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$'
+            if ! [[ "$INPUT_REF" =~ $tag_re ]]; then
               echo "ref is not a valid Docker tag: $INPUT_REF" >&2
               exit 1
             fi
@@ -56,6 +58,7 @@ jobs:
           INPUT_REF: ${{ github.event.inputs.ref }}
           EVENT_NAME: ${{ github.event_name }}
           REF_NAME: ${{ github.ref_name }}
+          LC_ALL: C
 
       - name: Log in to DockerHub
         uses: docker/login-action@v3
@@ -97,10 +100,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Set image tag
+        shell: bash
         run: |
           if [ -n "$INPUT_REF" ]; then
-            # Must be a valid Docker tag; this also rejects newlines that could inject into $GITHUB_ENV.
-            if ! printf '%s' "$INPUT_REF" | grep -Eqx '[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}'; then
+            # Whole-string match (not per-line like grep -x): the ref must be exactly one
+            # Docker tag, so a newline can't smuggle extra lines into $GITHUB_ENV.
+            tag_re='^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$'
+            if ! [[ "$INPUT_REF" =~ $tag_re ]]; then
               echo "ref is not a valid Docker tag: $INPUT_REF" >&2
               exit 1
             fi
@@ -118,6 +124,7 @@ jobs:
           INPUT_REF: ${{ github.event.inputs.ref }}
           EVENT_NAME: ${{ github.event_name }}
           REF_NAME: ${{ github.ref_name }}
+          LC_ALL: C
 
       - name: Download digests
         uses: actions/download-artifact@v4
