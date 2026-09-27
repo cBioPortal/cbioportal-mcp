@@ -5,12 +5,15 @@ the pilot; any other value, including ``true``, leaves it off. When on, a SELECT
 is cached only if its intent is known to be a repeatable frequency or top-gene
 lookup:
 
-- internal call sites whose ``query_label`` is in ``CACHEABLE_LABELS``, and
+- internal call sites whose ``query_label`` is in ``CACHEABLE_LABELS``. These
+  are trusted server code, not model SQL, and may read any table:
+  ``study_guide.top_genes`` aggregates ``genomic_event_derived`` directly.
 - agent-written SQL (``clickhouse_run_select_query``) whose every FROM/JOIN
-  source is a standard parameterized view in ``CACHEABLE_VIEWS`` (or a
-  subquery / CTE built from them) and that does not reference ``system.*``.
-  Comments and quoted text are scrubbed before matching; anything the check
-  can't account for runs uncached.
+  source is a standard parameterized view in ``CACHEABLE_VIEWS`` or a
+  parenthesized subquery built only from them, and that does not reference
+  ``system.*``. CTE names are never accepted as sources. Comments and quoted
+  text are scrubbed before matching; anything the check can't account for
+  runs uncached.
 
 Everything else (list_studies, other study_guide sections, arbitrary SQL, the
 background studies refresh) runs exactly as before.
@@ -55,6 +58,9 @@ MAX_TTL_SECONDS = 3600
 LLM_QUERY_LABEL = "clickhouse_run_select_query"
 CACHEABLE_LABELS = frozenset({"study_guide.top_genes"})
 # Frequency / top-gene parameterized views from sql/4-mutation-frequency-views.sql.
+# The guides call them with named parameters, e.g.
+# `FROM top_mutated_genes_in_study(study = 'x', top_n = 5)`; positional
+# arguments (`v(1)`) are not valid for ClickHouse parameterized views.
 CACHEABLE_VIEWS = frozenset(
     {
         "gene_mutation_frequency_by_cancer_type",
@@ -107,6 +113,8 @@ def _scrub_sql(query: str) -> str:
 _SYSTEM_REF = re.compile(r"\bsystem\b\s*[`\"]?\s*\.", re.IGNORECASE)
 # Any assignment to a query cache setting, e.g. `SETTINGS use_query_cache = 1`.
 _QUERY_CACHE_ASSIGNMENT = re.compile(r"\b\w*query_cache\w*\s*=", re.IGNORECASE)
+# Every JOIN is treated as a source, including ARRAY JOIN: `view(...) ARRAY
+# JOIN arr` sees `arr` as an unknown source and is intentionally left uncached.
 _SOURCE_KEYWORD = re.compile(r"\b(?:FROM|JOIN)\b", re.IGNORECASE)
 # Other ways ClickHouse reads a table outside FROM/JOIN: `x IN table_name`,
 # dictionaries, Join-engine tables.
@@ -114,9 +122,6 @@ _OTHER_TABLE_READS = re.compile(
     r"\bIN\s+(?!\()[A-Za-z_]|\b(?:dict\w*|joinGet\w*)\s*\(",
     re.IGNORECASE,
 )
-_WITH = re.compile(r"\bWITH\b", re.IGNORECASE)
-_CTE_DEFINITION = re.compile(r"\s*(\w+)\s+AS\s*\(", re.IGNORECASE)
-_CTE_SEPARATOR = re.compile(r"\s*,")
 _IDENT = re.compile(r"\s*(\w+)")
 _ALIAS_STOPWORDS = frozenset(
     {
@@ -140,27 +145,6 @@ def _matching_paren(sql: str, open_index: int) -> int | None:
     return None
 
 
-def _cte_names(sql: str) -> set[str]:
-    """Names defined as ``name AS (subquery)`` in a WITH clause, walking each
-    clause definition by definition so a ``), name AS (`` elsewhere in the
-    query can't register a table. Stops at the first item it doesn't
-    recognize (e.g. a scalar ``WITH 5 AS x``), leaving later names undefined,
-    so FROM on them is treated as an unknown table."""
-    names = set()
-    for with_keyword in _WITH.finditer(sql):
-        pos = with_keyword.end()
-        while (definition := _CTE_DEFINITION.match(sql, pos)) is not None:
-            end = _matching_paren(sql, definition.end() - 1)
-            if end is None:
-                break
-            names.add(definition.group(1).lower())
-            separator = _CTE_SEPARATOR.match(sql, end + 1)
-            if separator is None:
-                break
-            pos = separator.end()
-    return names
-
-
 def _source_end_is_single(sql: str, end: int) -> bool:
     """After a FROM/JOIN source ending at ``end``, skip an optional alias and
     require that no comma-joined second source follows."""
@@ -175,11 +159,14 @@ def _source_end_is_single(sql: str, end: int) -> bool:
 
 
 def _only_standard_view_sources(sql: str) -> bool:
-    """True when every FROM/JOIN source is an allowlisted view (called with
-    parameters, or by bare name), a parenthesized subquery, or a CTE name, and
-    at least one view is referenced. Errs toward False on anything it doesn't
-    recognize."""
-    ctes = _cte_names(sql)
+    """True when every FROM/JOIN source is an allowlisted view or a
+    parenthesized subquery, and at least one view is referenced. Errs toward
+    False on anything it doesn't recognize.
+
+    CTE names are deliberately not accepted: ClickHouse scopes a WITH to its
+    own (sub)query, so without a real parser a CTE defined in one subquery
+    could vouch for a same-named table read elsewhere. A view wrapped in a CTE
+    simply runs uncached."""
     saw_view = False
     for keyword in _SOURCE_KEYWORD.finditer(sql):
         pos = keyword.end()
@@ -196,6 +183,7 @@ def _only_standard_view_sources(sql: str) -> bool:
                 return False  # database-qualified or not an identifier
             name = match.group(1).lower()
             if match.group(3):
+                # Parameterized view call, the form the guides teach.
                 if name not in CACHEABLE_VIEWS:
                     return False
                 end = _matching_paren(sql, match.end() - 1)
@@ -204,9 +192,9 @@ def _only_standard_view_sources(sql: str) -> bool:
                 saw_view = True
                 source_end = end + 1
             elif name in CACHEABLE_VIEWS:
+                # Bare name: ClickHouse will reject it for missing parameters,
+                # but it is still an allowlisted source.
                 saw_view = True
-                source_end = match.end()
-            elif name in ctes:
                 source_end = match.end()
             else:
                 return False

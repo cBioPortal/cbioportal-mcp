@@ -57,10 +57,18 @@ export CBIOPORTAL_MCP_QUERY_CACHE_ENABLED=1   # only the exact value 1 enables i
 export CBIOPORTAL_MCP_QUERY_CACHE_TTL=300     # seconds; default and maximum 3600
 ```
 
-Only allowlisted queries are cached: the `get_study_guide` top-genes section,
-and `clickhouse_run_select_query` SQL whose every `FROM`/`JOIN` source is one
-of the standard frequency / top-gene views from
-`sql/4-mutation-frequency-views.sql` and that does not reference `system.*`.
+Only allowlisted queries are cached:
+- the `get_study_guide` top-genes section (`study_guide.top_genes`). This is
+  trusted server code and reads `genomic_event_derived` directly by design;
+  the view allowlist below applies to model-written SQL only.
+- `clickhouse_run_select_query` SQL whose every `FROM`/`JOIN` source is one of
+  the standard frequency / top-gene parameterized views from
+  `sql/4-mutation-frequency-views.sql` (called as the guides show, e.g.
+  `FROM top_mutated_genes_in_study(study = '...', top_n = 5)`) or a
+  parenthesized subquery built only from them, and that does not reference
+  `system.*`. Queries that read those views through a `WITH` name, or use
+  `ARRAY JOIN`, run uncached.
+
 While the pilot is on, SQL that sets `use_query_cache` or any `query_cache*`
 setting itself is rejected. Both variables are validated at startup: TTLs above
 3600 are clamped, and non-positive or non-integer values stop the server.

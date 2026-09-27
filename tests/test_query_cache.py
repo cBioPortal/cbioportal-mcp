@@ -21,21 +21,20 @@ CACHE_SETTINGS = {
     "query_cache_nondeterministic_function_handling": "ignore",
 }
 LLM = "clickhouse_run_select_query"
+# Canonical shapes, as mutation-frequency-guide.md teaches them: parameterized
+# views called with named parameters.
 VIEW_QUERIES = [
     "SELECT * FROM gene_mutation_frequency_by_cancer_type(preference='public', gene='TP53')",
     "SELECT * FROM top_mutated_genes_in_cohort(preference = 'public') LIMIT 5",
-    "select * from TOP_MUTATED_GENES_IN_STUDY (study='msk_chord_2024')",
-    "WITH t AS (SELECT * FROM gene_mutation_frequency_in_study(study='x', gene='KRAS'))"
-    " SELECT * FROM t",
-    "SELECT a.hugo_gene_symbol FROM `top_mutated_genes_in_study`(study='x') AS a"
-    " JOIN top_cna_genes_in_study(study='x') b USING hugo_gene_symbol -- system.tables",
-    # Bare view names (no parameter list) are sources like any other view.
+    "select * from TOP_MUTATED_GENES_IN_STUDY (study='msk_chord_2024', top_n = 20)",
+    "SELECT hugo_gene_symbol, freq FROM gene_mutation_frequency_in_study(\n"
+    "    study = 'brca_tcga_pan_can_atlas_2018',\n    gene = 'KRAS'\n) ORDER BY freq DESC",
+    "SELECT a.hugo_gene_symbol FROM `top_mutated_genes_in_study`(study='x', top_n=5) AS a"
+    " JOIN top_cna_genes_in_study(study='x', top_n=5) b USING hugo_gene_symbol -- system.x",
+    "SELECT * FROM (SELECT * FROM top_sv_genes_in_study(study='x', top_n=5)) WHERE n > 1",
+    # Bare view names (no parameter list) are still allowlisted sources.
     "SELECT * FROM top_mutated_genes_in_study",
     "SELECT a.* FROM top_mutated_genes_in_study AS a JOIN top_cna_genes_in_study b USING n",
-    # Several CTEs in one WITH clause, joined in the outer query.
-    "WITH t AS (SELECT * FROM top_mutated_genes_in_study(study='x', top_n=5)),"
-    " u AS (SELECT * FROM top_cna_genes_in_study(study='x', top_n=5))"
-    " SELECT * FROM t JOIN u USING hugo_gene_symbol",
 ]
 
 
@@ -177,33 +176,46 @@ def test_allowlisted_label_is_cached(enabled, request_context, database):
         (LLM, "SELECT * FROM top_mutated_genes_in_study t JOIN genomic_event_derived USING n"),
         (LLM, "SELECT * FROM top_mutated_genes_in_cohort, clinical_data_derived"),
         (LLM, "SELECT * FROM other_db.top_mutated_genes_in_study"),
-        # `), name AS (` outside a WITH clause must not register a table as a CTE.
+        # CTE names are never sources: ClickHouse scopes WITH to its own
+        # subquery, so an inner CTE must not vouch for an outer table.
+        (
+            LLM,
+            "SELECT s.x, t.hugo_gene_symbol, t.altered FROM top_mutated_genes_in_study"
+            " JOIN (WITH genomic_event_derived AS (SELECT 1 AS x) SELECT 1 AS x) s ON 1=1"
+            " JOIN genomic_event_derived AS t ON 1=1",
+        ),
+        (
+            LLM,
+            "SELECT * FROM top_mutated_genes_in_study(study='x', top_n=5)"
+            " JOIN (WITH c AS (SELECT 1 AS x) SELECT x FROM c) s ON 1=1 JOIN c ON 1=1",
+        ),
+        (
+            LLM,
+            "SELECT * FROM top_mutated_genes_in_study(study='x', top_n=5)"
+            " JOIN (SELECT * FROM (WITH clinical_data_derived AS (SELECT 1 AS x)"
+            " SELECT x FROM clinical_data_derived)) s ON 1=1"
+            " JOIN clinical_data_derived ON 1=1",
+        ),
+        # ... and a view wrapped in a CTE is simply not cached.
+        (
+            LLM,
+            "WITH t AS (SELECT * FROM gene_mutation_frequency_in_study(study='x', gene='KRAS'))"
+            " SELECT * FROM t",
+        ),
+        (
+            LLM,
+            "WITH t AS (SELECT * FROM top_mutated_genes_in_study(study='x', top_n=5)),"
+            " u AS (SELECT * FROM top_cna_genes_in_study(study='x', top_n=5))"
+            " SELECT * FROM t JOIN u USING hugo_gene_symbol",
+        ),
         (
             LLM,
             "SELECT max(n), genomic_event_derived AS (1)"
             " FROM top_mutated_genes_in_cohort(preference='p')"
             " JOIN genomic_event_derived USING hugo_gene_symbol",
         ),
-        (
-            LLM,
-            "WITH t AS (SELECT * FROM top_mutated_genes_in_cohort(preference='p'))"
-            " SELECT tuple(1), clinical_data_derived AS (2)"
-            " FROM t JOIN clinical_data_derived USING n",
-        ),
-        # A CTE over an arbitrary table is not a standard-view source.
-        (
-            LLM,
-            "WITH t AS (SELECT * FROM genomic_event_derived),"
-            " u AS (SELECT * FROM top_mutated_genes_in_cohort(preference='p'))"
-            " SELECT * FROM t JOIN u USING hugo_gene_symbol",
-        ),
-        # The WITH walk stops at an item it doesn't recognize (a scalar alias),
-        # so later names stay undefined and FROM on them is not cached.
-        (
-            LLM,
-            "WITH 5 AS k, t AS (SELECT * FROM top_mutated_genes_in_cohort(preference='p'))"
-            " SELECT * FROM t",
-        ),
+        # ARRAY JOIN after a view is intentionally uncached.
+        (LLM, "SELECT * FROM top_mutated_genes_in_study(study='x', top_n=5) ARRAY JOIN arr"),
     ],
 )
 def test_not_cached_when_flag_on(enabled, request_context, database, metrics, query_label, query):
@@ -342,13 +354,6 @@ def test_agent_query_cache_settings_rejected_when_on(
     assert "query_cache settings are managed by the server" in result["error_message"]
     assert database.configs == []
     metrics.increment.assert_any_call("db_query.errors", {"query_label": LLM, "success": "false"})
-
-
-def test_cte_names_come_only_from_with_clauses():
-    sql = query_cache._scrub_sql(
-        "WITH t AS (SELECT 1), u AS (SELECT (2)) SELECT f(x), v AS (3) FROM t JOIN u"
-    )
-    assert query_cache._cte_names(sql) == {"t", "u"}
 
 
 def test_query_cache_text_in_comment_or_literal_is_not_an_assignment(enabled, request_context):
