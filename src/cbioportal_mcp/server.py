@@ -59,6 +59,30 @@ def _clear_study_guide_cache() -> None:
     """Reset cached dynamic study guides. Test hook; not used at runtime."""
     _study_guide_cache.clear()
 
+
+def _cache_get(cache: MetadataCache, key):
+    """Return a cached value, or None on a miss or any cache failure.
+
+    The cache is only an optimization: a failure inside it must never turn an
+    otherwise successful tool call into an error, so it is logged and bypassed.
+    """
+    try:
+        value = cache.get(key)
+    except Exception:
+        logger.debug("metadata cache get failed for %r; bypassing", key, exc_info=True)
+        return None
+    if value is not None:
+        logger.debug("metadata cache hit: %r", key)
+    return value
+
+
+def _cache_put(cache: MetadataCache, key, value) -> None:
+    """Store a successful result; a cache failure is logged and ignored."""
+    try:
+        cache.put(key, value)
+    except Exception:
+        logger.debug("metadata cache put failed for %r; bypassing", key, exc_info=True)
+
 # Regex pattern for valid cBioPortal study identifiers
 # Allows alphanumeric characters, underscores, and hyphens
 VALID_STUDY_ID_PATTERN = re.compile(r'^[a-zA-Z0-9_-]+$')
@@ -534,7 +558,7 @@ def clickhouse_list_tables() -> dict[str, list[dict] | str]:
     logger.info(f"clickhouse_list_tables: called")
 
     try:
-        cached = _schema_cache.get(("tables",))
+        cached = _cache_get(_schema_cache, ("tables",))
         if cached is not None:
             return cached
         from mcp_clickhouse.mcp_server import run_query
@@ -543,7 +567,7 @@ def clickhouse_list_tables() -> dict[str, list[dict] | str]:
         result = [{"name": row[0]} for row in rows if row]
         logger.debug("clickhouse_list_tables result: %s", result)
         response = {"tables": result}
-        _schema_cache.put(("tables",), response)
+        _cache_put(_schema_cache, ("tables",), response)
         return response
     except Exception as e:
         error_message = str(e)
@@ -568,7 +592,7 @@ def clickhouse_list_table_columns(table: str) -> dict[str, list[dict] | str]:
 
     try:
         table = _validate_table_name(table)
-        cached = _schema_cache.get(("columns", table))
+        cached = _cache_get(_schema_cache, ("columns", table))
         if cached is not None:
             return cached
         from mcp_clickhouse.mcp_server import run_query
@@ -591,7 +615,7 @@ def clickhouse_list_table_columns(table: str) -> dict[str, list[dict] | str]:
             result.append(entry)
         logger.debug("clickhouse_list_table_columns result: %s", result)
         response = {"columns": result}
-        _schema_cache.put(("columns", table), response)
+        _cache_put(_schema_cache, ("columns", table), response)
         return response
     except Exception as e:
         error_message = str(e)
@@ -902,7 +926,7 @@ def get_study_guide(study_id: str) -> str:
 
     # Study ids match case-insensitively below, so key the cache the same way.
     cache_key = study_id.lower()
-    cached = _study_guide_cache.get(cache_key)
+    cached = _cache_get(_study_guide_cache, cache_key)
     if cached is not None:
         return cached
 
@@ -1107,7 +1131,7 @@ WHERE cancer_study_identifier = '{study_id}'
 """)
         
         guide = "\n".join(guide_sections)
-        _study_guide_cache.put(cache_key, guide)
+        _cache_put(_study_guide_cache, cache_key, guide)
         return guide
         
     except Exception as e:
