@@ -17,7 +17,7 @@ MCP agent can reason about it.
 | 5 | `5-gene-expression-views.sql` | Gene-expression / copy-number-value / methylation views, backed by `genetic_alteration_derived`. Currently `gene_pair_coexpression(study, gene_a, gene_b, profile_type)` for Spearman correlation between two genes. See `cbioportal://gene-expression-guide`. |
 | 6 | `6-add-study-data-type-counts.sql` | Per-study sample counts by data type on `cancer_study` (`sample_count`, `mutation_sample_count`, `cna_sample_count`, …, `treatment_patient_count`, `resource_sample_counts`), computed like cBioPortal's DETAILED study projection so they match the portal's study list and "Data type" filter. Rebuilds the table and swaps it in with `EXCHANGE TABLES`. See `cbioportal://sample-filtering-guide` §4. |
 | 7 | `7-clinical-views.sql` | Study-view chart views for one study: `treatment_counts_in_study(study)` (patients per treatment agent, with type/subtype arrays — the portal's Treatment chart), `treatment_regimens_in_study(study)` (same-day agent combinations), and `clinical_attribute_counts(study, attribute)` (categorical clinical chart with the portal's NA row). See `cbioportal://clinical-data-guide`. |
-| 9 | `9-projections.sql` | ClickHouse projections that re-sort `genomic_event_derived` (study-first and gene-first) and `sample_to_gene_panel_derived` (study-first) for frequency / co-occurrence query shapes. Performance only, but results stay identical **only** with `optimize_use_implicit_projections = 0` pinned for the MCP user (the MCP refuses to start otherwise). See [Projections](#projections). |
+| 9 | `9-projections.sql` | ClickHouse projections that re-sort `genomic_event_derived` (study-first and gene-first) and `sample_to_gene_panel_derived` (study-first) for frequency / co-occurrence query shapes. Performance only: deterministic queries return the same rows, but **only** with `optimize_use_implicit_projections = 0` pinned for the MCP user (the MCP refuses to start otherwise). Order-dependent aggregates on ties (`any`, `argMin`/`argMax`) may pick a different row. See [Projections](#projections). |
 
 Everything under `sql/` directly is **portable** — works against any cBioPortal deployment. Deployment-specific SQL lives under `sql/portal-specific/<portal-name>/`:
 
@@ -99,19 +99,49 @@ Deployments that don't apply `9-projections.sql` are unaffected.
 `CLICKHOUSE_BINARY=/path/to/clickhouse` (it uses `clickhouse local`; no server
 or Docker is needed). It builds the upstream DDL, loads three data layouts,
 applies `sql/4` and this file, and requires every ad-hoc count/co-occurrence
-shape and every `sql/4` view to return byte-identical results with
-projections on (plus the required setting) and off.
+shape and every `sql/4` view to return the same rows with projections on
+(plus the required setting) and off. It also requires the `aligned` layout
+to still over-count at ClickHouse defaults, so a data change can't quietly
+turn the regression check off.
+
+"The same rows" holds for deterministic queries. A projection reads rows in
+a different physical order than the base table, so order-dependent
+aggregates can legitimately pick a different row among ties: `any()`,
+`argMin()` / `argMax()` with tied keys, `groupArray()` order, and
+`LIMIT n` without an `ORDER BY` that breaks ties (in review, an
+order-dependent aggregate over tied rows returned `GENE23` from the base
+table and `GENE453` from a projection). Both answers are valid, but they differ. When
+the winning row matters, give it an explicit `ORDER BY` with a unique
+tie-break (e.g. `ORDER BY n DESC, hugo_gene_symbol`), as the `sql/4` views
+do.
 
 ### When to (re)apply
 
 The derived tables are dropped and recreated on every cBioPortal data load.
 The daily clone then builds each LLM table with `CREATE TABLE ... CLONE AS`
 from the production database, which has no projections, and runs every
-`sql/*.sql`, so `9-projections.sql` recreates them on each clone. (`CLONE AS`
-needs ClickHouse 25.x+; 24.8 and 24.10 don't parse it. On 26.2 plain
-`MergeTree`, a clone of a table that has projections copies both the
-definitions and the projection parts.) For a manual rebuild, re-run
-`scripts/apply_sql.sh`.
+`sql/*.sql`, so `9-projections.sql` recreates them on each clone. For a
+manual rebuild, re-run `scripts/apply_sql.sh`.
+
+`CLONE AS` depends on the server version:
+
+- **24.8** doesn't parse it (syntax error).
+- **24.10** (checked on 24.10.4) parses it. The clone job's form,
+  `CREATE TABLE dst_db.t CLONE AS src_db.t`, creates the table's structure
+  (including projection definitions) and then fails to copy the data with
+  `Code: 60 ... Table default.t does not exist` whenever `src_db` isn't the
+  session's current database. The empty table is left behind. With `set -e`
+  the client's non-zero exit stops the job, but a retry, an `IF NOT EXISTS`,
+  or a caller that ignores the error proceeds with **empty tables**.
+- **26.2** (plain `MergeTree`) copies the data, the projection definitions
+  and the projection parts.
+
+Because an empty clone would make every count zero rather than fail, the
+clone job (which lives in the k8s deployment repo) should assert after
+cloning that each table's row count matches its source, e.g.
+`SELECT count() FROM dst_db.t` vs `SELECT count() FROM src_db.t`, or
+`total_rows` in `system.tables` for both databases, and fail before
+switching the MCP to the new database.
 
 The file can safely run more than once. `ADD PROJECTION IF NOT EXISTS` does
 nothing when the projection already exists, and `MATERIALIZE PROJECTION` on
@@ -158,8 +188,9 @@ WHERE cancer_study_identifier = 'msk_impact_2017'
   AND hugo_gene_symbol = 'TP53' AND variant_type = 'mutation';
 -- Expect: ReadFromMergeTree (ged_by_study_gene) ... Granules: <small>/<total>
 -- A "Projections:" block lists candidates the optimizer rejected and why.
--- (`projections = 1` needs ClickHouse 25.x+. On 24.8, use `EXPLAIN indexes = 1`;
--- the read step is still named after the chosen projection.)
+-- (`projections = 1` needs ClickHouse 25.x+: 24.8 and 24.10 reject it with
+-- Code 115. There, use `EXPLAIN indexes = 1`; the read step is still named
+-- after the chosen projection.)
 -- A bare count() plan must NOT contain _exact_count_projection /
 -- "Optimized trivial count" next to a projection read; if it does, the
 -- required setting is missing for the user running the query.

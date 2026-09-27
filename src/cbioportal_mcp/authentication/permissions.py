@@ -107,17 +107,32 @@ def _forbidden_privs_present() -> List[str]:
     return bad
 
 
-def _database_has_projections() -> bool:
-    """True if any table in the current database defines a projection.
+def _connection_database() -> str | None:
+    """The database agent SQL runs against: currentDatabase() on the MCP's own
+    connection, which can differ from config.mcp_database when
+    CLICKHOUSE_DATABASE is unset. None if it can't be read."""
+    try:
+        raw = json.loads(run_query("SELECT currentDatabase()"))
+        return str((raw.get("rows") or [[None]])[0][0] or "") or None
+    except ToolError as e:
+        logger.warning("Could not read currentDatabase(): %s", e)
+        return None
 
-    If system.tables can't be read, assume projections exist so the settings
-    check below still runs (fail closed).
+
+def _database_has_projections(database: str | None) -> bool:
+    """True if any table in `database` defines a projection.
+
+    If the database or system.tables can't be read, assume projections exist
+    so the settings check below still runs (fail closed).
     """
+    if database is None:
+        return True
+    literal = database.replace("\\", "\\\\").replace("'", "\\'")
     try:
         raw = json.loads(
             run_query(
                 "SELECT count() FROM system.tables "
-                "WHERE database = currentDatabase() AND create_table_query LIKE '%PROJECTION%'"
+                f"WHERE database = '{literal}' AND create_table_query LIKE '%PROJECTION%'"
             )
         )
     except ToolError as e:
@@ -166,15 +181,30 @@ def ensure_projection_safe_settings(config: McpConfig) -> None:
 
     Raises PermissionError with the profile change that fixes it.
     """
-    if not _database_has_projections():
+    database = _connection_database()
+    if database is not None and database != config.mcp_database:
+        logger.warning(
+            "⚠️ The ClickHouse connection's current database is '%s' but the MCP is "
+            "configured for '%s' (CLICKHOUSE_DATABASE). Agent SQL runs against '%s'; "
+            "the projection check below inspects that database. Set CLICKHOUSE_DATABASE "
+            "so both agree.",
+            database,
+            config.mcp_database,
+            database,
+        )
+    if not _database_has_projections(database):
         return
     problems = _projection_settings_problems()
     if not problems:
-        logger.info("✅ Projection-safe settings are pinned for user '%s'.", config.mcp_user)
+        logger.info(
+            "✅ Projection-safe settings are pinned for user '%s' on DB '%s'.",
+            config.mcp_user,
+            database,
+        )
         return
     pins = ", ".join(f"{k} = {v} CONST" for k, v in PROJECTION_SAFE_SETTINGS.items())
     raise PermissionError(
-        "Settings check failed: the database has projections, and with ClickHouse's "
+        f"Settings check failed: database '{database}' has projections, and with ClickHouse's "
         "default settings some count() queries over-count on projected tables.\n"
         + "".join(f"- {p}\n" for p in problems)
         + "Pin the settings in the MCP user's profile, e.g.:\n"

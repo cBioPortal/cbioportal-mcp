@@ -1,7 +1,10 @@
 """Live parity check for sql/9-projections.sql against a real ClickHouse.
 
-Projections must be invisible to results: every query shape the agent or a
-recipe view can produce has to return exactly what the base table returns.
+Projections must be invisible to results: every deterministic query shape
+the agent or a recipe view can produce has to return what the base table
+returns. (Order-dependent aggregates on ties, such as any() or argMax() over
+tied keys, may legitimately pick a different row, so no shape here uses them
+and every result is compared after ORDER BY ALL.)
 This test builds the real derived-table DDL (tests/fixtures/projection_parity/
 schema.sql), loads synthetic data in several layouts, applies sql/4 and sql/9
 verbatim, and compares each shape with projections on vs. off.
@@ -123,6 +126,11 @@ SHAPES = {
         f"WHERE {S} AND alteration_type = 'MUTATION_EXTENDED'"
     ),
 }
+
+# Layout -> a shape that must over-count at ClickHouse defaults (the known
+# exact-count + normal-projection bug). "aligned" has one profile per study, so
+# base-key granules are single-study and the exact-count path fires.
+DIVERGES_AT_DEFAULTS = {"aligned": "bare count, study"}
 
 # Shapes that must actually be served by a projection under ON_SAFE; parity
 # on a query that never touches a projection proves nothing.
@@ -318,7 +326,7 @@ def database(request, tmp_path_factory):
     return request.param, path
 
 
-def test_projections_return_identical_results(database):
+def test_projections_return_same_results(database):
     layout, path = database
     off = _run_shapes(path, OFF)
     on_safe = _run_shapes(path, ON_SAFE)
@@ -337,6 +345,17 @@ def test_projections_return_identical_results(database):
         print(
             f"| {name} | {cell(off[name])} | {cell(on_default[name])}{default_mark} "
             f"| {cell(on_safe[name])}{safe_mark} |"
+        )
+    if layout in DIVERGES_AT_DEFAULTS:
+        # Canary: this layout reproduces the over-count at ClickHouse defaults.
+        # If it stops diverging, either ClickHouse fixed the bug (then the
+        # startup gate can be revisited) or a data-generator change moved the
+        # layout off the case the fix guards. Either way, the ON_SAFE parity
+        # below would then pass without exercising the fix at all.
+        shape = DIVERGES_AT_DEFAULTS[layout]
+        assert on_default[shape] != off[shape], (
+            f"[{layout}] {shape!r} no longer over-counts at ClickHouse defaults, "
+            "so this test no longer exercises PROJECTION_SAFE_SETTINGS"
         )
     mismatches = [name for name in ALL_SHAPES if on_safe[name] != off[name]]
     assert not mismatches, f"[{layout}] results differ with projections on: {mismatches}"

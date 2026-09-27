@@ -34,7 +34,10 @@
 -- The projections below give ClickHouse alternate sort orders to pick from.
 -- The optimizer uses one for a query only when it holds every column the
 -- query reads and would read fewer marks than the base table; otherwise the
--- query reads the base table.
+-- query reads the base table. Rows come back in a different physical order,
+-- so order-dependent aggregates on ties (any, argMin/argMax, LIMIT without a
+-- tie-breaking ORDER BY) can pick a different row; deterministic queries
+-- return the same result.
 --
 --   ged_by_study_gene   study-first: "gene X in study S" (gene_*_in_study,
 --                       gene_*_in_studies, top_mutated_genes_in_study,

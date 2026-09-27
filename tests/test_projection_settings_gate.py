@@ -16,11 +16,22 @@ from cbioportal_mcp.authentication import permissions
 CONFIG = types.SimpleNamespace(mcp_user="llm_user", mcp_database="db")
 
 
-def _fake_run_query(*, has_projections=1, value=True, override_refused=False, tables_error=False):
+def _fake_run_query(
+    *,
+    has_projections=1,
+    value=True,
+    override_refused=False,
+    tables_error=False,
+    current_db="db",
+):
     calls = []
 
     def run_query(query):
         calls.append(query)
+        if query == "SELECT currentDatabase()":
+            if current_db is None:
+                raise ToolError("connection refused")
+            return json.dumps({"columns": ["currentDatabase()"], "rows": [[current_db]]})
         if "system.tables" in query:
             if tables_error:
                 raise ToolError("Not enough privileges")
@@ -45,7 +56,11 @@ def test_no_projections_skips_settings_checks(monkeypatch):
     fake = _fake_run_query(has_projections=0)
     monkeypatch.setattr(permissions, "run_query", fake)
     permissions.ensure_projection_safe_settings(CONFIG)
-    assert len(fake.calls) == 1
+    assert fake.calls == [
+        "SELECT currentDatabase()",
+        "SELECT count() FROM system.tables "
+        "WHERE database = 'db' AND create_table_query LIKE '%PROJECTION%'",
+    ]
 
 
 @pytest.mark.parametrize("value", [True, 1, "1", "true"])
@@ -85,3 +100,43 @@ def test_startup_gate_runs_projection_check(monkeypatch):
     monkeypatch.setattr(permissions, "run_query", _fake_run_query(value=True))
     with pytest.raises(PermissionError, match="projections"):
         permissions.ensure_db_permissions(CONFIG)
+
+
+def test_projection_check_uses_the_connections_database(monkeypatch, caplog):
+    """CLICKHOUSE_DATABASE unset: config says one DB, the connection uses another.
+
+    Agent SQL runs on the connection's database, so that's the one inspected,
+    and the mismatch is logged loudly.
+    """
+    fake = _fake_run_query(current_db="default", value=True)
+    monkeypatch.setattr(permissions, "run_query", fake)
+    with caplog.at_level("WARNING"), pytest.raises(PermissionError, match="database 'default'"):
+        permissions.ensure_projection_safe_settings(CONFIG)
+    tables_query = next(q for q in fake.calls if "system.tables" in q)
+    assert "database = 'default'" in tables_query
+    assert "'db'" not in tables_query
+    assert "current database is 'default' but the MCP is configured for 'db'" in caplog.text
+
+
+def test_matching_database_logs_no_mismatch(monkeypatch, caplog):
+    monkeypatch.setattr(permissions, "run_query", _fake_run_query(has_projections=0))
+    with caplog.at_level("WARNING"):
+        permissions.ensure_projection_safe_settings(CONFIG)
+    assert "configured for" not in caplog.text
+
+
+def test_unreadable_current_database_fails_closed(monkeypatch):
+    fake = _fake_run_query(current_db=None, value=True)
+    monkeypatch.setattr(permissions, "run_query", fake)
+    with pytest.raises(PermissionError):
+        permissions.ensure_projection_safe_settings(CONFIG)
+    assert not any("system.tables" in q for q in fake.calls)
+
+
+def test_database_name_is_quoted(monkeypatch):
+    fake = _fake_run_query(current_db="it's", has_projections=0)
+    monkeypatch.setattr(permissions, "run_query", fake)
+    permissions.ensure_projection_safe_settings(
+        types.SimpleNamespace(mcp_user="u", mcp_database="it's")
+    )
+    assert "database = 'it\\'s'" in fake.calls[1]
