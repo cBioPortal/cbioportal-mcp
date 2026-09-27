@@ -32,3 +32,22 @@ def test_single_word_and_identifier_searches_still_work(monkeypatch):
     assert _ids(monkeypatch, "breast") == ["brca_tcga"]
     assert _ids(monkeypatch, "nbl_target_2018_pub") == ["nbl_target_2018_pub"]
     assert _ids(monkeypatch, "melanoma") == []
+
+
+def test_no_match_points_to_study_resolution_guide(monkeypatch):
+    server._clear_studies_cache()
+    monkeypatch.setattr(server, "_all_studies_query", _rows)
+    monkeypatch.setattr(server, "_list_available_study_guides", lambda: [])
+    (note,) = server.list_studies.fn(search="OHSU HTAN")
+    assert "cbioportal://study-resolution-guide" in note["note"] and "hta9" in note["note"]
+    assert "note" not in server.list_studies.fn(search="osteosarcoma")[0]
+    assert all("note" not in s for s in server.list_studies.fn())
+
+
+def test_guide_listing_and_query_tool_route_to_the_right_guides():
+    guides = {g["uri"]: g["description"] for g in server.list_guides.fn()}
+    assert "OHSU" in guides["cbioportal://study-resolution-guide"]
+    assert "cancer types" in guides["cbioportal://faq-guide"]
+    assert "ONCOTREE_CODE" in guides["cbioportal://sample-filtering-guide"]
+    query_doc = server.clickhouse_run_select_query.description
+    assert "cbioportal://faq-guide" in query_doc and "ONCOTREE_CODE" in query_doc
