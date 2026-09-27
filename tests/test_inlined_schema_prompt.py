@@ -334,6 +334,65 @@ def _documented_tables() -> set[str]:
     return names
 
 
+def _known_relations() -> set[str]:
+    """Every table in the DDL fixture or created by sql/, plus every view in sql/."""
+    views = {
+        v
+        for path in SQL_DIR.rglob("*.sql")
+        for v in re.findall(r"^CREATE VIEW (?:IF NOT EXISTS )?(\w+)", path.read_text(), re.M)
+    }
+    return set(_all_tables()) | views
+
+
+# Generic stand-ins the prompt uses to describe call syntax, not real relations.
+PLACEHOLDER_RELATIONS = {"view_name"}
+
+
+def _sql_snippets(text: str) -> list[str]:
+    """```sql blocks plus inline `code` spans that read from a relation."""
+    blocks = _code_blocks(text)
+    prose = re.sub(r"```.*?```", "", text, flags=re.S)
+    inline = [
+        s for s in re.findall(r"`([^`\n]+)`", prose) if re.search(r"\b(FROM|JOIN)\b", s, re.I)
+    ]
+    return blocks + inline
+
+
+def _relations_read(snippet: str) -> set[str]:
+    """FROM/JOIN targets of a snippet, minus CTEs it defines."""
+    ctes = set(re.findall(r"\b(\w+)\s+AS\s*\(", snippet, re.I))
+    return set(re.findall(r"\b(?:FROM|JOIN)\s+([A-Za-z_][\w.]*)", snippet, re.I)) - ctes
+
+
+def test_precomputed_views_table_names_only_shipped_views():
+    views = set(_view_bodies())
+    section = _section(_prompt(), "## Precomputed Views")
+    rows = [ln for ln in section.splitlines() if ln.startswith("|")][2:]  # skip header
+    named = []
+    for row in rows:
+        cell = row.split("|")[1]
+        names = re.findall(r"`(\w+)\(", cell)
+        assert names, f"Precomputed Views row names no `view(...)`: {row}"
+        named += names
+
+    assert len(named) >= 14, named
+    unknown = sorted(set(named) - views)
+    assert not unknown, f"Precomputed Views table lists views not created in sql/: {unknown}"
+
+
+def test_recipe_sql_reads_only_existing_relations():
+    known = _known_relations() | PLACEHOLDER_RELATIONS
+    snippets = _sql_snippets(_prompt())
+    for snippet in snippets:
+        unknown = sorted(_relations_read(snippet) - known)
+        assert not unknown, (
+            f"prompt SQL reads from {unknown}, which is not a table in the DDL fixture "
+            f"or a table/view created by sql/:\n{snippet}"
+        )
+    read = set().union(*(_relations_read(s) for s in snippets))
+    assert {"genomic_event_derived", "gene_mutation_frequency_in_study"} <= read, sorted(read)
+
+
 def test_documented_tables_exist_in_ddl():
     documented = _documented_tables()
 
