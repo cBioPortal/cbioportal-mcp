@@ -6,6 +6,7 @@ pin the gate's decision logic against a fake run_query.
 """
 
 import json
+import re
 import types
 
 import pytest
@@ -17,6 +18,13 @@ CONFIG = types.SimpleNamespace(mcp_user="llm_user", mcp_database="db")
 
 # current_db value that makes the fake's SELECT currentDatabase() raise.
 QUERY_FAILS = object()
+
+
+def _queried_database(query):
+    """The database name a system.tables query asks about, unescaped."""
+    m = re.search(r"database = '((?:[^'\\]|\\.)*)'", query)
+    assert m, f"no database literal in {query!r}"
+    return re.sub(r"\\(.)", r"\1", m.group(1))
 
 
 def _fake_run_query(
@@ -38,7 +46,12 @@ def _fake_run_query(
         if "system.tables" in query:
             if tables_error:
                 raise ToolError("Not enough privileges")
-            return json.dumps({"columns": ["count()"], "rows": [[has_projections]]})
+            count = (
+                has_projections.get(_queried_database(query), 0)
+                if isinstance(has_projections, dict)
+                else has_projections
+            )
+            return json.dumps({"columns": ["count()"], "rows": [[count]]})
         if "getSetting" in query and "SETTINGS" in query:
             if override_refused:
                 raise ToolError("Cannot modify setting in readonly mode")
@@ -159,3 +172,35 @@ def test_database_name_is_quoted(monkeypatch):
         types.SimpleNamespace(mcp_user="u", mcp_database="it's")
     )
     assert "database = 'it\\'s'" in fake.calls[1]
+
+
+@pytest.mark.parametrize("current_db", [" db ", "db\t"], ids=["spaces", "tab"])
+def test_padded_database_name_is_used_exactly(monkeypatch, caplog, current_db):
+    """A padded name is a different database from the trimmed one: here the
+    padded database has projections and "db" (the configured name) has none.
+    Normalizing the name would inspect "db", find nothing and start without
+    checking settings."""
+    fake = _fake_run_query(current_db=current_db, has_projections={current_db: 3, "db": 0})
+    monkeypatch.setattr(permissions, "run_query", fake)
+    with caplog.at_level("WARNING"), pytest.raises(PermissionError, match="must be 0"):
+        permissions.ensure_projection_safe_settings(CONFIG)
+    tables_query = next(q for q in fake.calls if "system.tables" in q)
+    assert _queried_database(tables_query) == current_db
+    assert f"current database is {current_db!r} but the MCP is configured for 'db'" in caplog.text
+
+
+@pytest.mark.parametrize("current_db", [" db ", "db\t"], ids=["spaces", "tab"])
+def test_padded_database_name_refuses_through_startup_gate(monkeypatch, current_db):
+    monkeypatch.setattr(permissions, "_check_grant", lambda priv, scope: priv == "SELECT")
+    fake = _fake_run_query(current_db=current_db, has_projections={current_db: 3, "db": 0})
+    monkeypatch.setattr(permissions, "run_query", fake)
+    with pytest.raises(PermissionError, match="must be 0"):
+        permissions.ensure_db_permissions(CONFIG)
+
+
+@pytest.mark.parametrize("current_db", ["it's", "a\\b", " o'k\\ "])
+def test_database_name_round_trips_through_escaping(monkeypatch, current_db):
+    fake = _fake_run_query(current_db=current_db, has_projections=0)
+    monkeypatch.setattr(permissions, "run_query", fake)
+    permissions.ensure_projection_safe_settings(CONFIG)
+    assert _queried_database(fake.calls[1]) == current_db

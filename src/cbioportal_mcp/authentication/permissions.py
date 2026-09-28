@@ -110,7 +110,12 @@ def _forbidden_privs_present() -> List[str]:
 def _connection_database() -> str | None:
     """The database agent SQL runs against: currentDatabase() on the MCP's own
     connection, which can differ from config.mcp_database when
-    CLICKHOUSE_DATABASE is unset. None if it can't be read or is empty."""
+    CLICKHOUSE_DATABASE is unset. None if it can't be read or is empty or
+    whitespace-only.
+
+    A non-empty name is returned exactly as ClickHouse reported it: database
+    names may contain leading/trailing whitespace, and " db " and "db" are
+    different databases, so the name must not be normalized."""
     try:
         raw = json.loads(run_query("SELECT currentDatabase()"))
     except ToolError as e:
@@ -119,7 +124,10 @@ def _connection_database() -> str | None:
     value = (raw.get("rows") or [[None]])[0][0]
     if value is None:
         return None
-    return str(value).strip() or None
+    name = str(value)
+    if not name.strip():
+        return None
+    return name
 
 
 def _database_has_projections(database: str) -> bool:
@@ -195,8 +203,8 @@ def ensure_projection_safe_settings(config: McpConfig) -> None:
         )
     if database != config.mcp_database:
         logger.warning(
-            "⚠️ The ClickHouse connection's current database is '%s' but the MCP is "
-            "configured for '%s' (CLICKHOUSE_DATABASE). Agent SQL runs against '%s'; "
+            "⚠️ The ClickHouse connection's current database is %r but the MCP is "
+            "configured for %r (CLICKHOUSE_DATABASE). Agent SQL runs against %r; "
             "the projection check below inspects that database. Set CLICKHOUSE_DATABASE "
             "so both agree.",
             database,
@@ -215,7 +223,7 @@ def ensure_projection_safe_settings(config: McpConfig) -> None:
         return
     pins = ", ".join(f"{k} = {v} CONST" for k, v in PROJECTION_SAFE_SETTINGS.items())
     raise PermissionError(
-        f"Settings check failed: database '{database}' has projections, and with ClickHouse's "
+        f"Settings check failed: database {database!r} has projections, and with ClickHouse's "
         "default settings some count() queries over-count on projected tables.\n"
         + "".join(f"- {p}\n" for p in problems)
         + "Pin the settings in the MCP user's profile, e.g.:\n"
