@@ -15,6 +15,9 @@ from cbioportal_mcp.authentication import permissions
 
 CONFIG = types.SimpleNamespace(mcp_user="llm_user", mcp_database="db")
 
+# current_db value that makes the fake's SELECT currentDatabase() raise.
+QUERY_FAILS = object()
+
 
 def _fake_run_query(
     *,
@@ -29,7 +32,7 @@ def _fake_run_query(
     def run_query(query):
         calls.append(query)
         if query == "SELECT currentDatabase()":
-            if current_db is None:
+            if current_db is QUERY_FAILS:
                 raise ToolError("connection refused")
             return json.dumps({"columns": ["currentDatabase()"], "rows": [[current_db]]})
         if "system.tables" in query:
@@ -125,12 +128,28 @@ def test_matching_database_logs_no_mismatch(monkeypatch, caplog):
     assert "configured for" not in caplog.text
 
 
-def test_unreadable_current_database_fails_closed(monkeypatch):
-    fake = _fake_run_query(current_db=None, value=True)
+@pytest.mark.parametrize(
+    "current_db",
+    [QUERY_FAILS, None, "", "   "],
+    ids=["query-error", "null", "empty", "whitespace"],
+)
+def test_unknown_database_refuses_start_even_with_safe_locked_settings(monkeypatch, current_db):
+    """Settings pinned to 0 and locked would pass the settings check, but with
+    no known database the gate can't tell whether projections are in play, so
+    it must refuse before running any other check."""
+    fake = _fake_run_query(current_db=current_db, value=False, override_refused=True)
     monkeypatch.setattr(permissions, "run_query", fake)
-    with pytest.raises(PermissionError):
+    with pytest.raises(PermissionError, match="could not determine"):
         permissions.ensure_projection_safe_settings(CONFIG)
-    assert not any("system.tables" in q for q in fake.calls)
+    assert fake.calls == ["SELECT currentDatabase()"]
+
+
+def test_unknown_database_refuses_through_startup_gate(monkeypatch):
+    monkeypatch.setattr(permissions, "_check_grant", lambda priv, scope: priv == "SELECT")
+    fake = _fake_run_query(current_db=QUERY_FAILS, value=False, override_refused=True)
+    monkeypatch.setattr(permissions, "run_query", fake)
+    with pytest.raises(PermissionError, match="could not determine"):
+        permissions.ensure_db_permissions(CONFIG)
 
 
 def test_database_name_is_quoted(monkeypatch):

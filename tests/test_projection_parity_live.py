@@ -132,6 +132,31 @@ SHAPES = {
 # base-key granules are single-study and the exact-count path fires.
 DIVERGES_AT_DEFAULTS = {"aligned": "bare count, study"}
 
+
+def check_overcount_canary(label: str, off: str, on_default: str, on_safe: str) -> None:
+    """Assert the canary shape really over-counts at ClickHouse defaults.
+
+    Plain inequality isn't enough: an error string ("ERROR 60"), an empty
+    result or an undercount also differ from the baseline and would pass
+    without the bug being reproduced. So all three results must be one
+    non-negative integer, the default-settings count must be strictly larger
+    than the baseline, and the count with PROJECTION_SAFE_SETTINGS must equal
+    it.
+    """
+    counts = {}
+    for mode, out in (("off", off), ("on_default", on_default), ("on_safe", on_safe)):
+        text = out.strip()
+        assert re.fullmatch(r"\d+", text), f"{label}: {mode} is not a single count: {text!r}"
+        counts[mode] = int(text)
+    assert counts["on_default"] > counts["off"], (
+        f"{label}: no over-count at ClickHouse defaults ({counts['on_default']} vs baseline "
+        f"{counts['off']}), so this test no longer exercises PROJECTION_SAFE_SETTINGS"
+    )
+    assert counts["on_safe"] == counts["off"], (
+        f"{label}: PROJECTION_SAFE_SETTINGS gives {counts['on_safe']}, " f"baseline {counts['off']}"
+    )
+
+
 # Shapes that must actually be served by a projection under ON_SAFE; parity
 # on a query that never touches a projection proves nothing.
 MUST_USE = {
@@ -353,9 +378,8 @@ def test_projections_return_same_results(database):
         # layout off the case the fix guards. Either way, the ON_SAFE parity
         # below would then pass without exercising the fix at all.
         shape = DIVERGES_AT_DEFAULTS[layout]
-        assert on_default[shape] != off[shape], (
-            f"[{layout}] {shape!r} no longer over-counts at ClickHouse defaults, "
-            "so this test no longer exercises PROJECTION_SAFE_SETTINGS"
+        check_overcount_canary(
+            f"[{layout}] {shape!r}", off[shape], on_default[shape], on_safe[shape]
         )
     mismatches = [name for name in ALL_SHAPES if on_safe[name] != off[name]]
     assert not mismatches, f"[{layout}] results differ with projections on: {mismatches}"

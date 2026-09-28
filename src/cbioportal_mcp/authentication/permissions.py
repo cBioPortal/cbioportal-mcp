@@ -110,23 +110,24 @@ def _forbidden_privs_present() -> List[str]:
 def _connection_database() -> str | None:
     """The database agent SQL runs against: currentDatabase() on the MCP's own
     connection, which can differ from config.mcp_database when
-    CLICKHOUSE_DATABASE is unset. None if it can't be read."""
+    CLICKHOUSE_DATABASE is unset. None if it can't be read or is empty."""
     try:
         raw = json.loads(run_query("SELECT currentDatabase()"))
-        return str((raw.get("rows") or [[None]])[0][0] or "") or None
     except ToolError as e:
         logger.warning("Could not read currentDatabase(): %s", e)
         return None
+    value = (raw.get("rows") or [[None]])[0][0]
+    if value is None:
+        return None
+    return str(value).strip() or None
 
 
-def _database_has_projections(database: str | None) -> bool:
+def _database_has_projections(database: str) -> bool:
     """True if any table in `database` defines a projection.
 
-    If the database or system.tables can't be read, assume projections exist
-    so the settings check below still runs (fail closed).
+    If system.tables can't be read, assume projections exist so the settings
+    check below still runs (fail closed).
     """
-    if database is None:
-        return True
     literal = database.replace("\\", "\\\\").replace("'", "\\'")
     try:
         raw = json.loads(
@@ -179,10 +180,20 @@ def _projection_settings_problems() -> List[str]:
 def ensure_projection_safe_settings(config: McpConfig) -> None:
     """Refuse to serve a database with projections unless results stay exact.
 
-    Raises PermissionError with the profile change that fixes it.
+    Raises PermissionError with the profile change that fixes it, or when the
+    connection's database can't be determined: without it there is no way to
+    know whether the database agent SQL runs against has projections, so the
+    server must not start even if the settings look safe.
     """
     database = _connection_database()
-    if database is not None and database != config.mcp_database:
+    if database is None:
+        raise PermissionError(
+            "Settings check failed: could not determine the ClickHouse connection's "
+            "current database (SELECT currentDatabase() failed or returned nothing), "
+            "so the projection check cannot run. Check CLICKHOUSE_DATABASE and that "
+            f"user '{config.mcp_user}' can connect."
+        )
+    if database != config.mcp_database:
         logger.warning(
             "⚠️ The ClickHouse connection's current database is '%s' but the MCP is "
             "configured for '%s' (CLICKHOUSE_DATABASE). Agent SQL runs against '%s'; "
