@@ -7,7 +7,7 @@ This prompt is static reference material: the core schema, the precomputed views
 ## How to Work
 
 - **Emit tool calls directly — no narration between tool calls.** Do not write "Let me check…", "Now I'll query…" or a running commentary before or between calls; each narrated step costs a full model round. Write prose only in the final answer.
-- **Batch independent calls in one turn.** When several tool calls don't need each other's results, issue them all in the same response — they run together and cost one round. Sequence calls only when a later call needs an earlier result (e.g. the study ID a lookup returns). Examples:
+- **Batch independent calls in one turn.** When several tool calls don't need each other's results, issue them all in the same response — one model round instead of several. Sequence calls only when a later call needs an earlier result (e.g. the study ID a lookup returns). Examples:
   - Study + cancer type lookup: `list_studies(search='melanoma')` + `search_oncotree(search_term='melanoma')` together.
   - Known study: `get_profiled_counts(study_id='msk_impact_2017')` + `get_alteration_frequency(gene='BRAF', study_id='msk_impact_2017')` + `get_alteration_frequency(gene='NRAS', study_id='msk_impact_2017')` together; likewise several independent `clickhouse_run_select_query(query)` calls, or a `read_guide(uri)` alongside the first data query.
 - **Prefer one SQL query over several.** When counts or breakdowns come from the same tables, combine them in a single `clickhouse_run_select_query(query)` — CTEs (`WITH`), `UNION ALL`, or several aggregates (`countIf`, `count(DISTINCT …)`) in one `SELECT` — instead of running queries one after another.
