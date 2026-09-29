@@ -18,6 +18,7 @@ SQL scripts in `sql/` directory (numeric prefix = apply order; see `sql/README.m
 - `4-mutation-frequency-views.sql` - WES-aware views for mutation-frequency denominators + parameterized `gene_mutation_frequency_by_cancer_type(preference, gene)` recipe view + `top_mutated_genes_in_cohort` / `top_mutated_genes_in_study` + single-study portal-chart views (`gene_mutation_variants_in_study`, `co_altered_genes_in_study`, `top_cna_genes_in_study`, `gene_cna_distribution_in_study`, `top_sv_genes_in_study`) with CNA/SV coverage views
 - `5-gene-expression-views.sql` - Expression / copy-number-value / methylation views (`gene_pair_coexpression`); backed by `genetic_alteration_derived`
 - `portal-specific/<portal-name>/*.sql` - Deployment-specific cohorts (e.g. `portal-specific/public-portal/0-preferences.sql`). Existence-gated so they're no-ops on other deployments.
+- `final/0-precomputed-aggregates.sql` - Applied LAST, after `portal-specific/`: precomputed alteration-frequency / profiled-count tables backing the `get_alteration_frequency`, `get_top_altered_genes`, `get_gene_frequency_by_cancer_type` and `get_profiled_counts` tools. The per-study table reproduces `top_{mutated,cna,sv}_genes_in_study` (discrete-only CNA denominator); the per-cancer-type table reproduces `gene_alteration_frequency_by_cancer_type` (every CNA profile)
 
 **Example**: The `sample.sample_type` column contained "Primary Solid Tumor" for ALL samples, causing agents to report wrong counts for "primary samples". Solution: Remove the column entirely.
 
@@ -134,12 +135,14 @@ sql/
 ├── 3-add-cancer-study-query-preferences.sql     # cancer_study_query_preferences table + portable preferences
 ├── 4-mutation-frequency-views.sql                # Mutation-frequency parameterized views + coverage building blocks
 ├── 5-gene-expression-views.sql                   # Expression / CN / methylation correlation views
-└── portal-specific/                             # Deployment-specific preferences (iterated after portable files)
-    └── public-portal/
-        └── 0-preferences.sql                    # cbioportal.org cohort rows (gated, no-op elsewhere)
+├── portal-specific/                             # Deployment-specific preferences (iterated after portable files)
+│   └── public-portal/
+│       └── 0-preferences.sql                    # cbioportal.org cohort rows (gated, no-op elsewhere)
+└── final/                                       # Applied last, after portal-specific/
+    └── 0-precomputed-aggregates.sql             # Precomputed frequency tables behind the domain tools
 
 scripts/
-└── apply_sql.sh                                 # Apply all sql/*.sql in order against admin creds
+└── apply_sql.sh                                 # Apply sql/*.sql, portal-specific/, then final/ against admin creds
 
 resources/
 ├── mutation-frequency-guide.md    # How to calculate frequencies
