@@ -40,8 +40,48 @@ from cbioportal_mcp.telemetry import (
     dogstatsd_metrics_configured,
     traced_db_query,
 )
+from cbioportal_mcp.metadata_cache import MetadataCache  # noqa: E402 (after LLMObs.enable)
 
 logger = logging.getLogger(__name__)
+
+# Schema listings and generated study guides only change when the database is
+# refreshed; see metadata_cache for the TTL knob. Only successes are stored.
+_schema_cache = MetadataCache()
+_study_guide_cache = MetadataCache()
+
+
+def _clear_schema_cache() -> None:
+    """Reset cached table lists and column descriptions. Test hook; not used at runtime."""
+    _schema_cache.clear()
+
+
+def _clear_study_guide_cache() -> None:
+    """Reset cached dynamic study guides. Test hook; not used at runtime."""
+    _study_guide_cache.clear()
+
+
+def _cache_get(cache: MetadataCache, key):
+    """Return a cached value, or None on a miss or any cache failure.
+
+    The cache is only an optimization: a failure inside it must never turn an
+    otherwise successful tool call into an error, so it is logged and bypassed.
+    """
+    try:
+        value = cache.get(key)
+    except Exception:
+        logger.debug("metadata cache get failed for %r; bypassing", key, exc_info=True)
+        return None
+    if value is not None:
+        logger.debug("metadata cache hit: %r", key)
+    return value
+
+
+def _cache_put(cache: MetadataCache, key, value) -> None:
+    """Store a successful result; a cache failure is logged and ignored."""
+    try:
+        cache.put(key, value)
+    except Exception:
+        logger.debug("metadata cache put failed for %r; bypassing", key, exc_info=True)
 
 # Regex pattern for valid cBioPortal study identifiers
 # Allows alphanumeric characters, underscores, and hyphens
@@ -481,7 +521,7 @@ def clickhouse_run_select_query(
         result = run_select_query(
             query, query_label="clickhouse_run_select_query", max_rows=safe_max_rows
         )
-        logger.debug(f"clickhouse_run_select_query returns {result}")
+        logger.debug("clickhouse_run_select_query returns %s", result)
         if len(result) > safe_max_rows:
             return {
                 "rows": result[:safe_max_rows],
@@ -518,12 +558,17 @@ def clickhouse_list_tables() -> dict[str, list[dict] | str]:
     logger.info(f"clickhouse_list_tables: called")
 
     try:
+        cached = _cache_get(_schema_cache, ("tables",))
+        if cached is not None:
+            return cached
         from mcp_clickhouse.mcp_server import run_query
         raw = json.loads(run_query("SHOW TABLES"))
         rows = raw.get("rows", [])
         result = [{"name": row[0]} for row in rows if row]
-        logger.debug(f"clickhouse_list_tables result: {result}")
-        return {"tables": result}
+        logger.debug("clickhouse_list_tables result: %s", result)
+        response = {"tables": result}
+        _cache_put(_schema_cache, ("tables",), response)
+        return response
     except Exception as e:
         error_message = str(e)
         logger.error(f"clickhouse_list_tables: {error_message}")
@@ -547,6 +592,9 @@ def clickhouse_list_table_columns(table: str) -> dict[str, list[dict] | str]:
 
     try:
         table = _validate_table_name(table)
+        cached = _cache_get(_schema_cache, ("columns", table))
+        if cached is not None:
+            return cached
         from mcp_clickhouse.mcp_server import run_query
         raw = json.loads(run_query(f"DESCRIBE TABLE {table}"))
         columns_list = raw.get("columns", [])
@@ -565,8 +613,10 @@ def clickhouse_list_table_columns(table: str) -> dict[str, list[dict] | str]:
             if len(row) > comment_idx and row[comment_idx]:
                 entry["comment"] = row[comment_idx]
             result.append(entry)
-        logger.debug(f"clickhouse_list_table_columns result: {result}")
-        return {"columns": result}
+        logger.debug("clickhouse_list_table_columns result: %s", result)
+        response = {"columns": result}
+        _cache_put(_schema_cache, ("columns", table), response)
+        return response
     except Exception as e:
         error_message = str(e)
         logger.error(f"clickhouse_list_table_columns: {error_message}")
@@ -874,6 +924,12 @@ def get_study_guide(study_id: str) -> str:
         logger.info(f"Loaded static study guide for {study_id}")
         return static_guide
 
+    # Study ids match case-insensitively below, so key the cache the same way.
+    cache_key = study_id.lower()
+    cached = _cache_get(_study_guide_cache, cache_key)
+    if cached is not None:
+        return cached
+
     # Fall back to dynamic generation
     logger.info(f"Generating dynamic study guide for {study_id}")
     try:
@@ -1074,7 +1130,9 @@ WHERE cancer_study_identifier = '{study_id}'
 ```
 """)
         
-        return "\n".join(guide_sections)
+        guide = "\n".join(guide_sections)
+        _cache_put(_study_guide_cache, cache_key, guide)
+        return guide
         
     except Exception as e:
         logger.error(f"get_study_guide error: {e}")

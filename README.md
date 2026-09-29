@@ -45,6 +45,9 @@ export CLICKHOUSE_MCP_SERVER_TRANSPORT=stdio # or http or sse
 # Set when reverse-proxied behind a prefix so trailing-slash redirects
 # include it, e.g. /db/mcp when served at https://host/db/mcp.
 # export CLICKHOUSE_MCP_HTTP_PATH=/db/mcp
+# Optional: how long table lists, column descriptions, and generated study
+# guides are cached in-process (default: 3600; 0 disables the cache).
+# export CBIOPORTAL_MCP_METADATA_CACHE_TTL_SECONDS=3600
 ```
 
 ### Datadog Tool Metrics

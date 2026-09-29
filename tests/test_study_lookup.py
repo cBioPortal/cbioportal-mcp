@@ -10,6 +10,13 @@ import pytest
 from cbioportal_mcp import server
 
 
+@pytest.fixture(autouse=True)
+def clear_guide_cache():
+    server._clear_study_guide_cache()
+    yield
+    server._clear_study_guide_cache()
+
+
 def _guide(study_id: str) -> str:
     """Call the tool's underlying function; @mcp.tool wraps it in a FunctionTool."""
     return server.get_study_guide.fn(study_id)
