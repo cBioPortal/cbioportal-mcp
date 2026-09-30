@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from cbioportal_mcp import domain_tools, server
+from cbioportal_mcp.result_format import table_to_records as _records
 
 REPO = Path(__file__).resolve().parent.parent
 AGGREGATES_SQL = REPO / "sql" / "final" / "0-precomputed-aggregates.sql"
@@ -257,7 +258,7 @@ def test_precomputed_hit_does_not_run_live_sql(db):
 
     assert db.labels == [f"{LABEL}.precomputed"]
     assert out["source"] == "precomputed" and out["built_at"] == "2026-09-26 13:05:00"
-    assert out["rows"] == [
+    assert _records(out) == [
         {
             "hugo_gene_symbol": "TP53",
             "altered_samples": 30,
@@ -280,14 +281,14 @@ def test_missing_table_falls_back_to_live_sql_with_a_flag(db):
     assert db.labels == [f"{LABEL}.precomputed", f"{LABEL}.live"]
     assert out["source"] == "live"
     assert "unavailable" in out["fallback_reason"]
-    assert out["rows"][0]["frequency_pct"] == 25.0
+    assert _records(out)[0]["frequency_pct"] == 25.0
 
 
 def test_empty_table_falls_back_to_live_sql(db):
     out = domain_tools.get_top_altered_genes.fn("study_a", "mutation", 5)
     assert db.labels == [f"{LABEL}.precomputed", f"{LABEL}.live"]
     assert out["source"] == "live" and "no precomputed rows" in out["fallback_reason"]
-    assert out["rows"] == [] and "note" in out
+    assert _records(out) == [] and "note" in out
 
 
 def test_live_failure_is_reported_not_raised(db):
@@ -318,8 +319,8 @@ def test_alteration_frequency_any_returns_breakdown_from_precomputed(db):
 
     assert db.labels == [f"{AF}.precomputed"]
     assert out["gene"] == "TP53" and out["source"] == "precomputed"
-    assert [r["alteration_type"] for r in out["rows"]] == ["any", "mutation"]
-    assert out["rows"][0]["frequency_pct"] == 40.0
+    assert [r["alteration_type"] for r in _records(out)] == ["any", "mutation"]
+    assert _records(out)[0]["frequency_pct"] == 40.0
 
 
 def test_alteration_frequency_unaltered_type_falls_back_for_the_denominator(db):
@@ -337,7 +338,7 @@ def test_alteration_frequency_unaltered_type_falls_back_for_the_denominator(db):
 
     assert db.labels == [f"{AF}.precomputed", f"{AF}.live"]
     assert out["source"] == "live"
-    assert out["rows"] == [
+    assert _records(out) == [
         {
             "alteration_type": "amplification",
             "altered_samples": 0,
@@ -385,7 +386,7 @@ def test_gene_frequency_by_cancer_type_shapes_rows(db):
     ]
     out = domain_tools.get_gene_frequency_by_cancer_type.fn("tp53")
     assert out["gene"] == "TP53" and out["preference"] == "pan_cancer_tcga"
-    assert out["rows"][0]["frequency_pct"] == 25.0
+    assert _records(out)[0]["frequency_pct"] == 25.0
     assert "< 50 profiled samples omitted" in out["provenance"]
 
 
@@ -499,4 +500,40 @@ def test_cohort_built_but_nothing_reaches_threshold_stays_precomputed(db):
     db.answers[f"{label}.precomputed"] = [_ct("Breast Cancer", 3, 40)]
     out = domain_tools.get_gene_frequency_by_cancer_type.fn("TP53", "mutation", 10, "cohort_x")
     assert db.labels == [f"{label}.precomputed"]
-    assert out["source"] == "precomputed" and out["rows"] == []
+    assert out["source"] == "precomputed" and _records(out) == []
+
+
+# --- result format -------------------------------------------------------------
+
+
+def _top_genes_answer(db):
+    db.answers[f"{LABEL}.precomputed"] = [
+        {"hugo_gene_symbol": "TP53", "altered_samples": 30, "profiled_samples": 100},
+        {"hugo_gene_symbol": "KRAS", "altered_samples": 3, "profiled_samples": 7},
+    ]
+
+
+def test_compact_rows_are_arrays_aligned_with_columns(db):
+    _top_genes_answer(db)
+    out = domain_tools.get_top_altered_genes.fn("study_a", "mutation", 5)
+
+    assert out["columns"] == list(domain_tools.TOP_GENES_COLUMNS)
+    assert out["rows"] == [["TP53", 30, 100, 30.0], ["KRAS", 3, 7, 42.9]]
+
+
+def test_compact_empty_result_still_lists_columns(db):
+    out = domain_tools.get_top_altered_genes.fn("study_a", "mutation", 5)
+    assert out["columns"] == list(domain_tools.TOP_GENES_COLUMNS) and out["rows"] == []
+
+
+def test_legacy_format_returns_the_same_numbers_as_dicts(db, monkeypatch):
+    _top_genes_answer(db)
+    compact = domain_tools.get_top_altered_genes.fn("study_a", "mutation", 5)
+    monkeypatch.setenv("CBIOPORTAL_MCP_RESULT_FORMAT", "rows")
+    legacy = domain_tools.get_top_altered_genes.fn("study_a", "mutation", 5)
+
+    assert "columns" not in legacy
+    assert legacy["rows"] == _records(compact)
+    assert {k: v for k, v in compact.items() if k not in ("columns", "rows")} == {
+        k: v for k, v in legacy.items() if k != "rows"
+    }
