@@ -11,12 +11,14 @@ still be running.
 CBIOPORTAL_MCP_MAX_CONCURRENT_QUERIES (default 4) sets that pool size. It must
 be applied before mcp_clickhouse.mcp_server is imported, which is why the
 package __init__ calls configure_mcp_clickhouse_workers(). If mcp_clickhouse
-was imported first and its pool has a different size, that call raises rather
-than let the server run above the cap.
+was imported first and its pool has a different size, importing the package
+only warns (a library consumer may not run queries at all), but the server's
+main() calls verify_query_pool() and refuses to start.
 
-Both settings may come from the .env file mcp-clickhouse loads at import; the
-cap is read from the same file (real environment variables win, as they do
-for mcp-clickhouse).
+Both settings may come from the .env file mcp-clickhouse loads at import. We
+read them from the same file with the same python-dotenv semantics, so we see
+exactly the values mcp-clickhouse's load_dotenv() puts in the environment
+(real environment variables win, and ${VAR} expands against them).
 
 When every worker is busy, a new query waits in the pool's queue. That wait
 counts against mcp-clickhouse's query timeout (CLICKHOUSE_MCP_QUERY_TIMEOUT,
@@ -30,7 +32,7 @@ import logging
 import os
 import sys
 
-from dotenv import dotenv_values
+from dotenv.main import DotEnv
 
 logger = logging.getLogger(__name__)
 
@@ -65,8 +67,19 @@ def _setting(name: str, dotenv: dict) -> str | None:
 
 
 def _dotenv() -> dict:
+    """The values mcp-clickhouse's load_dotenv() would set from its .env.
+
+    load_dotenv() is DotEnv(path, override=False).set_as_environment_variables()
+    (utf-8, interpolation on). Taking the same DotEnv's dict() gives the same
+    ${VAR} expansion; real environment variables still take precedence in
+    _setting(), just as set_as_environment_variables() skips them. Nothing is
+    written to os.environ here. (dotenv_values() would expand with
+    override=True semantics, letting .env values shadow real ones.)
+    """
     path = mcp_clickhouse_dotenv_path()
-    return dotenv_values(path) if path else {}
+    if not path:
+        return {}
+    return DotEnv(path, encoding="utf-8", interpolate=True, override=False).dict()
 
 
 def max_concurrent_queries_from_env(dotenv: dict | None = None) -> int:
@@ -86,10 +99,23 @@ def max_concurrent_queries_from_env(dotenv: dict | None = None) -> int:
 
 
 def query_pool_size() -> int:
-    """The actual worker count of mcp-clickhouse's query pool."""
-    from mcp_clickhouse.mcp_server import QUERY_EXECUTOR
+    """The actual worker count of mcp-clickhouse's query pool.
 
-    return QUERY_EXECUTOR._max_workers
+    Raises RuntimeError if mcp-clickhouse no longer exposes the pool the way
+    0.5.0 does (a module-level ThreadPoolExecutor named QUERY_EXECUTOR), since
+    then the cap can't be verified.
+    """
+    import mcp_clickhouse.mcp_server as mcp_server
+
+    size = getattr(getattr(mcp_server, "QUERY_EXECUTOR", None), "_max_workers", None)
+    if not isinstance(size, int):
+        raise RuntimeError(
+            "Cannot verify the ClickHouse query cap: this mcp-clickhouse version has no "
+            "QUERY_EXECUTOR thread pool with _max_workers (checked against 0.5.0). "
+            "Check how it bounds concurrent queries and update "
+            "cbioportal_mcp/query_concurrency.py, or pin mcp-clickhouse==0.5.0."
+        )
+    return size
 
 
 def verify_query_pool(cap: int) -> None:
@@ -110,7 +136,10 @@ def configure_mcp_clickhouse_workers() -> int:
     dotenv = _dotenv()
     cap = max_concurrent_queries_from_env(dotenv)
     if "mcp_clickhouse.mcp_server" in sys.modules:
-        verify_query_pool(cap)
+        try:
+            verify_query_pool(cap)
+        except RuntimeError as exc:
+            logger.warning("%s The server will refuse to start.", exc)
         return cap
     existing = _setting(_WORKERS_ENV, dotenv)
     if existing is not None and existing != str(cap):

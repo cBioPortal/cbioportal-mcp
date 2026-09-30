@@ -406,9 +406,12 @@ def test_max_concurrent_queries_env(monkeypatch, caplog, raw, expected, warns):
     assert ("Invalid CBIOPORTAL_MCP_MAX_CONCURRENT_QUERIES" in caplog.text) == warns
 
 
+# Prints the pool size, whether mcp-clickhouse loaded the .env (a sentinel it
+# sets), and the cap as it ends up in the environment after that load.
 _POOL_SIZE = (
     "import cbioportal_mcp, os, mcp_clickhouse.mcp_server as ms; "
-    "print(ms.QUERY_EXECUTOR._max_workers, os.environ.get('DOTENV_SENTINEL'))"
+    "print(ms.QUERY_EXECUTOR._max_workers, os.environ.get('DOTENV_SENTINEL'), "
+    "os.environ.get('CBIOPORTAL_MCP_MAX_CONCURRENT_QUERIES'))"
 )
 
 
@@ -417,8 +420,8 @@ def _pool_size_in_fresh_process(tmp_path, env, dotenv=None):
         (tmp_path / ".env").write_text(dotenv)
     done = _fresh_python(_POOL_SIZE, env, tmp_path)
     assert done.returncode == 0, done.stderr
-    size, sentinel = done.stdout.strip().splitlines()[-1].split()
-    return int(size), sentinel, done.stderr
+    size, sentinel, env_cap = done.stdout.strip().splitlines()[-1].split()
+    return int(size), sentinel, env_cap, done.stderr
 
 
 @pytest.mark.parametrize(
@@ -434,7 +437,7 @@ def _pool_size_in_fresh_process(tmp_path, env, dotenv=None):
     ],
 )
 def test_package_import_sizes_mcp_clickhouse_query_pool(tmp_path, env, expected, warning):
-    size, _, stderr = _pool_size_in_fresh_process(tmp_path, env)
+    size, _, _, stderr = _pool_size_in_fresh_process(tmp_path, env)
     assert size == expected
     if warning:
         assert warning in stderr
@@ -459,7 +462,7 @@ def test_package_import_sizes_mcp_clickhouse_query_pool(tmp_path, env, expected,
 def test_cap_is_read_from_the_dotenv_mcp_clickhouse_loads(
     tmp_path, dotenv, env, expected, warning
 ):
-    size, sentinel, stderr = _pool_size_in_fresh_process(
+    size, sentinel, _, stderr = _pool_size_in_fresh_process(
         tmp_path, env, dotenv + "DOTENV_SENTINEL=loaded\n"
     )
     assert size == expected
@@ -467,6 +470,31 @@ def test_cap_is_read_from_the_dotenv_mcp_clickhouse_loads(
     assert sentinel == "loaded"
     if warning:
         assert warning in stderr
+
+
+@pytest.mark.parametrize(
+    "env, expected",
+    [
+        # Regression: a real POOL_VALUE wins over the .env one when ${POOL_VALUE}
+        # expands, exactly as in mcp-clickhouse's load_dotenv(override=False).
+        ({"POOL_VALUE": "1"}, 1),
+        # Without a real one, the .env's own POOL_VALUE is used.
+        ({}, 8),
+    ],
+)
+def test_dotenv_interpolation_matches_what_mcp_clickhouse_loads(tmp_path, env, expected):
+    assert "POOL_VALUE" in env or "POOL_VALUE" not in os.environ
+    size, sentinel, env_cap, _ = _pool_size_in_fresh_process(
+        tmp_path,
+        env,
+        "POOL_VALUE=8\n"
+        "CBIOPORTAL_MCP_MAX_CONCURRENT_QUERIES=${POOL_VALUE}\n"
+        "DOTENV_SENTINEL=loaded\n",
+    )
+    assert sentinel == "loaded"
+    # The cap we applied equals the one mcp-clickhouse put in the environment.
+    assert env_cap == str(expected)
+    assert size == expected
 
 
 def test_dotenv_resolution_matches_mcp_clickhouse():
@@ -504,7 +532,7 @@ def test_script_mode_ignores_a_cwd_dotenv_like_mcp_clickhouse(tmp_path):
         capture_output=True, text=True, timeout=120,
     )
     assert done.returncode == 0, done.stderr
-    size, sentinel = done.stdout.strip().splitlines()[-1].split()
+    size, sentinel, _ = done.stdout.strip().splitlines()[-1].split()
     expected_path = query_concurrency.mcp_clickhouse_dotenv_path()
     if expected_path:
         pytest.skip(f"a .env above the installed mcp_clickhouse applies: {expected_path}")
@@ -512,18 +540,43 @@ def test_script_mode_ignores_a_cwd_dotenv_like_mcp_clickhouse(tmp_path):
     assert int(size) == 4
 
 
-def test_importing_mcp_clickhouse_first_fails_loudly(tmp_path):
-    """mcp_clickhouse imported first sizes its pool to its default of 10;
-    with a cap of 1 the package must refuse to load, naming the real size."""
+_MAIN_WITH_MCP_CLICKHOUSE_FIRST = """
+import mcp_clickhouse.mcp_server
+from cbioportal_mcp import server
+server.main()
+"""
+
+
+def test_server_refuses_to_start_on_a_mis_sized_pool(tmp_path):
+    """mcp_clickhouse imported first sizes its pool to its default of 10; with a
+    cap of 1 the server entry point must exit, naming the real size and fixes."""
     done = _fresh_python(
-        "import mcp_clickhouse.mcp_server\nimport cbioportal_mcp.server",
+        _MAIN_WITH_MCP_CLICKHOUSE_FIRST,
         {"CBIOPORTAL_MCP_MAX_CONCURRENT_QUERIES": "1"},
         tmp_path,
     )
-    assert done.returncode != 0
-    assert "RuntimeError: mcp-clickhouse's query pool has 10 workers" in done.stderr
+    assert done.returncode == 2, done.stderr[-2000:]
+    assert "mcp-clickhouse's query pool has 10 workers" in done.stderr
     assert "CBIOPORTAL_MCP_MAX_CONCURRENT_QUERIES=1" in done.stderr
     assert "set CLICKHOUSE_MCP_MAX_WORKERS=1" in done.stderr
+    assert "ClickHouse query pool:" not in done.stderr
+
+
+def test_library_import_after_mcp_clickhouse_only_warns(tmp_path):
+    """A library consumer that imported mcp_clickhouse first can still import
+    the package; the warning names the pool's actual size."""
+    done = _fresh_python(
+        "import mcp_clickhouse.mcp_server\n"
+        "import cbioportal_mcp.telemetry\n"
+        "import cbioportal_mcp.server\n"
+        "print('imported')",
+        {"CBIOPORTAL_MCP_MAX_CONCURRENT_QUERIES": "1"},
+        tmp_path,
+    )
+    assert done.returncode == 0, done.stderr[-2000:]
+    assert done.stdout.strip().endswith("imported")
+    assert "query pool has 10 workers" in done.stderr
+    assert "The server will refuse to start." in done.stderr
 
 
 def test_importing_mcp_clickhouse_first_with_a_matching_pool_stays_capped(tmp_path):
@@ -539,19 +592,38 @@ def test_importing_mcp_clickhouse_first_with_a_matching_pool_stays_capped(tmp_pa
     assert out["started"] == 1 and out["peak"] == 1 and out["peak_final"] == 1, out
 
 
-def test_late_configuration_checks_the_actual_pool(monkeypatch):
+def test_late_configuration_checks_the_actual_pool(monkeypatch, caplog):
     ms = mcp_clickhouse.mcp_server
     monkeypatch.setenv("CBIOPORTAL_MCP_MAX_CONCURRENT_QUERIES", "3")
     monkeypatch.setenv("CLICKHOUSE_MCP_MAX_WORKERS", "3")  # env agrees; the pool doesn't
     wrong = concurrent.futures.ThreadPoolExecutor(max_workers=7)
     monkeypatch.setattr(ms, "QUERY_EXECUTOR", wrong)
+    with caplog.at_level(logging.WARNING, logger=query_concurrency.logger.name):
+        assert query_concurrency.configure_mcp_clickhouse_workers() == 3
+    assert "query pool has 7 workers" in caplog.text
     with pytest.raises(RuntimeError, match="query pool has 7 workers"):
-        query_concurrency.configure_mcp_clickhouse_workers()
+        query_concurrency.verify_query_pool(3)
     right = concurrent.futures.ThreadPoolExecutor(max_workers=3)
     monkeypatch.setattr(ms, "QUERY_EXECUTOR", right)
-    assert query_concurrency.configure_mcp_clickhouse_workers() == 3
+    query_concurrency.verify_query_pool(3)
     wrong.shutdown()
     right.shutdown()
+
+
+@pytest.mark.parametrize("pool", [None, object()], ids=["no-QUERY_EXECUTOR", "no-_max_workers"])
+def test_unrecognised_mcp_clickhouse_pool_stops_the_server(monkeypatch, caplog, pool):
+    ms = mcp_clickhouse.mcp_server
+    if pool is None:
+        monkeypatch.delattr(ms, "QUERY_EXECUTOR")
+    else:
+        monkeypatch.setattr(ms, "QUERY_EXECUTOR", pool)
+    with pytest.raises(RuntimeError, match="Cannot verify the ClickHouse query cap"):
+        query_concurrency.query_pool_size()
+    with caplog.at_level(logging.CRITICAL, logger=server.logger.name):
+        with pytest.raises(SystemExit) as exit_info:
+            server.main()
+    assert exit_info.value.code == 2
+    assert "pin mcp-clickhouse==0.5.0" in caplog.text
 
 
 def test_db_spans_attach_to_their_own_tool_span(slow_clickhouse):

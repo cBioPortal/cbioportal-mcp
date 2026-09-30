@@ -316,7 +316,11 @@ def main():
 
     # Refuse to serve if mcp-clickhouse's query pool doesn't match the cap
     # (see query_concurrency); report the pool's actual size, not the env.
-    query_concurrency.verify_query_pool(MAX_CONCURRENT_QUERIES)
+    try:
+        query_concurrency.verify_query_pool(MAX_CONCURRENT_QUERIES)
+    except RuntimeError as e:
+        logger.critical("❌ %s", e)
+        sys.exit(2)
     logger.info(
         "ClickHouse query pool: %d workers", query_concurrency.query_pool_size()
     )
