@@ -14,7 +14,8 @@ Environment:
     CBIOPORTAL_MCP_MAX_RESULT_ROWS: default max_rows for
         clickhouse_run_select_query (default 100).
     CBIOPORTAL_MCP_MAX_CELL_CHARS: longest text cell kept in a compact SELECT
-        result before it is cut (default 500; 0 disables the cut).
+        result before it is cut (default 2000; 0 disables the cut). Only
+        strings are cut; numbers, arrays and maps are always sent intact.
 
 Settings are read on each call, so they can be changed without a restart in
 tests; an invalid value logs a warning and uses the default.
@@ -22,7 +23,6 @@ tests; an invalid value logs a warning and uses the default.
 
 import datetime
 import decimal
-import json
 import logging
 import os
 from typing import Any, Iterable, Sequence
@@ -38,7 +38,7 @@ LEGACY = "rows"
 RESULT_FORMATS = (COMPACT, LEGACY)
 
 DEFAULT_MAX_RESULT_ROWS = 100
-DEFAULT_MAX_CELL_CHARS = 500
+DEFAULT_MAX_CELL_CHARS = 2000
 
 
 def result_format() -> str:
@@ -57,7 +57,7 @@ def is_compact() -> bool:
 
 def _int_env(name: str, default: int, minimum: int) -> int:
     raw = os.getenv(name)
-    if raw is None or not raw.strip():
+    if raw is None:
         return default
     try:
         value = int(raw)
@@ -98,42 +98,58 @@ def _jsonable(value: Any) -> Any:
 
 
 def _cut_cell(value: Any, limit: int) -> tuple[Any, bool]:
-    """Cut a cell longer than limit characters; returns (value, was_cut).
+    """Cut a string longer than limit characters; returns (value, was_cut).
 
-    Arrays and maps are measured as compact JSON and, when too long, replaced
-    by their cut JSON text.
+    Only strings are cut. Numbers, arrays and maps are returned intact: a
+    cut number is a wrong number, and a cut array silently drops values.
     """
-    if not limit or value is None or isinstance(value, (bool, int, float)):
+    if not limit or not isinstance(value, str) or len(value) <= limit:
         return value, False
-    if isinstance(value, str):
-        text = value
-    else:
-        text = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
-    if len(text) <= limit:
-        return value, False
-    return f"{text[:limit]}…[+{len(text) - limit} chars]", True
+    return f"{value[:limit]}…[+{len(value) - limit} chars]", True
 
 
 def compact_table(
     columns: Sequence[str], rows: Iterable[Sequence[Any]], *, cell_limit: int = 0
 ) -> dict:
-    """{"columns": [...], "rows": [[...], ...]} with an optional per-cell cap.
+    """{"columns": [...], "rows": [[...], ...]} with an optional per-cell text cap.
 
-    Adds "cut_cells": n when any cell was cut.
+    Adds "cut_cells": {column: number of cells cut} when any text cell was cut.
     """
+    columns = list(columns)
     out_rows = []
-    cut = 0
+    cut: dict[str, int] = {}
     for row in rows:
         out_row = []
-        for value in row:
+        for i, value in enumerate(row):
             value, was_cut = _cut_cell(_jsonable(value), cell_limit)
-            cut += was_cut
+            if was_cut:
+                name = columns[i] if i < len(columns) else str(i)
+                cut[name] = cut.get(name, 0) + 1
             out_row.append(value)
         out_rows.append(out_row)
-    table = {"columns": list(columns), "rows": out_rows}
+    table = {"columns": columns, "rows": out_rows}
     if cut:
         table["cut_cells"] = cut
     return table
+
+
+def cut_cell_note(cut_cells: dict[str, int], limit: int) -> str:
+    """How to read the rest of cut text cells, with offsets that won't be cut again.
+
+    Python counts characters, so the SQL uses the UTF-8 character functions
+    (ClickHouse's plain substring/length count bytes). Each chunk is exactly
+    limit characters, which fits under the cap.
+    """
+    col = next(iter(cut_cells))
+    names = ", ".join(cut_cells)
+    return (
+        f"Text cells longer than {limit} chars in column(s) {names} were cut after char "
+        f"{limit} (marked '…[+N chars]', N = chars omitted). To read the rest, select the "
+        f"column's lengthUTF8() and then fetch the next chunks with 1-based offsets, e.g. "
+        f"substringUTF8({col}, {limit + 1}, {limit}), then "
+        f"substringUTF8({col}, {2 * limit + 1}, {limit}), and so on; each chunk of {limit} "
+        "chars is returned whole. Filter to the row(s) you need first."
+    )
 
 
 def records_to_table(records: Sequence[dict], columns: Sequence[str] | None = None) -> dict:
@@ -177,8 +193,5 @@ def select_result(
             f"SQL, or pass a larger max_rows (up to {hard_max_rows}) only if every row is needed."
         )
     if result.get("cut_cells"):
-        result["cell_note"] = (
-            f"{result['cut_cells']} cell(s) longer than {max_cell_chars()} chars were cut "
-            "(marked '…[+N chars]'); select substring(col, 1, N) or a narrower column to see more."
-        )
+        result["cell_note"] = cut_cell_note(result["cut_cells"], max_cell_chars())
     return result

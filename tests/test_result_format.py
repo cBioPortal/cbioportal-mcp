@@ -3,6 +3,8 @@
 import datetime
 import decimal
 import json
+import logging
+import re
 
 import pydantic_core
 import pytest
@@ -59,14 +61,68 @@ def test_long_cells_are_cut_and_counted(monkeypatch):
     monkeypatch.setenv(rf.MAX_CELL_CHARS_ENV, "8")
     out = _select(["t", "n"], [["abcdefghij", 123456789012], ["short", 1]])
     assert out["rows"] == [["abcdefgh…[+2 chars]", 123456789012], ["short", 1]]
-    assert out["cut_cells"] == 1
-    assert "8 chars" in out["cell_note"]
+    assert out["cut_cells"] == {"t": 1}
+    assert "8 chars in column(s) t" in out["cell_note"]
+    assert "substringUTF8(t, 9, 8)" in out["cell_note"]
+    assert "substringUTF8(t, 17, 8)" in out["cell_note"]
+    assert "lengthUTF8" in out["cell_note"]
 
 
-def test_long_array_cell_is_cut_as_json_text():
-    out = rf.compact_table(["arr"], [[list(range(20))], [[1, 2]]], cell_limit=10)
-    assert out["rows"][0] == ["[0,1,2,3,4…[+41 chars]"]
-    assert out["rows"][1] == [[1, 2]]
+def test_numbers_are_never_cut(monkeypatch):
+    monkeypatch.setenv(rf.MAX_CELL_CHARS_ENV, "3")
+    row = [123456789012, 3.14159265358979, 2**64, True]
+    assert _select(list("abcd"), [row])["rows"] == [row]
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        list(range(200)),
+        (1, "x" * 50, 3),
+        {"k": "v" * 50, "n": 12345678},
+        [["nested", list(range(40))], {"m": [1.5, None]}],
+    ],
+)
+def test_structured_cells_are_sent_intact(monkeypatch, value):
+    monkeypatch.setenv(rf.MAX_CELL_CHARS_ENV, "10")
+    out = _select(["s"], [[value]])
+    expected = list(value) if isinstance(value, tuple) else value
+    assert out["rows"] == [[expected]]
+    assert "cut_cells" not in out and "cell_note" not in out
+
+
+def test_cut_cells_are_counted_per_column(monkeypatch):
+    monkeypatch.setenv(rf.MAX_CELL_CHARS_ENV, "4")
+    out = _select(["a", "b"], [["xxxxx", "ok"], ["yyyyy", "zzzzz"], ["ok", "ok"]])
+    assert out["cut_cells"] == {"a": 2, "b": 1}
+    assert "column(s) a, b" in out["cell_note"]
+
+
+def _substring_utf8(text, offset, length):
+    """ClickHouse substringUTF8: 1-based, counts characters."""
+    return text[offset - 1 : offset - 1 + length]
+
+
+@pytest.mark.parametrize("limit", [8, rf.DEFAULT_MAX_CELL_CHARS])
+def test_following_the_cell_note_recovers_the_whole_text(monkeypatch, limit):
+    """Fetch the tail the way the note says; no chunk is cut again."""
+    monkeypatch.setenv(rf.MAX_CELL_CHARS_ENV, str(limit))
+    original = "".join(chr(0x61 + i % 26) if i % 7 else "é" for i in range(limit * 3 + 5))
+    out = _select(["description"], [[original]])
+    head = out["rows"][0][0]
+    assert head.endswith(f"…[+{len(original) - limit} chars]")
+    note = out["cell_note"]
+    first = re.search(r"substringUTF8\(description, (\d+), (\d+)\)", note)
+    offset, length = int(first.group(1)), int(first.group(2))
+    assert (offset, length) == (limit + 1, limit)
+
+    recovered = head[:limit]
+    while offset <= len(original):  # lengthUTF8(description) tells the model when to stop
+        chunk = _select(["chunk"], [[_substring_utf8(original, offset, length)]])
+        assert "cut_cells" not in chunk
+        recovered += chunk["rows"][0][0]
+        offset += length
+    assert recovered == original
 
 
 def test_cell_limit_zero_disables_cutting(monkeypatch):
@@ -76,8 +132,9 @@ def test_cell_limit_zero_disables_cutting(monkeypatch):
 
 
 def test_default_cell_limit():
-    out = _select(["t"], [["x" * (rf.DEFAULT_MAX_CELL_CHARS + 1)]])
-    assert out["cut_cells"] == 1
+    assert rf.DEFAULT_MAX_CELL_CHARS == 2000
+    assert "cut_cells" not in _select(["t"], [["x" * 2000]])
+    assert _select(["t"], [["x" * 2001]])["cut_cells"] == {"t": 1}
 
 
 def test_truncation_reports_returned_rows_without_inventing_a_total():
@@ -123,10 +180,16 @@ def test_result_format_env(monkeypatch, value, expected):
     assert rf.result_format() == expected
 
 
-@pytest.mark.parametrize("value", ["abc", "-1", ""])
-def test_invalid_cell_limit_falls_back_to_default(monkeypatch, value):
+@pytest.mark.parametrize("value", ["abc", "-1", "", "   "])
+def test_invalid_int_env_warns_and_falls_back_to_default(monkeypatch, caplog, value):
     monkeypatch.setenv(rf.MAX_CELL_CHARS_ENV, value)
-    assert rf.max_cell_chars() == rf.DEFAULT_MAX_CELL_CHARS
+    monkeypatch.setenv(rf.MAX_RESULT_ROWS_ENV, value)
+    with caplog.at_level(logging.WARNING, logger=rf.logger.name):
+        assert rf.max_cell_chars() == rf.DEFAULT_MAX_CELL_CHARS
+        assert rf.default_max_rows() == rf.DEFAULT_MAX_RESULT_ROWS
+    warned = [r.getMessage() for r in caplog.records]
+    assert any(rf.MAX_CELL_CHARS_ENV in m for m in warned)
+    assert any(rf.MAX_RESULT_ROWS_ENV in m for m in warned)
 
 
 def test_compact_is_smaller_than_list_of_dicts():

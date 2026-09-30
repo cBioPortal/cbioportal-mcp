@@ -86,7 +86,8 @@ def test_select_query_cuts_long_cells(monkeypatch):
     result = server.clickhouse_run_select_query.fn("SELECT t FROM t")
 
     assert result["rows"] == [["x" * 10 + "…[+15 chars]"], ["short"]]
-    assert result["cut_cells"] == 1 and "10 chars" in result["cell_note"]
+    assert result["cut_cells"] == {"t": 1}
+    assert "substringUTF8(t, 11, 10)" in result["cell_note"]
 
 
 def test_select_query_passes_max_rows_through_to_run_select_query(monkeypatch):

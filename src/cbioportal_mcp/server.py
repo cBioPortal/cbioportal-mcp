@@ -513,7 +513,8 @@ DEFAULT_SELECT_MAX_ROWS = min(result_format.default_max_rows(), MAX_SELECT_MAX_R
           than max_rows, "truncated": true and a "note" are added and row_count is the number
           returned (the exact total is not computed) — aggregate or filter instead of paging.
           Text cells over {result_format.max_cell_chars() or "unlimited"} chars end in
-          "…[+N chars]" and "cut_cells" counts them.
+          "…[+N chars]"; "cut_cells" counts them per column and "cell_note" gives the
+          substringUTF8 offsets that fetch the rest. Numbers and arrays are never cut.
         - On failure: an object with a single field "error_message" containing a string describing the error.
 """
 )
