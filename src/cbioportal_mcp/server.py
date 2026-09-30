@@ -89,48 +89,11 @@ def _cache_put(cache: MetadataCache, key, value) -> None:
 
 # FastMCP 2.x calls a sync tool function directly on the event loop, so a
 # batch of tool calls the client sends concurrently would otherwise run one
-# after another. Tools that do I/O are wrapped with run_off_event_loop so each
-# call runs on a worker thread and a batch costs roughly its slowest call.
-DEFAULT_MAX_CONCURRENT_QUERIES = 4
-
-
-def _max_concurrent_queries_from_env() -> int:
-    raw = os.getenv("CBIOPORTAL_MCP_MAX_CONCURRENT_QUERIES")
-    if raw is None:
-        return DEFAULT_MAX_CONCURRENT_QUERIES
-    try:
-        value = int(raw)
-    except ValueError:
-        value = 0
-    if value >= 1:
-        return value
-    logger.warning(
-        "Invalid CBIOPORTAL_MCP_MAX_CONCURRENT_QUERIES=%r; using %s",
-        raw,
-        DEFAULT_MAX_CONCURRENT_QUERIES,
-    )
-    return DEFAULT_MAX_CONCURRENT_QUERIES
-
-
-MAX_CONCURRENT_QUERIES = _max_concurrent_queries_from_env()
-# Bounds in-flight ClickHouse queries per server process (tool calls and the
-# background list_studies refresh alike) so a large batch can't flood the
-# database. A threading semaphore because queries run on worker threads.
-_query_slots = threading.BoundedSemaphore(MAX_CONCURRENT_QUERIES)
-
-
-def _run_clickhouse_query(query: str) -> str:
-    """Run one query through mcp-clickhouse, holding a concurrency slot.
-
-    mcp-clickhouse's run_query keeps its own query timeout, KILL QUERY on
-    timeout, and per-request client settings. Its cached clients are created
-    with autogenerate_session_id=False, so concurrent queries on a shared
-    client don't collide on a ClickHouse session lock.
-    """
-    from mcp_clickhouse.mcp_server import run_query
-
-    with _query_slots:
-        return run_query(query)
+# after another. Every tool that does I/O (ClickHouse or the filesystem) is
+# wrapped with run_off_event_loop so each call runs on a worker thread and a
+# batch costs roughly its slowest call. How many ClickHouse queries run at
+# once is bounded separately, by mcp-clickhouse's query pool (see
+# query_concurrency).
 
 
 def run_off_event_loop(fn):
@@ -633,7 +596,8 @@ def clickhouse_list_tables() -> dict[str, list[dict] | str]:
         cached = _cache_get(_schema_cache, ("tables",))
         if cached is not None:
             return cached
-        raw = json.loads(_run_clickhouse_query("SHOW TABLES"))
+        from mcp_clickhouse.mcp_server import run_query
+        raw = json.loads(run_query("SHOW TABLES"))
         rows = raw.get("rows", [])
         result = [{"name": row[0]} for row in rows if row]
         logger.debug("clickhouse_list_tables result: %s", result)
@@ -667,7 +631,8 @@ def clickhouse_list_table_columns(table: str) -> dict[str, list[dict] | str]:
         cached = _cache_get(_schema_cache, ("columns", table))
         if cached is not None:
             return cached
-        raw = json.loads(_run_clickhouse_query(f"DESCRIBE TABLE {table}"))
+        from mcp_clickhouse.mcp_server import run_query
+        raw = json.loads(run_query(f"DESCRIBE TABLE {table}"))
         columns_list = raw.get("columns", [])
         rows = raw.get("rows", [])
         # DESCRIBE TABLE returns: name, type, default_type, default_expression, comment, ...
@@ -715,13 +680,15 @@ def run_select_query(query: str, *, query_label: str, max_rows: int | None = Non
     Returns:
         list: A list of rows, where each row is a dictionary with column names as keys and corresponding values.
     """
+    from mcp_clickhouse.mcp_server import run_query
+
     # DB-level read-only permissions (enforced on startup) prevent non-SELECT queries,
     # so we don't need application-level query filtering. This allows CTEs (WITH ... AS).
     if max_rows is not None:
         query = _with_row_cap(query, max_rows)
     logger.debug("run_select_query: delegate the query to run_query tool of ClickHouse MCP")
     with traced_db_query(query_label):
-        ch_query_result = json.loads(_run_clickhouse_query(query))
+        ch_query_result = json.loads(run_query(query))
         result = zip_select_query_result(ch_query_result)
     return result
 
@@ -751,6 +718,7 @@ def zip_select_query_result(ch_query_result) -> list[dict]:
 
 # Resource Access Tools for AI Agents
 @mcp.tool()
+@run_off_event_loop
 def list_guides() -> list[dict]:
     """List all available query guides with their URIs and descriptions.
 
@@ -828,6 +796,7 @@ def list_guides() -> list[dict]:
 
 
 @mcp.tool()
+@run_off_event_loop
 def read_guide(uri: str) -> str:
     """Read the content of a specific guide by URI.
 
@@ -872,6 +841,7 @@ def read_guide(uri: str) -> str:
 
 
 @mcp.tool()
+@run_off_event_loop
 def get_general_guide(name: str) -> str:
     """Get a deployment-specific general guide by name.
 
@@ -1389,6 +1359,7 @@ def list_studies(search: str = None, limit: int = 20, verbose: bool = False) -> 
 
 
 @mcp.tool()
+@run_off_event_loop
 def list_study_guides() -> list[str]:
     """List all studies that have pre-generated guides available.
 

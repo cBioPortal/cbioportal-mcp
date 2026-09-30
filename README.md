@@ -49,7 +49,10 @@ export CLICKHOUSE_MCP_SERVER_TRANSPORT=stdio # or http or sse
 # guides are cached in-process (default: 3600; 0 disables the cache).
 # export CBIOPORTAL_MCP_METADATA_CACHE_TTL_SECONDS=3600
 # Optional: most ClickHouse queries one server process runs at once, across
-# concurrent tool calls (default: 4).
+# concurrent tool calls (default: 4). Sets mcp-clickhouse's query pool
+# (CLICKHOUSE_MCP_MAX_WORKERS, which it overrides). A query waiting for a free
+# slot counts against CLICKHOUSE_MCP_QUERY_TIMEOUT, so a saturated pool yields
+# a timeout error rather than a hung request.
 # export CBIOPORTAL_MCP_MAX_CONCURRENT_QUERIES=4
 ```
 

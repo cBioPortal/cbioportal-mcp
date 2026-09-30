@@ -5,20 +5,27 @@ of tool calls sent concurrently used to cost the sum of its calls. Tools that
 do I/O are now wrapped with server.run_off_event_loop. These tests drive the
 real FastMCP server through an in-process client.
 
+How many ClickHouse queries execute at once is bounded by mcp-clickhouse's
+query pool, sized from CBIOPORTAL_MCP_MAX_CONCURRENT_QUERIES (see
+cbioportal_mcp.query_concurrency).
+
 The real-ClickHouse tests start a native `clickhouse server` (no Docker) and
 are skipped when the binary isn't installed.
 """
 
 import asyncio
+import concurrent.futures
 import json
 import logging
 import os
 import shutil
 import socket
 import subprocess
+import sys
 import threading
 import time
 import urllib.request
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import mcp_clickhouse.mcp_server
@@ -29,7 +36,7 @@ from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
-from cbioportal_mcp import server
+from cbioportal_mcp import query_concurrency, server
 from cbioportal_mcp.telemetry import TelemetryMiddleware
 
 DELAY = 0.4
@@ -45,6 +52,10 @@ OFFLOADED_TOOLS = [
     "get_top_altered_genes",
     "get_gene_frequency_by_cancer_type",
     "get_profiled_counts",
+    "list_guides",
+    "read_guide",
+    "get_general_guide",
+    "list_study_guides",
 ]
 
 
@@ -169,20 +180,195 @@ def test_a_raising_tool_fails_alone(slow_clickhouse, monkeypatch):
     assert results[1].structured_content == {"rows": [{"n": 1}]}
 
 
-def test_semaphore_bounds_queries_in_flight(slow_clickhouse, monkeypatch):
-    monkeypatch.setattr(server, "_query_slots", threading.BoundedSemaphore(2))
+class FakeClickHouseClient:
+    """A clickhouse-connect stand-in behind mcp-clickhouse's real run_query().
+
+    query() sleeps for `delay`, or blocks until `release` is set when `hang`
+    is true. KILL QUERY (command()) fails outright or takes longer than
+    mcp-clickhouse's 1s bounded cancellation wait. Records the peak number of
+    query() calls executing at once, which is what the cap has to bound.
+    """
+
+    server_settings = {}
+
+    def __init__(self, *, delay=0.0, hang=False, kill="fail"):
+        self.delay = delay
+        self.hang = hang
+        self.kill = kill
+        self.release = threading.Event()
+        self.lock = threading.Lock()
+        self.executing = 0
+        self.peak = 0
+        self.started = 0
+        self.kills = 0
+
+    def query(self, query, settings=None):
+        with self.lock:
+            self.executing += 1
+            self.started += 1
+            self.peak = max(self.peak, self.executing)
+        try:
+            if self.hang:
+                self.release.wait(30)
+            else:
+                time.sleep(self.delay)
+            return SimpleNamespace(column_names=["n"], result_rows=[[1]])
+        finally:
+            with self.lock:
+                self.executing -= 1
+
+    def command(self, sql):
+        assert sql.startswith("KILL QUERY")
+        with self.lock:
+            self.kills += 1
+        if self.kill == "fail":
+            raise RuntimeError("KILL QUERY failed")
+        time.sleep(3)
+
+
+@pytest.fixture
+def query_pool(monkeypatch):
+    """Point mcp-clickhouse at a fake client and a query pool of a given size.
+
+    The pool stands in for the QUERY_EXECUTOR that
+    configure_mcp_clickhouse_workers() sizes in production (proven by
+    test_package_import_sizes_mcp_clickhouse_query_pool).
+    """
+    ms = mcp_clickhouse.mcp_server
+    monkeypatch.setenv("CLICKHOUSE_HOST", "fake-clickhouse")
+    monkeypatch.setenv("CLICKHOUSE_USER", "fake")
+    monkeypatch.setenv("CLICKHOUSE_PASSWORD", "fake")
+    monkeypatch.setenv("CLICKHOUSE_MCP_QUERY_TIMEOUT", "1")
+    pools = []
+
+    def install(cap, client):
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=cap)
+        pools.append((pool, client))
+        monkeypatch.setattr(ms, "QUERY_EXECUTOR", pool)
+        monkeypatch.setattr(
+            ms,
+            "_acquire_clickhouse_client",
+            lambda _config: ms._ClientCacheEntry(
+                client=client, last_used=time.time(), active_users=1
+            ),
+        )
+        return client
+
+    server._clear_schema_cache()
+    yield install
+    for pool, client in pools:
+        client.release.set()
+        pool.shutdown(wait=True)
+    server._clear_schema_cache()
+
+
+def test_cap_bounds_queries_in_flight(query_pool, monkeypatch):
+    # Queue wait counts against the query timeout, so leave room for 3 rounds.
+    monkeypatch.setenv("CLICKHOUSE_MCP_QUERY_TIMEOUT", "5")
+    client = query_pool(2, FakeClickHouseClient(delay=DELAY))
     elapsed, results = asyncio.run(
         _timed_batch(server.mcp, [_select(f"SELECT {i}") for i in range(5)])
     )
     assert all(r.structured_content == {"rows": [{"n": 1}]} for r in results)
-    assert slow_clickhouse.peak == 2
+    assert client.peak == 2
     # 5 queries, 2 at a time: three rounds, not one and not five.
-    assert 3 * DELAY * 0.95 <= elapsed < 4 * DELAY
+    assert 3 * DELAY * 0.95 <= elapsed < 4 * DELAY + 0.5
 
 
-def test_configured_cap_applies_to_tool_calls(slow_clickhouse):
-    asyncio.run(_timed_batch(server.mcp, [_select(f"SELECT {i}") for i in range(8)]))
-    assert slow_clickhouse.peak == min(8, server.MAX_CONCURRENT_QUERIES)
+# Runs in a fresh process so the server is configured exactly as in production:
+# CBIOPORTAL_MCP_MAX_CONCURRENT_QUERIES is read at import and mcp-clickhouse's
+# real QUERY_EXECUTOR is used; only the ClickHouse client is faked.
+_HUNG_QUERY_SCENARIO = """
+import asyncio, json, sys, time
+sys.path.insert(0, {tests_dir!r})
+from cbioportal_mcp import server
+import mcp_clickhouse.mcp_server as ms
+from fastmcp import Client
+from test_parallel_tool_exec import FakeClickHouseClient
+
+mode = sys.argv[1]
+client = FakeClickHouseClient(hang=True, kill="fail" if mode == "sequential" else "slow")
+ms._acquire_clickhouse_client = lambda _config: ms._ClientCacheEntry(
+    client=client, last_used=time.time(), active_users=1
+)
+select = server.clickhouse_run_select_query.fn.__wrapped__
+errors, durations = [], []
+started = time.perf_counter()
+if mode == "sequential":
+    for i in range(3):
+        t = time.perf_counter()
+        errors.append(select(f"SELECT {{i}}").get("error_message", ""))
+        durations.append(time.perf_counter() - t)
+else:
+    async def batch():
+        async with Client(server.mcp) as c:
+            return await asyncio.gather(*(
+                c.call_tool("clickhouse_run_select_query", {{"query": f"SELECT {{i}}"}})
+                for i in range(5)
+            ))
+    errors = [r.structured_content.get("error_message", "") for r in asyncio.run(batch())]
+elapsed = time.perf_counter() - started
+after_timeouts = {{"peak": client.peak, "started": client.started, "kills": client.kills}}
+client.release.set()
+client.hang = False
+deadline = time.monotonic() + 5
+while client.executing and time.monotonic() < deadline:
+    time.sleep(0.05)
+recovered = select("SELECT 99")
+print(json.dumps({{
+    **after_timeouts, "peak_final": client.peak, "errors": errors,
+    "durations": durations, "elapsed": elapsed, "recovered": recovered,
+}}))
+"""
+
+
+def _run_hung_query_scenario(mode, cap):
+    tests_dir = os.path.dirname(os.path.abspath(__file__))
+    env = {
+        k: v for k, v in os.environ.items()
+        if k not in ("CBIOPORTAL_MCP_MAX_CONCURRENT_QUERIES", "CLICKHOUSE_MCP_MAX_WORKERS")
+    }
+    env.update(
+        CBIOPORTAL_MCP_MAX_CONCURRENT_QUERIES=str(cap),
+        CLICKHOUSE_MCP_QUERY_TIMEOUT="1",
+        CLICKHOUSE_HOST="fake-clickhouse",
+        CLICKHOUSE_USER="fake",
+        CLICKHOUSE_PASSWORD="fake",
+    )
+    done = subprocess.run(
+        [sys.executable, "-c", _HUNG_QUERY_SCENARIO.format(tests_dir=tests_dir), mode],
+        env=env, capture_output=True, text=True, timeout=120,
+    )
+    assert done.returncode == 0, done.stderr[-3000:]
+    return json.loads(done.stdout.strip().splitlines()[-1])
+
+
+def test_timed_out_queries_keep_their_slot_until_they_stop():
+    """Regression: the cap must follow the query that is really executing.
+
+    cap=1: the first query times out and survives a failed KILL QUERY, so it
+    keeps running. The next two calls must not start queries beside it; they
+    wait in the pool, then fail with mcp-clickhouse's timeout instead of
+    hanging. Once the hung query stops, its slot is free again.
+    """
+    out = _run_hung_query_scenario("sequential", cap=1)
+    assert all("timed out" in e for e in out["errors"]), out
+    assert out["started"] == 1 and out["peak"] == 1 and out["kills"] == 1, out
+    assert all(d < 4 for d in out["durations"]), out
+    assert out["recovered"] == {"rows": [{"n": 1}]}
+    assert out["peak_final"] == 1
+
+
+def test_concurrent_batch_with_slow_kill_never_exceeds_the_cap():
+    """cap=2, five concurrent calls through the MCP client, every query hangs
+    and KILL QUERY is slower than mcp-clickhouse's cancellation wait."""
+    out = _run_hung_query_scenario("batch", cap=2)
+    assert all("timed out" in e for e in out["errors"]), out
+    assert out["started"] == 2 and out["peak"] == 2, out
+    # Bounded: the 1s query timeout plus mcp-clickhouse's 1s cancellation wait.
+    assert out["elapsed"] < 4, out
+    assert out["recovered"] == {"rows": [{"n": 1}]}
+    assert out["peak_final"] == 2
 
 
 @pytest.mark.parametrize(
@@ -195,9 +381,57 @@ def test_max_concurrent_queries_env(monkeypatch, caplog, raw, expected, warns):
         monkeypatch.delenv("CBIOPORTAL_MCP_MAX_CONCURRENT_QUERIES", raising=False)
     else:
         monkeypatch.setenv("CBIOPORTAL_MCP_MAX_CONCURRENT_QUERIES", raw)
-    with caplog.at_level(logging.WARNING, logger=server.logger.name):
-        assert server._max_concurrent_queries_from_env() == expected
+    with caplog.at_level(logging.WARNING, logger=query_concurrency.logger.name):
+        assert query_concurrency.max_concurrent_queries_from_env() == expected
     assert ("Invalid CBIOPORTAL_MCP_MAX_CONCURRENT_QUERIES" in caplog.text) == warns
+
+
+def _pool_size_in_fresh_process(env):
+    code = (
+        "import cbioportal_mcp, mcp_clickhouse.mcp_server as ms; "
+        "print(ms.QUERY_EXECUTOR._max_workers)"
+    )
+    clean = {
+        k: v
+        for k, v in os.environ.items()
+        if k not in ("CBIOPORTAL_MCP_MAX_CONCURRENT_QUERIES", "CLICKHOUSE_MCP_MAX_WORKERS")
+    }
+    done = subprocess.run(
+        [sys.executable, "-c", code],
+        env={**clean, **env},
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert done.returncode == 0, done.stderr
+    return int(done.stdout.strip().splitlines()[-1]), done.stderr
+
+
+@pytest.mark.parametrize(
+    "env, expected, warning",
+    [
+        ({}, 4, None),
+        ({"CBIOPORTAL_MCP_MAX_CONCURRENT_QUERIES": "3"}, 3, None),
+        (
+            {"CBIOPORTAL_MCP_MAX_CONCURRENT_QUERIES": "3", "CLICKHOUSE_MCP_MAX_WORKERS": "10"},
+            3,
+            "CLICKHOUSE_MCP_MAX_WORKERS=10 is overridden",
+        ),
+    ],
+)
+def test_package_import_sizes_mcp_clickhouse_query_pool(env, expected, warning):
+    size, stderr = _pool_size_in_fresh_process(env)
+    assert size == expected
+    if warning:
+        assert warning in stderr
+
+
+def test_late_configuration_warns_instead_of_pretending(monkeypatch, caplog):
+    monkeypatch.setenv("CLICKHOUSE_MCP_MAX_WORKERS", "10")
+    with caplog.at_level(logging.WARNING, logger=query_concurrency.logger.name):
+        query_concurrency.configure_mcp_clickhouse_workers()
+    assert "imported before cbioportal_mcp" in caplog.text
+    assert os.environ["CLICKHOUSE_MCP_MAX_WORKERS"] == "10"
 
 
 def test_db_spans_attach_to_their_own_tool_span(slow_clickhouse):
@@ -337,8 +571,14 @@ def test_a_session_client_cannot_run_concurrent_queries(real_clickhouse):
 N_REAL = 8
 
 
+def _real_query_pool(monkeypatch, size):
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=size)
+    monkeypatch.setattr(mcp_clickhouse.mcp_server, "QUERY_EXECUTOR", pool)
+    return pool
+
+
 def test_concurrent_queries_against_real_clickhouse(real_clickhouse, monkeypatch):
-    monkeypatch.setattr(server, "_query_slots", threading.BoundedSemaphore(N_REAL))
+    _real_query_pool(monkeypatch, N_REAL)
     calls = [_select(f"SELECT {i} AS i, sleep({DELAY}) AS s") for i in range(N_REAL)]
     elapsed, results = asyncio.run(_timed_batch(server.mcp, calls))
 
@@ -355,7 +595,7 @@ def test_concurrent_queries_against_real_clickhouse(real_clickhouse, monkeypatch
 
 
 def test_cap_bounds_real_queries(real_clickhouse, monkeypatch):
-    monkeypatch.setattr(server, "_query_slots", threading.BoundedSemaphore(4))
+    _real_query_pool(monkeypatch, 4)
     calls = [_select(f"SELECT {i} AS i, sleep({DELAY}) AS s") for i in range(N_REAL)]
     elapsed, results = asyncio.run(_timed_batch(server.mcp, calls))
     assert all("rows" in r.structured_content for r in results)
