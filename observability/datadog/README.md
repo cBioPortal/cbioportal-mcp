@@ -5,6 +5,16 @@ These definitions consume the span tags emitted by `TelemetryMiddleware`
 `mcp.client_kind`, `mcp.session.id`, `enduser.id`, `network.client.ip`,
 `mcp.tool.name`, `mcp.tool.success`.
 
+The same server also emits a Datadog **LLM Observability** tool span per tool
+call, named `mcp.tool.<tool_name>`. Its LLMObs tags are underscored — `usr_id`,
+`mcp_client_kind`, `mcp_client_name`, `mcp_session_id` (plus `ml_app`, `service`,
+`env`) — because in the production export mode (agentless, APM tracing on)
+ddtrace rewrites dots in LLMObs tag keys to underscores, and the server sends
+them underscored so the names are identical in every mode. Use those names in
+LLM Observability queries; the dotted names above are for span/APM queries.
+The LLMObs span also records the tool arguments as input, the result content as
+output, and, for a failed call, the error type, message and stack.
+
 They were written and JSON-validated locally but **not applied against a live
 Datadog account** — this environment has no `DD_API_KEY`/`DD_APP_KEY`. Apply
 and sanity-check the widget/monitor results once you have access.

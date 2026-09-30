@@ -10,6 +10,7 @@ import socket
 import threading
 import time
 from contextlib import contextmanager
+from types import SimpleNamespace
 from typing import Any, NamedTuple
 
 import mcp.types as mt
@@ -162,6 +163,7 @@ def _emit_db_query_metrics(
     query_label: str,
     duration_ms: float,
     success: bool,
+    query_cache: str | None = None,
 ) -> None:
     """Emit aggregate Datadog metrics for one ClickHouse SELECT, tagged by call
     site. run_select_query() is a single funnel for every SELECT the server
@@ -172,7 +174,12 @@ def _emit_db_query_metrics(
     if client is None:
         return
 
-    tags = {"query_label": query_label, "success": str(success).lower()}
+    tags = {
+        "query_label": query_label,
+        "success": str(success).lower(),
+    }
+    if query_cache:
+        tags["query_cache"] = query_cache
     try:
         client.increment("db_query.calls", tags)
         client.distribution("db_query.duration_ms", round(duration_ms, 3), tags)
@@ -182,32 +189,64 @@ def _emit_db_query_metrics(
         logger.debug("DogStatsD db_query metric emit failed: %s", exc)
 
 
+def emit_query_cache_disabled() -> None:
+    """Count the query cache pilot turning itself off after ClickHouse refused
+    its settings (see query_cache.run_query), so a misconfigured profile shows
+    up in Datadog rather than only in pod logs."""
+    client = _get_dogstatsd_client()
+    if client is None:
+        return
+    try:
+        client.increment("db_query.cache_disabled", {})
+    except Exception as exc:
+        logger.debug("DogStatsD query cache metric emit failed: %s", exc)
+
+
 @contextmanager
-def traced_db_query(query_label: str):
+def traced_db_query(query_label: str, *, query_cache: bool = False):
     """Wrap one ClickHouse SELECT with an OTel span (``db.query/<label>``) and
     a Datadog distribution metric, both tagged by query_label so latency can
     be broken down by call site in Datadog instead of averaged into one
     run_select_query number. Re-raises on failure after recording it as a
     failed call; does not suppress or alter the underlying exception.
+
+    Yields a holder whose ``query_cache`` ("on" when cache settings were sent,
+    else None) the caller may change before exit, e.g. to "fallback" when the
+    server refused the settings and an uncached retry served the result.
     """
     tracer = trace.get_tracer(__name__)
     started = time.perf_counter()
+    db_query = SimpleNamespace(query_cache="on" if query_cache else None)
     with tracer.start_as_current_span(f"db.query/{query_label}") as span:
         span.set_attribute("db.query.label", query_label)
         try:
-            yield
+            yield db_query
         except Exception as exc:
             duration_ms = (time.perf_counter() - started) * 1000
             span.set_attribute("db.query.duration_ms", duration_ms)
             span.set_attribute("db.query.success", False)
             span.set_attribute("error.type", type(exc).__name__)
-            _emit_db_query_metrics(query_label=query_label, duration_ms=duration_ms, success=False)
+            if db_query.query_cache:
+                span.set_attribute("db.query.cache", db_query.query_cache)
+            _emit_db_query_metrics(
+                query_label=query_label,
+                duration_ms=duration_ms,
+                success=False,
+                query_cache=db_query.query_cache,
+            )
             raise
         else:
             duration_ms = (time.perf_counter() - started) * 1000
             span.set_attribute("db.query.duration_ms", duration_ms)
             span.set_attribute("db.query.success", True)
-            _emit_db_query_metrics(query_label=query_label, duration_ms=duration_ms, success=True)
+            if db_query.query_cache:
+                span.set_attribute("db.query.cache", db_query.query_cache)
+            _emit_db_query_metrics(
+                query_label=query_label,
+                duration_ms=duration_ms,
+                success=True,
+                query_cache=db_query.query_cache,
+            )
 
 
 def configure_telemetry() -> TracerProvider | None:
@@ -548,6 +587,26 @@ def _start_span_isolated(tracer: trace.Tracer, name: str) -> trace.Span:
         return span
 
 
+_llmobs_failure_logged = False
+
+
+def _log_llmobs_failure(stage: str, exc: BaseException) -> None:
+    """Log an LLMObs SDK failure at WARNING once per process, then at DEBUG, so a
+    broken SDK is visible without spamming one warning per tool call."""
+    global _llmobs_failure_logged
+    if _llmobs_failure_logged:
+        logger.debug("LLMObs tool span %s failed: %s", stage, exc)
+        return
+    _llmobs_failure_logged = True
+    logger.warning(
+        "LLMObs is enabled but the tool span %s failed; LLM Observability tool spans "
+        "will be missing (further failures logged at DEBUG): %s",
+        stage,
+        exc,
+        exc_info=True,
+    )
+
+
 def _llmobs_tool_span(
     tool_name: str,
     arguments: dict,
@@ -560,19 +619,40 @@ def _llmobs_tool_span(
 ):
     """Start a Datadog LLMObs tool span for an MCP tool call.
 
-    Returns None if LLMObs is not initialized (e.g. no DD_API_KEY).
+    Uses the public ``LLMObs.tool()`` API, which starts the span and makes it the
+    active ddtrace span in the current context; the caller must pass the result
+    to ``_llmobs_finish`` from the same task.
+
+    Returns None if LLMObs is not enabled (e.g. no DD_API_KEY) or the span could
+    not be started.
     """
     try:
         from ddtrace.llmobs import LLMObs
 
-        span = LLMObs.start_span(span_kind="tool", name=f"mcp.tool.{tool_name}")
+        if not LLMObs.enabled:
+            return None
+    except Exception:
+        return None
+
+    span = None
+    try:
+        span = LLMObs.tool(name=f"mcp.tool.{tool_name}", session_id=session_id)
+
+        # APM span tags keep the dotted names used by the OTel spans and APM queries.
+        apm_tags: dict[str, str] = {"mcp.client_kind": client}
         if user_id:
-            span.set_tag("usr.id", user_id)
-        span.set_tag("mcp.client_kind", client)
+            apm_tags["usr.id"] = user_id
         if client_name:
-            span.set_tag("mcp.client.name", client_name)
+            apm_tags["mcp.client.name"] = client_name
         if session_id:
-            span.set_tag("mcp.session.id", session_id)
+            apm_tags["mcp.session.id"] = session_id
+        for key, value in apm_tags.items():
+            span.set_tag(key, value)
+        # LLMObs span tags (the only tags LLM Observability can filter on) use
+        # underscores: in the production export mode (agentless + APM tracing)
+        # ddtrace rewrites dots in LLMObs tag keys to underscores, so sending them
+        # underscored keeps the stored names identical in every export mode.
+        llmobs_tags = {key.replace(".", "_"): value for key, value in apm_tags.items()}
 
         metadata: dict = {}
         if user_email:
@@ -588,45 +668,56 @@ def _llmobs_tool_span(
             span=span,
             input_data=json.dumps(arguments, default=str),
             metadata=metadata if metadata else None,
+            tags=llmobs_tags,
         )
         return span
-    except Exception:
+    except Exception as exc:
+        _log_llmobs_failure("start", exc)
+        if span is not None:
+            try:
+                span.finish()
+            except Exception:
+                pass
         return None
 
 
-def _llmobs_finish(span, result, *, error: bool) -> None:
-    """Annotate and finish a LLMObs span returned by _llmobs_tool_span."""
+def _llmobs_output(result) -> str:
+    """Serialize the MCP result content to a compact string for the output field."""
+    try:
+        if hasattr(result, "content"):
+            return json.dumps(
+                [c.model_dump() if hasattr(c, "model_dump") else str(c) for c in result.content],
+                default=str,
+            )
+        return str(result)
+    except Exception:
+        return str(result)
+
+
+def _llmobs_finish(span, result, *, error: BaseException | None = None) -> None:
+    """Annotate and finish a LLMObs span returned by _llmobs_tool_span.
+
+    ``error`` is the exception the tool call raised, if any; it is recorded on the
+    span (error type/message/stack) so the LLMObs span has status "error".
+    """
     if span is None:
         return
     try:
         from ddtrace.llmobs import LLMObs
 
-        output: str
-        if error:
+        if error is not None:
+            span.set_exc_info(type(error), error, error.__traceback__)
             output = "error"
         else:
-            # Serialize the MCP result content to a compact string for the output field.
-            try:
-                if hasattr(result, "content"):
-                    output = json.dumps(
-                        [
-                            c.model_dump() if hasattr(c, "model_dump") else str(c)
-                            for c in result.content
-                        ],
-                        default=str,
-                    )
-                else:
-                    output = str(result)
-            except Exception:
-                output = str(result)
-
+            output = _llmobs_output(result)
         LLMObs.annotate(span=span, output_data=output)
-        span.finish()
-    except Exception:
+    except Exception as exc:
+        _log_llmobs_failure("annotation", exc)
+    finally:
         try:
             span.finish()
-        except Exception:
-            pass
+        except Exception as exc:
+            _log_llmobs_failure("finish", exc)
 
 
 class TelemetryMiddleware(Middleware):
@@ -664,6 +755,10 @@ class TelemetryMiddleware(Middleware):
 
     The LLMObs tool span populates the Datadog LLM Observability dashboard widgets
     (Trace Success Rate, Total Number of Traces, Estimated Total Cost).
+    LLMObs span name: ``mcp.tool.<tool_name>``; LLMObs span tags use underscores —
+    usr_id, mcp_client_kind, mcp_client_name, mcp_session_id — because ddtrace
+    rewrites dotted LLMObs tag keys in the production export mode. The ddtrace APM
+    span behind it keeps the dotted names (usr.id, mcp.client_kind, ...).
 
     The same identity attributes (mcp.client_kind, enduser.id, enduser.email,
     mcp.client.name, mcp.client.version, mcp.session.id, network.client.ip)
@@ -703,40 +798,48 @@ class TelemetryMiddleware(Middleware):
             caller.session_id,
         )
         started = time.perf_counter()
+        result: mt.CallToolResult | None = None
+        error: BaseException | None = None
 
-        with self._tracer.start_as_current_span(f"mcp.tool/{tool_name}") as span:
-            span.set_attribute("mcp.tool.name", tool_name)
-            _tag_caller_attributes(span, caller)
+        try:
+            with self._tracer.start_as_current_span(f"mcp.tool/{tool_name}") as span:
+                span.set_attribute("mcp.tool.name", tool_name)
+                _tag_caller_attributes(span, caller)
 
-            try:
-                result = await call_next(context)
-                duration_ms = (time.perf_counter() - started) * 1000
-                span.set_attribute("mcp.tool.duration_ms", duration_ms)
-                span.set_attribute("mcp.tool.success", True)
-                _emit_tool_metrics(
-                    tool_name=tool_name,
-                    duration_ms=duration_ms,
-                    success=True,
-                    client_kind=caller.client_kind,
-                    client_name=caller.client_name,
-                )
-                _llmobs_finish(llmobs_span, result, error=False)
-                return result
-            except Exception as exc:
-                duration_ms = (time.perf_counter() - started) * 1000
-                span.set_attribute("mcp.tool.duration_ms", duration_ms)
-                span.set_attribute("mcp.tool.success", False)
-                span.set_attribute("error.type", type(exc).__name__)
-                span.record_exception(exc)
-                _emit_tool_metrics(
-                    tool_name=tool_name,
-                    duration_ms=duration_ms,
-                    success=False,
-                    client_kind=caller.client_kind,
-                    client_name=caller.client_name,
-                )
-                _llmobs_finish(llmobs_span, None, error=True)
-                raise
+                try:
+                    result = await call_next(context)
+                    duration_ms = (time.perf_counter() - started) * 1000
+                    span.set_attribute("mcp.tool.duration_ms", duration_ms)
+                    span.set_attribute("mcp.tool.success", True)
+                    _emit_tool_metrics(
+                        tool_name=tool_name,
+                        duration_ms=duration_ms,
+                        success=True,
+                        client_kind=caller.client_kind,
+                        client_name=caller.client_name,
+                    )
+                    return result
+                except Exception as exc:
+                    duration_ms = (time.perf_counter() - started) * 1000
+                    span.set_attribute("mcp.tool.duration_ms", duration_ms)
+                    span.set_attribute("mcp.tool.success", False)
+                    span.set_attribute("error.type", type(exc).__name__)
+                    span.record_exception(exc)
+                    _emit_tool_metrics(
+                        tool_name=tool_name,
+                        duration_ms=duration_ms,
+                        success=False,
+                        client_kind=caller.client_kind,
+                        client_name=caller.client_name,
+                    )
+                    raise
+        except BaseException as exc:
+            error = exc
+            raise
+        finally:
+            # Always finish the LLMObs span (it is the active ddtrace span for this
+            # task until then), on success, error, or cancellation.
+            _llmobs_finish(llmobs_span, result, error=error)
 
     async def _trace_discovery(
         self,
