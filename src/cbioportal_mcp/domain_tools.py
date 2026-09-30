@@ -15,7 +15,7 @@ Nothing user-supplied is interpolated any other way.
 import logging
 import re
 
-from cbioportal_mcp import server
+from cbioportal_mcp import result_format, server
 
 logger = logging.getLogger(__name__)
 
@@ -178,7 +178,23 @@ def _run_with_fallback(label: str, precomputed_sql: str, live_sql_factory):
     return rows, {"source": "live", "fallback_reason": reason}
 
 
-def _finish(result: dict, meta: dict) -> dict:
+# Row fields of each tool, in output order. In the compact result format
+# (CBIOPORTAL_MCP_RESULT_FORMAT, default) "rows" becomes arrays aligned with
+# "columns"; the values are the same either way.
+FREQUENCY_COLUMNS = ("alteration_type", "altered_samples", "profiled_samples", "frequency_pct")
+TOP_GENES_COLUMNS = ("hugo_gene_symbol", "altered_samples", "profiled_samples", "frequency_pct")
+CANCER_TYPE_COLUMNS = ("cancer_type", "altered_samples", "profiled_samples", "frequency_pct")
+PROFILED_COUNTS_COLUMNS = ("profile_type", "samples", "patients", "wes_samples")
+
+
+def _finish(result: dict, meta: dict, columns) -> dict:
+    if result_format.is_compact():
+        table = result_format.records_to_table(result["rows"], columns)
+        # "columns" goes where "rows" was, right before the rows it describes.
+        result = {
+            k: v for key, value in result.items()
+            for k, v in (table.items() if key == "rows" else [(key, value)])
+        }
     result["source"] = meta["source"]
     if meta.get("built_at"):
         result["built_at"] = meta["built_at"]
@@ -537,8 +553,8 @@ def _frequency_row(alteration_type, altered, profiled) -> dict:
     alteration_type: any (default) | mutation | amplification | deep_deletion |
     structural_variant. 'any' also returns the per-type breakdown.
 
-    Returns rows of {alteration_type, altered_samples, profiled_samples,
-    frequency_pct}; profiled_samples is the gene-specific denominator (samples
+    Returns rows with columns alteration_type, altered_samples, profiled_samples,
+    frequency_pct; profiled_samples is the gene-specific denominator (samples
     whose panel covers the gene, or WES). Report these numbers as-is.
     """
 )
@@ -586,6 +602,7 @@ def get_alteration_frequency(gene: str, study_id: str, alteration_type: str = "a
                 return _finish(
                     result,
                     {"source": "precomputed", "built_at": str(built_at) if built_at else None},
+                    FREQUENCY_COLUMNS,
                 )
 
         live = server.run_select_query(
@@ -611,7 +628,7 @@ def get_alteration_frequency(gene: str, study_id: str, alteration_type: str = "a
             out.append(_frequency_row(t, altered, row.get(_profiled_key(t), 0)))
         result["rows"] = out
         result["provenance"] = _STUDY_PROVENANCE
-        return _finish(result, {"source": "live", "fallback_reason": reason})
+        return _finish(result, {"source": "live", "fallback_reason": reason}, FREQUENCY_COLUMNS)
     except Exception as e:
         logger.error(f"get_alteration_frequency: {e}")
         return {"error_message": str(e)}
@@ -663,7 +680,7 @@ def get_top_altered_genes(
                 f"No {alteration_type} events found. The study may lack this data type, or "
                 "the identifier may be wrong (check list_studies)."
             )
-        return _finish(result, meta)
+        return _finish(result, meta, TOP_GENES_COLUMNS)
     except Exception as e:
         logger.error(f"get_top_altered_genes: {e}")
         return {"error_message": str(e)}
@@ -731,7 +748,7 @@ def get_gene_frequency_by_cancer_type(
                 "No cancer type qualified. Check the gene symbol, and that the preference "
                 "exists: SELECT DISTINCT preference_name FROM cancer_study_query_preferences."
             )
-        return _finish(result, meta)
+        return _finish(result, meta, CANCER_TYPE_COLUMNS)
     except Exception as e:
         logger.error(f"get_gene_frequency_by_cancer_type: {e}")
         return {"error_message": str(e)}
@@ -777,7 +794,7 @@ def get_profiled_counts(study_id: str) -> dict:
                 for r in rows
             ],
         }
-        return _finish(result, meta)
+        return _finish(result, meta, PROFILED_COUNTS_COLUMNS)
     except Exception as e:
         logger.error(f"get_profiled_counts: {e}")
         return {"error_message": str(e)}

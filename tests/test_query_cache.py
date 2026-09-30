@@ -1,5 +1,6 @@
 """Exercise the query cache pilot through the SELECT funnel without a database."""
 
+import asyncio
 import logging
 import os
 import threading
@@ -252,7 +253,8 @@ def test_request_overrides_merged_and_restored(enabled, request_context, databas
     key = upstream.CLIENT_CONFIG_OVERRIDES_KEY
     original = {"username": "alice", "settings": {"role": "reader", "max_threads": 2}}
     request_context.set_state(key, original)
-    server.run_select_query(VIEW_QUERIES[0], query_label=LLM)
+    result = asyncio.run(server.clickhouse_run_select_query.fn(VIEW_QUERIES[0]))
+    assert result == {"columns": ["n"], "rows": [[42]], "row_count": 1}
     config = database.configs[-1]
     assert config["username"] == "alice"
     assert config["settings"] == {"role": "reader", "max_threads": 2, **CACHE_SETTINGS}
@@ -266,7 +268,7 @@ def test_request_overrides_merged_and_restored(enabled, request_context, databas
 
 def test_overrides_restored_on_failure(enabled, request_context, database, metrics):
     database.client.query.side_effect = ValueError("denied")
-    result = server.clickhouse_run_select_query.fn(VIEW_QUERIES[0])
+    result = server.clickhouse_run_select_query.fn.__wrapped__(VIEW_QUERIES[0])
     assert "denied" in result["error_message"]
     assert request_context.get_state(upstream.CLIENT_CONFIG_OVERRIDES_KEY) is None
     metrics.increment.assert_any_call(
@@ -350,7 +352,7 @@ def test_other_errors_do_not_disable_pilot(enabled, request_context, database):
 def test_agent_query_cache_settings_rejected_when_on(
     enabled, request_context, database, metrics, query
 ):
-    result = server.clickhouse_run_select_query.fn(query)
+    result = server.clickhouse_run_select_query.fn.__wrapped__(query)
     assert "query_cache settings are managed by the server" in result["error_message"]
     assert database.configs == []
     metrics.increment.assert_any_call("db_query.errors", {"query_label": LLM, "success": "false"})
@@ -364,7 +366,9 @@ def test_query_cache_text_in_comment_or_literal_is_not_an_assignment(enabled, re
 def test_agent_query_cache_settings_untouched_when_off(request_context, database):
     # Pilot off means pre-pilot behavior: the model's SETTINGS pass through.
     query = "SELECT 1 SETTINGS use_query_cache = 1"
-    assert server.clickhouse_run_select_query.fn(query) == {"rows": [{"n": 42}]}
+    assert server.clickhouse_run_select_query.fn.__wrapped__(query) == {
+        "columns": ["n"], "rows": [[42]], "row_count": 1
+    }
 
 
 def test_enabled_preserves_row_cap(enabled, request_context, database):
@@ -444,7 +448,7 @@ def test_study_guide_caches_only_top_genes(enabled, request_context, monkeypatch
         return settings
 
     monkeypatch.setattr(query_cache, "query_cache_settings", record)
-    server.get_study_guide.fn("x")
+    server.get_study_guide.fn.__wrapped__("x")
     assert ("study_guide.top_genes", True) in labels
     assert [label for label, cached in labels if cached] == ["study_guide.top_genes"]
 

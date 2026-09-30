@@ -69,8 +69,9 @@ def test_columns_keyed_by_table(monkeypatch):
     list_columns = server.clickhouse_list_table_columns.fn.__wrapped__
     results = [list_columns(t) for t in ["sample", "patient", "sample"]]
     assert query.call_count == 2
-    assert results[0] == results[2] == {"columns": [{"name": "sample_id", "type": "String"}]}
-    assert results[1] == {"columns": [{"name": "patient_id", "type": "String"}]}
+    fields = ["name", "type", "comment"]
+    assert results[0] == results[2] == {"fields": fields, "columns": [["sample_id", "String", ""]]}
+    assert results[1] == {"fields": fields, "columns": [["patient_id", "String", ""]]}
 
 
 def test_dynamic_guide_hit_expiry_keys_and_clear(monkeypatch, cache_clock):
@@ -163,9 +164,10 @@ def test_cache_failure_never_changes_tool_answer(monkeypatch):
             [{"name": "T"}] if query_label == "study_guide.study_info" else []
         ),
     )
-    assert server.clickhouse_list_tables.fn.__wrapped__() == {"tables": [{"name": "sample"}]}
+    assert server.clickhouse_list_tables.fn.__wrapped__() == {"tables": ["sample"]}
     assert server.clickhouse_list_table_columns.fn.__wrapped__("sample") == {
-        "columns": [{"name": "sample", "type": "String"}]
+        "fields": ["name", "type", "comment"],
+        "columns": [["sample", "String", ""]],
     }
     assert server.get_study_guide.fn.__wrapped__("alpha").startswith("# Study Guide")
 
@@ -218,4 +220,8 @@ def test_disabled_debug_does_not_format_select_result(monkeypatch):
 
     monkeypatch.setattr(server, "run_select_query", lambda *a, **kw: Unformattable())
     monkeypatch.setattr(server.logger, "level", 20)
-    assert server.clickhouse_run_select_query.fn.__wrapped__("SELECT 1") == {"rows": []}
+    assert server.clickhouse_run_select_query.fn.__wrapped__("SELECT 1") == {
+        "columns": [],
+        "rows": [],
+        "row_count": 0,
+    }

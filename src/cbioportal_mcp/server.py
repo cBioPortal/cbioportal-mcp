@@ -30,7 +30,7 @@ from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 from importlib import resources as importlib_resources
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 from fastmcp import FastMCP
 
 
@@ -46,6 +46,7 @@ from cbioportal_mcp.telemetry import (
     traced_db_query,
 )
 from cbioportal_mcp.metadata_cache import MetadataCache  # noqa: E402 (after LLMObs.enable)
+from cbioportal_mcp import result_format  # noqa: E402 (after LLMObs.enable)
 
 logger = logging.getLogger(__name__)
 
@@ -533,8 +534,9 @@ def germline_guide() -> str:
 # Default and maximum rows clickhouse_run_select_query will return. A missing
 # or overly broad LIMIT in agent-written SQL should not be able to flood the
 # agent's context with an unbounded result set (mirrors MAX_LIST_LIMIT below).
-DEFAULT_SELECT_MAX_ROWS = 100
+# The default is CBIOPORTAL_MCP_MAX_RESULT_ROWS (100 when unset).
 MAX_SELECT_MAX_ROWS = 10000
+DEFAULT_SELECT_MAX_ROWS = min(result_format.default_max_rows(), MAX_SELECT_MAX_ROWS)
 
 
 @mcp.tool(
@@ -555,16 +557,21 @@ MAX_SELECT_MAX_ROWS = 10000
             Prefer narrowing the query itself (add a LIMIT, aggregate, or filter) over raising this.
 
     Returns:
-        - On success: an object with field "rows" containing an array of result rows. If the
-          query produced more rows than max_rows, "rows" is truncated and "truncated": true,
-          "returned_rows", and a "note" are included.
+        - On success: {{"columns": [names], "rows": [[values in column order], ...],
+          "row_count": n}}.
+          Each row is an array aligned with "columns"; null is SQL NULL. If more rows matched
+          than max_rows, "truncated": true and a "note" are added and row_count is the number
+          returned (the exact total is not computed) — aggregate or filter instead of paging.
+          Text cells over {result_format.max_cell_chars() or "unlimited"} chars end in
+          "…[+N chars]"; "cut_cells" counts them per column and "cell_note" gives the
+          substringUTF8 offsets that fetch the rest. Numbers and arrays are never cut.
         - On failure: an object with a single field "error_message" containing a string describing the error.
 """
 )
 @run_off_event_loop
 def clickhouse_run_select_query(
     query: str, max_rows: int = DEFAULT_SELECT_MAX_ROWS
-) -> dict[str, list[dict] | str | bool | int]:
+) -> dict[str, Any]:
     try:
         safe_max_rows = max(1, min(int(max_rows), MAX_SELECT_MAX_ROWS))
         # run_select_query returns at most safe_max_rows + 1 rows (capped in
@@ -573,6 +580,11 @@ def clickhouse_run_select_query(
             query, query_label="clickhouse_run_select_query", max_rows=safe_max_rows
         )
         logger.debug("clickhouse_run_select_query returns %s", result)
+        if result_format.is_compact():
+            columns, rows = _select_table(result)
+            return result_format.select_result(
+                columns, rows, max_rows=safe_max_rows, hard_max_rows=MAX_SELECT_MAX_ROWS
+            )
         if len(result) > safe_max_rows:
             return {
                 "rows": result[:safe_max_rows],
@@ -600,19 +612,18 @@ def clickhouse_run_select_query(
     Retrieve a list of all tables in the current database.
 
     Returns:
-        - On success: an object with a single field "tables" containing an array of objects with the following fields:
-            - name: Table name.
+        - On success: {"tables": [table names]}.
         - On failure: an object with a single field "error_message" containing a string describing the error.
 """
 )
 @run_off_event_loop
-def clickhouse_list_tables() -> dict[str, list[dict] | str]:
+def clickhouse_list_tables() -> dict[str, Any]:
     logger.info(f"clickhouse_list_tables: called")
 
     try:
         cached = _cache_get(_schema_cache, ("tables",))
         if cached is not None:
-            return cached
+            return _format_tables_response(cached)
         from mcp_clickhouse.mcp_server import run_query
         raw = json.loads(run_query("SHOW TABLES"))
         rows = raw.get("rows", [])
@@ -620,7 +631,7 @@ def clickhouse_list_tables() -> dict[str, list[dict] | str]:
         logger.debug("clickhouse_list_tables result: %s", result)
         response = {"tables": result}
         _cache_put(_schema_cache, ("tables",), response)
-        return response
+        return _format_tables_response(response)
     except Exception as e:
         error_message = str(e)
         logger.error(f"clickhouse_list_tables: {error_message}")
@@ -632,22 +643,22 @@ def clickhouse_list_tables() -> dict[str, list[dict] | str]:
     Retrieve a list of all columns for the table in the current database.
 
     Returns:
-        - On success: an object with a single field "columns" containing an array of objects with the following fields:
-            - name: Column name.
-            - type: ClickHouse data type of the column.
-            - comment: Column description, if available.
+        - On success: {"fields": ["name", "type", "comment"],
+          "columns": [[name, type, comment], ...]}:
+          one array per column, aligned with "fields". type is the ClickHouse data type;
+          comment is the column description ("" when there is none).
         - On failure: an object with a single field "error_message" containing a string describing the error.
 """
 )
 @run_off_event_loop
-def clickhouse_list_table_columns(table: str) -> dict[str, list[dict] | str]:
+def clickhouse_list_table_columns(table: str) -> dict[str, Any]:
     logger.info(f"clickhouse_list_table_columns: called")
 
     try:
         table = _validate_table_name(table)
         cached = _cache_get(_schema_cache, ("columns", table))
         if cached is not None:
-            return cached
+            return _format_columns_response(cached)
         from mcp_clickhouse.mcp_server import run_query
         raw = json.loads(run_query(f"DESCRIBE TABLE {table}"))
         columns_list = raw.get("columns", [])
@@ -669,11 +680,31 @@ def clickhouse_list_table_columns(table: str) -> dict[str, list[dict] | str]:
         logger.debug("clickhouse_list_table_columns result: %s", result)
         response = {"columns": result}
         _cache_put(_schema_cache, ("columns", table), response)
-        return response
+        return _format_columns_response(response)
     except Exception as e:
         error_message = str(e)
         logger.error(f"clickhouse_list_table_columns: {error_message}")
         return {"error_message": error_message}
+
+
+# The schema cache stores the legacy shapes; these convert on the way out so
+# CBIOPORTAL_MCP_RESULT_FORMAT never has to be part of a cache key.
+_COLUMN_FIELDS = ("name", "type", "comment")
+
+
+def _format_tables_response(response: dict) -> dict:
+    if not result_format.is_compact():
+        return response
+    return {"tables": [t["name"] for t in response["tables"]]}
+
+
+def _format_columns_response(response: dict) -> dict:
+    if not result_format.is_compact():
+        return response
+    return {
+        "fields": list(_COLUMN_FIELDS),
+        "columns": [[c.get(f, "") for f in _COLUMN_FIELDS] for c in response["columns"]],
+    }
 
 
 def run_select_query(query: str, *, query_label: str, max_rows: int | None = None) -> list[dict]:
@@ -730,7 +761,21 @@ def _with_row_cap(query: str, max_rows: int) -> str:
     return f"SELECT * FROM ({inner}) LIMIT {int(max_rows) + 1}"
 
 
-def zip_select_query_result(ch_query_result) -> list[dict]:
+class SelectRows(list):
+    """run_select_query's list of row dicts, plus the positional result it came from.
+
+    The dicts drop empty and NULL values, so they lose the column order and
+    any all-empty column; the compact tool format needs both. Carrying them
+    here keeps run_select_query's signature (and its callers) unchanged.
+    """
+
+    def __init__(self, records, columns, raw_rows):
+        super().__init__(records)
+        self.columns = list(columns)
+        self.raw_rows = raw_rows
+
+
+def zip_select_query_result(ch_query_result) -> SelectRows:
     """
     Join columns and corresponding row values into dictionaries skipping dictionary entries if value is emtpy or None
     """
@@ -739,7 +784,16 @@ def zip_select_query_result(ch_query_result) -> list[dict]:
     result = []
     for row in rows:
         result.append({k: v for k, v in zip(columns, row) if v not in ("", None)})
-    return result
+    return SelectRows(result, columns, rows)
+
+
+def _select_table(result: list[dict]) -> tuple[list[str], list]:
+    """(columns, positional rows) for a run_select_query result."""
+    if isinstance(result, SelectRows):
+        return result.columns, result.raw_rows
+    # A plain list of dicts (e.g. a test double): best-effort column order.
+    table = result_format.records_to_table(result)
+    return table["columns"], table["rows"]
 
 
 # Resource Access Tools for AI Agents

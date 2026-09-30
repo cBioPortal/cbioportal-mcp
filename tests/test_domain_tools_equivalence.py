@@ -33,6 +33,7 @@ import aggregate_fixture as fx
 import pytest
 
 from cbioportal_mcp import domain_tools, server
+from cbioportal_mcp.result_format import table_to_records as _records
 
 URL = os.getenv("CBIOPORTAL_MCP_TEST_CLICKHOUSE_URL")
 NATIVE_PORT = os.getenv("CBIOPORTAL_MCP_TEST_CLICKHOUSE_NATIVE_PORT")
@@ -578,7 +579,7 @@ def test_gene_frequency_tool_equals_recipe_including_frequency_pct(
         )
         tool = {
             r["cancer_type"]: (r["altered_samples"], r["profiled_samples"], r["frequency_pct"])
-            for r in out["rows"]
+            for r in _records(out)
         }
         assert tool == recipe, (gene, out["source"])
 
@@ -595,7 +596,7 @@ def test_top_altered_genes_tool_equals_recipe_including_frequency_pct(ch, tool_d
     out = domain_tools.get_top_altered_genes.fn.__wrapped__(study, "mutation", 100)
     tool = [
         (r["hugo_gene_symbol"], r["altered_samples"], r["profiled_samples"], r["frequency_pct"])
-        for r in out["rows"]
+        for r in _records(out)
     ]
     assert out["source"] == "precomputed" and tool == recipe
 
@@ -653,7 +654,7 @@ def test_alteration_frequency_matches_oracle_including_zero_rows(ch, tool_db):
         for gene in fx.GENES:
             for alt in ALTERATIONS:
                 out = domain_tools.get_alteration_frequency.fn.__wrapped__(gene, study, alt)
-                row = out["rows"][0]
+                row = _records(out)[0]
                 altered, profiled, _ = expected.get(
                     (study, gene, alt), (0, fx.oracle_study_profiled(tables, study, alt, gene), 0)
                 )
@@ -684,7 +685,7 @@ def test_unknown_gene_and_study_are_errors_not_zeros(ch, tool_db):
 
 def test_lowercase_gene_resolves(ch, tool_db):
     out = domain_tools.get_alteration_frequency.fn.__wrapped__("tp53", "study_wes", "mutation")
-    assert out["gene"] == "TP53" and out["rows"][0]["altered_samples"] > 0
+    assert out["gene"] == "TP53" and _records(out)[0]["altered_samples"] > 0
 
 
 # --- real apply order: scripts/apply_sql.sh with the public-portal cohorts ---

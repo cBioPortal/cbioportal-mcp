@@ -111,6 +111,9 @@ def _select(query):
     return ("clickhouse_run_select_query", {"query": query})
 
 
+COMPACT_ONE = {"columns": ["n"], "rows": [[1]], "row_count": 1}
+
+
 def test_sync_tools_run_one_after_another_on_the_event_loop():
     """The behaviour being fixed: FastMCP runs a plain sync tool on the event
     loop, so two concurrent calls take the sum of their durations."""
@@ -137,7 +140,7 @@ def test_two_concurrent_slow_calls_take_about_the_slowest(slow_clickhouse):
         _timed_batch(server.mcp, [_select("SELECT 1"), ("clickhouse_list_tables", {})])
     )
     assert all(not r.is_error for r in results)
-    assert results[0].structured_content == {"rows": [{"n": 1}]}
+    assert results[0].structured_content == {"columns": ["n"], "rows": [[1]], "row_count": 1}
     assert slow_clickhouse.peak == 2
     assert elapsed < 1.5 * DELAY, f"batch took {elapsed:.2f}s; calls did not overlap"
 
@@ -159,7 +162,7 @@ def test_a_failing_call_does_not_affect_the_others(slow_clickhouse):
         )
     )
     ok_1, failed, ok_2 = (r.structured_content for r in results)
-    assert ok_1 == {"rows": [{"n": 1}]} and ok_2 == {"rows": [{"n": 1}]}
+    assert ok_1 == COMPACT_ONE and ok_2 == COMPACT_ONE
     assert "boom from ClickHouse" in failed["error_message"]
     assert elapsed < 1.5 * DELAY
 
@@ -177,7 +180,7 @@ def test_a_raising_tool_fails_alone(slow_clickhouse, monkeypatch):
         )
     )
     assert results[0].is_error and "oncotree exploded" in results[0].content[0].text
-    assert results[1].structured_content == {"rows": [{"n": 1}]}
+    assert results[1].structured_content == {"columns": ["n"], "rows": [[1]], "row_count": 1}
 
 
 class FakeClickHouseClient:
@@ -269,7 +272,7 @@ def test_cap_bounds_queries_in_flight(query_pool, monkeypatch):
     elapsed, results = asyncio.run(
         _timed_batch(server.mcp, [_select(f"SELECT {i}") for i in range(5)])
     )
-    assert all(r.structured_content == {"rows": [{"n": 1}]} for r in results)
+    assert all(r.structured_content == COMPACT_ONE for r in results)
     assert client.peak == 2
     # 5 queries, 2 at a time: three rounds, not one and not five.
     assert 3 * DELAY * 0.95 <= elapsed < 4 * DELAY + 0.5
@@ -373,7 +376,7 @@ def test_timed_out_queries_keep_their_slot_until_they_stop(tmp_path):
     assert all("timed out" in e for e in out["errors"]), out
     assert out["started"] == 1 and out["peak"] == 1 and out["kills"] == 1, out
     assert all(d < 4 for d in out["durations"]), out
-    assert out["recovered"] == {"rows": [{"n": 1}]}
+    assert out["recovered"] == {"columns": ["n"], "rows": [[1]], "row_count": 1}
     assert out["peak_final"] == 1
 
 
@@ -387,7 +390,7 @@ def test_concurrent_batch_with_slow_kill_never_exceeds_the_cap(tmp_path):
     assert out["started"] == 2 and out["peak"] == 2, out
     # Bounded: the 1s query timeout plus mcp-clickhouse's 1s cancellation wait.
     assert out["elapsed"] < 4, out
-    assert out["recovered"] == {"rows": [{"n": 1}]}
+    assert out["recovered"] == {"columns": ["n"], "rows": [[1]], "row_count": 1}
     assert out["peak_final"] == 2
 
 
@@ -776,7 +779,7 @@ def test_concurrent_queries_against_real_clickhouse(real_clickhouse, monkeypatch
 
     rows = [r.structured_content for r in results]
     assert all("error_message" not in r for r in rows), rows
-    assert sorted(r["rows"][0]["i"] for r in rows) == list(range(N_REAL))
+    assert sorted(r["rows"][0][r["columns"].index("i")] for r in rows) == list(range(N_REAL))
     assert elapsed < N_REAL * DELAY / 2, f"{N_REAL} queries took {elapsed:.2f}s"
 
     # mcp-clickhouse shares one cached client across the calls, and that
