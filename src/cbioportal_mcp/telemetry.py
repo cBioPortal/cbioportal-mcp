@@ -594,17 +594,21 @@ def _llmobs_tool_span(
     try:
         span = LLMObs.tool(name=f"mcp.tool.{tool_name}", session_id=session_id)
 
-        tags: dict[str, str] = {"mcp.client_kind": client}
+        # APM span tags keep the dotted names used by the OTel spans and APM queries.
+        apm_tags: dict[str, str] = {"mcp.client_kind": client}
         if user_id:
-            tags["usr.id"] = user_id
+            apm_tags["usr.id"] = user_id
         if client_name:
-            tags["mcp.client.name"] = client_name
+            apm_tags["mcp.client.name"] = client_name
         if session_id:
-            tags["mcp.session.id"] = session_id
-        # APM span tags, plus the same keys as LLMObs span tags (the only tags the
-        # LLM Observability views and dashboards can filter on).
-        for key, value in tags.items():
+            apm_tags["mcp.session.id"] = session_id
+        for key, value in apm_tags.items():
             span.set_tag(key, value)
+        # LLMObs span tags (the only tags LLM Observability can filter on) use
+        # underscores: in the production export mode (agentless + APM tracing)
+        # ddtrace rewrites dots in LLMObs tag keys to underscores, so sending them
+        # underscored keeps the stored names identical in every export mode.
+        llmobs_tags = {key.replace(".", "_"): value for key, value in apm_tags.items()}
 
         metadata: dict = {}
         if user_email:
@@ -620,7 +624,7 @@ def _llmobs_tool_span(
             span=span,
             input_data=json.dumps(arguments, default=str),
             metadata=metadata if metadata else None,
-            tags=tags,
+            tags=llmobs_tags,
         )
         return span
     except Exception as exc:
@@ -707,6 +711,10 @@ class TelemetryMiddleware(Middleware):
 
     The LLMObs tool span populates the Datadog LLM Observability dashboard widgets
     (Trace Success Rate, Total Number of Traces, Estimated Total Cost).
+    LLMObs span name: ``mcp.tool.<tool_name>``; LLMObs span tags use underscores —
+    usr_id, mcp_client_kind, mcp_client_name, mcp_session_id — because ddtrace
+    rewrites dotted LLMObs tag keys in the production export mode. The ddtrace APM
+    span behind it keeps the dotted names (usr.id, mcp.client_kind, ...).
 
     The same identity attributes (mcp.client_kind, enduser.id, enduser.email,
     mcp.client.name, mcp.client.version, mcp.session.id, network.client.ip)
