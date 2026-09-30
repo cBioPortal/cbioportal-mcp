@@ -37,9 +37,9 @@ def test_schema_hit_expiry_errors_and_clear(monkeypatch, cache_clock, table):
         monkeypatch, {"columns": ["name", "type"], "rows": [["sample", "String"]]}
     )
     call = (
-        (lambda: server.clickhouse_list_tables.fn())
+        (lambda: server.clickhouse_list_tables.fn.__wrapped__())
         if table is None
-        else (lambda: server.clickhouse_list_table_columns.fn(table))
+        else (lambda: server.clickhouse_list_table_columns.fn.__wrapped__(table))
     )
     first = call()
     assert call() == first
@@ -66,7 +66,8 @@ def test_columns_keyed_by_table(monkeypatch):
 
     query = Mock(side_effect=describe)
     monkeypatch.setattr(mcp_clickhouse.mcp_server, "run_query", query)
-    results = [server.clickhouse_list_table_columns.fn(t) for t in ["sample", "patient", "sample"]]
+    list_columns = server.clickhouse_list_table_columns.fn.__wrapped__
+    results = [list_columns(t) for t in ["sample", "patient", "sample"]]
     assert query.call_count == 2
     assert results[0] == results[2] == {"columns": [{"name": "sample_id", "type": "String"}]}
     assert results[1] == {"columns": [{"name": "patient_id", "type": "String"}]}
@@ -80,16 +81,16 @@ def test_dynamic_guide_hit_expiry_keys_and_clear(monkeypatch, cache_clock):
 
     query = Mock(side_effect=result)
     monkeypatch.setattr(server, "run_select_query", query)
-    first = server.get_study_guide.fn("alpha")
-    assert server.get_study_guide.fn("ALPHA") == first
+    first = server.get_study_guide.fn.__wrapped__("alpha")
+    assert server.get_study_guide.fn.__wrapped__("ALPHA") == first
     assert query.call_count == 7
-    server.get_study_guide.fn("beta")
+    server.get_study_guide.fn.__wrapped__("beta")
     assert query.call_count == 14
     cache_clock[0] += 3600
-    server.get_study_guide.fn("alpha")
+    server.get_study_guide.fn.__wrapped__("alpha")
     assert query.call_count == 21
     server._clear_study_guide_cache()
-    server.get_study_guide.fn("alpha")
+    server.get_study_guide.fn.__wrapped__("alpha")
     assert query.call_count == 28
 
 
@@ -104,9 +105,9 @@ def test_dynamic_guide_errors_not_cached(monkeypatch, failing_label):
         return [{"name": "Test"}] if query_label == "study_guide.study_info" else []
 
     monkeypatch.setattr(server, "run_select_query", result)
-    assert server.get_study_guide.fn("alpha").startswith("Error generating")
+    assert server.get_study_guide.fn.__wrapped__("alpha").startswith("Error generating")
     fail[0] = False
-    assert server.get_study_guide.fn("alpha").startswith("# Study Guide")
+    assert server.get_study_guide.fn.__wrapped__("alpha").startswith("# Study Guide")
 
 
 def test_cache_can_be_disabled(monkeypatch):
@@ -162,19 +163,19 @@ def test_cache_failure_never_changes_tool_answer(monkeypatch):
             [{"name": "T"}] if query_label == "study_guide.study_info" else []
         ),
     )
-    assert server.clickhouse_list_tables.fn() == {"tables": [{"name": "sample"}]}
-    assert server.clickhouse_list_table_columns.fn("sample") == {
+    assert server.clickhouse_list_tables.fn.__wrapped__() == {"tables": [{"name": "sample"}]}
+    assert server.clickhouse_list_table_columns.fn.__wrapped__("sample") == {
         "columns": [{"name": "sample", "type": "String"}]
     }
-    assert server.get_study_guide.fn("alpha").startswith("# Study Guide")
+    assert server.get_study_guide.fn.__wrapped__("alpha").startswith("# Study Guide")
 
 
 def test_cache_hit_is_logged_at_debug(monkeypatch, caplog):
     _patch_run_query(monkeypatch, {"columns": [], "rows": [["sample"]]})
     with caplog.at_level(logging.DEBUG, logger=server.logger.name):
-        server.clickhouse_list_tables.fn()
+        server.clickhouse_list_tables.fn.__wrapped__()
         assert not any("metadata cache hit" in r.getMessage() for r in caplog.records)
-        server.clickhouse_list_tables.fn()
+        server.clickhouse_list_tables.fn.__wrapped__()
     assert any("metadata cache hit" in r.getMessage() for r in caplog.records)
 
 
@@ -217,4 +218,4 @@ def test_disabled_debug_does_not_format_select_result(monkeypatch):
 
     monkeypatch.setattr(server, "run_select_query", lambda *a, **kw: Unformattable())
     monkeypatch.setattr(server.logger, "level", 20)
-    assert server.clickhouse_run_select_query.fn("SELECT 1") == {"rows": []}
+    assert server.clickhouse_run_select_query.fn.__wrapped__("SELECT 1") == {"rows": []}

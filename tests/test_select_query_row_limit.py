@@ -14,7 +14,7 @@ def test_select_query_under_default_limit_is_not_truncated(monkeypatch):
         server, "run_select_query", lambda query, query_label=None, max_rows=None: _rows(5)
     )
 
-    result = server.clickhouse_run_select_query.fn("SELECT 1")
+    result = server.clickhouse_run_select_query.fn.__wrapped__("SELECT 1")
 
     assert result == {"rows": _rows(5)}
     assert "truncated" not in result
@@ -27,7 +27,7 @@ def test_select_query_over_default_limit_is_truncated(monkeypatch):
         lambda query, query_label=None, max_rows=None: _rows(server.DEFAULT_SELECT_MAX_ROWS + 50),
     )
 
-    result = server.clickhouse_run_select_query.fn("SELECT * FROM huge_table")
+    result = server.clickhouse_run_select_query.fn.__wrapped__("SELECT * FROM huge_table")
 
     assert result["truncated"] is True
     assert result["returned_rows"] == server.DEFAULT_SELECT_MAX_ROWS
@@ -45,7 +45,7 @@ def test_select_query_passes_max_rows_through_to_run_select_query(monkeypatch):
 
     monkeypatch.setattr(server, "run_select_query", fake_run_select_query)
 
-    server.clickhouse_run_select_query.fn("SELECT 1", max_rows=42)
+    server.clickhouse_run_select_query.fn.__wrapped__("SELECT 1", max_rows=42)
 
     assert captured["max_rows"] == 42
 
@@ -57,7 +57,7 @@ def test_select_query_max_rows_can_be_raised(monkeypatch):
         lambda query, query_label=None, max_rows=None: _rows(server.DEFAULT_SELECT_MAX_ROWS + 50),
     )
 
-    result = server.clickhouse_run_select_query.fn(
+    result = server.clickhouse_run_select_query.fn.__wrapped__(
         "SELECT * FROM huge_table", max_rows=server.DEFAULT_SELECT_MAX_ROWS + 50
     )
 
@@ -72,7 +72,7 @@ def test_select_query_max_rows_is_clamped_to_hard_cap(monkeypatch):
         lambda query, query_label=None, max_rows=None: _rows(server.MAX_SELECT_MAX_ROWS + 500),
     )
 
-    result = server.clickhouse_run_select_query.fn(
+    result = server.clickhouse_run_select_query.fn.__wrapped__(
         "SELECT * FROM huge_table", max_rows=server.MAX_SELECT_MAX_ROWS + 5000
     )
 

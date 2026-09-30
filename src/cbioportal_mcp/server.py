@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """cBioPortal MCP Server - FastMCP implementation."""
 
+import functools
 import os
+import typing
 
+import anyio.to_thread
 from ddtrace.llmobs import LLMObs
 
 _dd_api_key = os.getenv("DD_API_KEY")
@@ -82,6 +85,73 @@ def _cache_put(cache: MetadataCache, key, value) -> None:
         cache.put(key, value)
     except Exception:
         logger.debug("metadata cache put failed for %r; bypassing", key, exc_info=True)
+
+
+# FastMCP 2.x calls a sync tool function directly on the event loop, so a
+# batch of tool calls the client sends concurrently would otherwise run one
+# after another. Tools that do I/O are wrapped with run_off_event_loop so each
+# call runs on a worker thread and a batch costs roughly its slowest call.
+DEFAULT_MAX_CONCURRENT_QUERIES = 4
+
+
+def _max_concurrent_queries_from_env() -> int:
+    raw = os.getenv("CBIOPORTAL_MCP_MAX_CONCURRENT_QUERIES")
+    if raw is None:
+        return DEFAULT_MAX_CONCURRENT_QUERIES
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 0
+    if value >= 1:
+        return value
+    logger.warning(
+        "Invalid CBIOPORTAL_MCP_MAX_CONCURRENT_QUERIES=%r; using %s",
+        raw,
+        DEFAULT_MAX_CONCURRENT_QUERIES,
+    )
+    return DEFAULT_MAX_CONCURRENT_QUERIES
+
+
+MAX_CONCURRENT_QUERIES = _max_concurrent_queries_from_env()
+# Bounds in-flight ClickHouse queries per server process (tool calls and the
+# background list_studies refresh alike) so a large batch can't flood the
+# database. A threading semaphore because queries run on worker threads.
+_query_slots = threading.BoundedSemaphore(MAX_CONCURRENT_QUERIES)
+
+
+def _run_clickhouse_query(query: str) -> str:
+    """Run one query through mcp-clickhouse, holding a concurrency slot.
+
+    mcp-clickhouse's run_query keeps its own query timeout, KILL QUERY on
+    timeout, and per-request client settings. Its cached clients are created
+    with autogenerate_session_id=False, so concurrent queries on a shared
+    client don't collide on a ClickHouse session lock.
+    """
+    from mcp_clickhouse.mcp_server import run_query
+
+    with _query_slots:
+        return run_query(query)
+
+
+def run_off_event_loop(fn):
+    """Make a blocking tool function async by running it on a worker thread.
+
+    Apply below @mcp.tool so FastMCP registers the async wrapper; the tool's
+    schema still comes from fn's signature. The worker thread gets a copy of
+    the caller's contextvars, so telemetry spans and the FastMCP request
+    context still belong to the right tool call. The undecorated function is
+    available as `.fn.__wrapped__` on the registered tool.
+    """
+
+    @functools.wraps(fn)
+    async def wrapper(*args, **kwargs):
+        return await anyio.to_thread.run_sync(functools.partial(fn, *args, **kwargs))
+
+    # Resolve hints against fn itself: on Python 3.10, get_type_hints() turns
+    # `x: str = None` into Optional[str] using the function's defaults, which
+    # the *args/**kwargs wrapper doesn't have, so the schema would change.
+    wrapper.__annotations__ = typing.get_type_hints(fn, include_extras=True)
+    return wrapper
 
 # Regex pattern for valid cBioPortal study identifiers
 # Allows alphanumeric characters, underscores, and hyphens
@@ -511,6 +581,7 @@ MAX_SELECT_MAX_ROWS = 10000
         - On failure: an object with a single field "error_message" containing a string describing the error.
 """
 )
+@run_off_event_loop
 def clickhouse_run_select_query(
     query: str, max_rows: int = DEFAULT_SELECT_MAX_ROWS
 ) -> dict[str, list[dict] | str | bool | int]:
@@ -554,6 +625,7 @@ def clickhouse_run_select_query(
         - On failure: an object with a single field "error_message" containing a string describing the error.
 """
 )
+@run_off_event_loop
 def clickhouse_list_tables() -> dict[str, list[dict] | str]:
     logger.info(f"clickhouse_list_tables: called")
 
@@ -561,8 +633,7 @@ def clickhouse_list_tables() -> dict[str, list[dict] | str]:
         cached = _cache_get(_schema_cache, ("tables",))
         if cached is not None:
             return cached
-        from mcp_clickhouse.mcp_server import run_query
-        raw = json.loads(run_query("SHOW TABLES"))
+        raw = json.loads(_run_clickhouse_query("SHOW TABLES"))
         rows = raw.get("rows", [])
         result = [{"name": row[0]} for row in rows if row]
         logger.debug("clickhouse_list_tables result: %s", result)
@@ -587,6 +658,7 @@ def clickhouse_list_tables() -> dict[str, list[dict] | str]:
         - On failure: an object with a single field "error_message" containing a string describing the error.
 """
 )
+@run_off_event_loop
 def clickhouse_list_table_columns(table: str) -> dict[str, list[dict] | str]:
     logger.info(f"clickhouse_list_table_columns: called")
 
@@ -595,8 +667,7 @@ def clickhouse_list_table_columns(table: str) -> dict[str, list[dict] | str]:
         cached = _cache_get(_schema_cache, ("columns", table))
         if cached is not None:
             return cached
-        from mcp_clickhouse.mcp_server import run_query
-        raw = json.loads(run_query(f"DESCRIBE TABLE {table}"))
+        raw = json.loads(_run_clickhouse_query(f"DESCRIBE TABLE {table}"))
         columns_list = raw.get("columns", [])
         rows = raw.get("rows", [])
         # DESCRIBE TABLE returns: name, type, default_type, default_expression, comment, ...
@@ -644,15 +715,13 @@ def run_select_query(query: str, *, query_label: str, max_rows: int | None = Non
     Returns:
         list: A list of rows, where each row is a dictionary with column names as keys and corresponding values.
     """
-    from mcp_clickhouse.mcp_server import run_query
-
     # DB-level read-only permissions (enforced on startup) prevent non-SELECT queries,
     # so we don't need application-level query filtering. This allows CTEs (WITH ... AS).
     if max_rows is not None:
         query = _with_row_cap(query, max_rows)
     logger.debug("run_select_query: delegate the query to run_query tool of ClickHouse MCP")
     with traced_db_query(query_label):
-        ch_query_result = json.loads(run_query(query))
+        ch_query_result = json.loads(_run_clickhouse_query(query))
         result = zip_select_query_result(ch_query_result)
     return result
 
@@ -891,6 +960,7 @@ def _study_not_in_deployment_message(study_id: str) -> str:
 
 
 @mcp.tool()
+@run_off_event_loop
 def get_study_guide(study_id: str) -> str:
     """Get a guide for a specific cBioPortal study.
     
@@ -1281,6 +1351,7 @@ def _filter_studies(search: str | None, limit: int, verbose: bool) -> list[dict]
 
 
 @mcp.tool()
+@run_off_event_loop
 def list_studies(search: str = None, limit: int = 20, verbose: bool = False) -> list[dict]:
     """List available cBioPortal studies.
 
@@ -1328,6 +1399,7 @@ def list_study_guides() -> list[str]:
 
 
 @mcp.tool()
+@run_off_event_loop
 def search_oncotree(search_term: str) -> list[dict]:
     """Search OncoTree cancer types by code, name, or tissue.
 

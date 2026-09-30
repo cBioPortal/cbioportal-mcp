@@ -573,7 +573,9 @@ def test_gene_frequency_tool_equals_recipe_including_frequency_pct(
             """,
             )
         }
-        out = domain_tools.get_gene_frequency_by_cancer_type.fn(gene, alteration, 100, preference)
+        out = domain_tools.get_gene_frequency_by_cancer_type.fn.__wrapped__(
+            gene, alteration, 100, preference
+        )
         tool = {
             r["cancer_type"]: (r["altered_samples"], r["profiled_samples"], r["frequency_pct"])
             for r in out["rows"]
@@ -590,7 +592,7 @@ def test_top_altered_genes_tool_equals_recipe_including_frequency_pct(ch, tool_d
             client, f"SELECT * FROM top_mutated_genes_in_study(study='{study}', top_n=100)"
         )
     ]
-    out = domain_tools.get_top_altered_genes.fn(study, "mutation", 100)
+    out = domain_tools.get_top_altered_genes.fn.__wrapped__(study, "mutation", 100)
     tool = [
         (r["hugo_gene_symbol"], r["altered_samples"], r["profiled_samples"], r["frequency_pct"])
         for r in out["rows"]
@@ -627,12 +629,12 @@ def _tool_calls():
 def test_tools_return_identical_results_from_precomputed_and_live(ch, tool_db):
     client, _ = ch
     calls = _tool_calls()
-    precomputed = [fn.fn(*args) for fn, args in calls]
+    precomputed = [fn.fn.__wrapped__(*args) for fn, args in calls]
 
     for t in AGGREGATE_TABLES:
         client.command(f"RENAME TABLE {t} TO {t}__hidden")
     try:
-        live = [fn.fn(*args) for fn, args in calls]
+        live = [fn.fn.__wrapped__(*args) for fn, args in calls]
     finally:
         for t in AGGREGATE_TABLES:
             client.command(f"RENAME TABLE {t}__hidden TO {t}")
@@ -650,7 +652,7 @@ def test_alteration_frequency_matches_oracle_including_zero_rows(ch, tool_db):
     for study in STUDIES_WITH_DATA:
         for gene in fx.GENES:
             for alt in ALTERATIONS:
-                out = domain_tools.get_alteration_frequency.fn(gene, study, alt)
+                out = domain_tools.get_alteration_frequency.fn.__wrapped__(gene, study, alt)
                 row = out["rows"][0]
                 altered, profiled, _ = expected.get(
                     (study, gene, alt), (0, fx.oracle_study_profiled(tables, study, alt, gene), 0)
@@ -665,21 +667,23 @@ def test_alteration_frequency_matches_oracle_including_zero_rows(ch, tool_db):
 
 
 def test_query_labels_tag_each_path(ch, tool_db):
-    domain_tools.get_top_altered_genes.fn("study_wes", "mutation", 5)
-    domain_tools.get_alteration_frequency.fn("BRAF", "study_panel", "mutation")  # 0 altered
+    domain_tools.get_top_altered_genes.fn.__wrapped__("study_wes", "mutation", 5)
+    # 0 altered
+    domain_tools.get_alteration_frequency.fn.__wrapped__("BRAF", "study_panel", "mutation")
     assert "domain_tools.top_altered_genes.precomputed" in tool_db
     assert "domain_tools.alteration_frequency.live" in tool_db
 
 
 def test_unknown_gene_and_study_are_errors_not_zeros(ch, tool_db):
-    gene_miss = domain_tools.get_alteration_frequency.fn("NOTAGENE1", "study_wes", "any")
-    study_miss = domain_tools.get_alteration_frequency.fn("TP53", "no_such_study", "any")
+    alteration_frequency = domain_tools.get_alteration_frequency.fn.__wrapped__
+    gene_miss = alteration_frequency("NOTAGENE1", "study_wes", "any")
+    study_miss = alteration_frequency("TP53", "no_such_study", "any")
     assert "not in the gene table" in gene_miss["error_message"]
     assert "did not match any study" in study_miss["error_message"]
 
 
 def test_lowercase_gene_resolves(ch, tool_db):
-    out = domain_tools.get_alteration_frequency.fn("tp53", "study_wes", "mutation")
+    out = domain_tools.get_alteration_frequency.fn.__wrapped__("tp53", "study_wes", "mutation")
     assert out["gene"] == "TP53" and out["rows"][0]["altered_samples"] > 0
 
 
@@ -784,10 +788,9 @@ def test_real_apply_order_precomputes_every_public_cohort(applied, monkeypatch):
         )
     }
     _point_tools_at(client, monkeypatch)
+    frequency_by_cancer_type = domain_tools.get_gene_frequency_by_cancer_type.fn.__wrapped__
     sources = {
-        pref: domain_tools.get_gene_frequency_by_cancer_type.fn("TP53", "mutation", 10, pref)[
-            "source"
-        ]
+        pref: frequency_by_cancer_type("TP53", "mutation", 10, pref)["source"]
         for pref in PUBLIC_COHORTS
     }
     if layout == "final":
@@ -813,14 +816,11 @@ def test_real_apply_order_precomputed_equals_live_for_public_cohorts(applied, mo
         for alt in ["any"] + ALTERATIONS
         for gene in ("TP53", "KRAS", "ALK")
     ]
-    precomputed = [
-        domain_tools.get_gene_frequency_by_cancer_type.fn(g, a, 100, p) for g, a, p in calls
-    ]
+    frequency_by_cancer_type = domain_tools.get_gene_frequency_by_cancer_type.fn.__wrapped__
+    precomputed = [frequency_by_cancer_type(g, a, 100, p) for g, a, p in calls]
     client.command("RENAME TABLE cancer_type_gene_alteration_counts TO ctgac__hidden")
     try:
-        live = [
-            domain_tools.get_gene_frequency_by_cancer_type.fn(g, a, 100, p) for g, a, p in calls
-        ]
+        live = [frequency_by_cancer_type(g, a, 100, p) for g, a, p in calls]
     finally:
         client.command("RENAME TABLE ctgac__hidden TO cancer_type_gene_alteration_counts")
     # A call with no qualifying cancer type falls back to live on both passes.

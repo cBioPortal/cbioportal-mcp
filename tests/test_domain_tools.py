@@ -74,14 +74,16 @@ def test_descriptions_are_short_and_steer_away_from_hand_written_sql(name):
 @pytest.mark.parametrize(
     "call",
     [
-        lambda: domain_tools.get_alteration_frequency.fn("TP53", "x' OR 1=1 --"),
-        lambda: domain_tools.get_alteration_frequency.fn("TP53'; DROP TABLE gene", "s"),
-        lambda: domain_tools.get_alteration_frequency.fn("TP53", "s", "fusion"),
-        lambda: domain_tools.get_top_altered_genes.fn("", "mutation"),
-        lambda: domain_tools.get_top_altered_genes.fn("s", "amp"),
-        lambda: domain_tools.get_gene_frequency_by_cancer_type.fn("TP53", "mutation", 10, "X'"),
-        lambda: domain_tools.get_gene_frequency_by_cancer_type.fn("", "mutation"),
-        lambda: domain_tools.get_profiled_counts.fn("a b"),
+        lambda: domain_tools.get_alteration_frequency.fn.__wrapped__("TP53", "x' OR 1=1 --"),
+        lambda: domain_tools.get_alteration_frequency.fn.__wrapped__("TP53'; DROP TABLE gene", "s"),
+        lambda: domain_tools.get_alteration_frequency.fn.__wrapped__("TP53", "s", "fusion"),
+        lambda: domain_tools.get_top_altered_genes.fn.__wrapped__("", "mutation"),
+        lambda: domain_tools.get_top_altered_genes.fn.__wrapped__("s", "amp"),
+        lambda: domain_tools.get_gene_frequency_by_cancer_type.fn.__wrapped__(
+            "TP53", "mutation", 10, "X'"
+        ),
+        lambda: domain_tools.get_gene_frequency_by_cancer_type.fn.__wrapped__("", "mutation"),
+        lambda: domain_tools.get_profiled_counts.fn.__wrapped__("a b"),
     ],
 )
 def test_invalid_input_is_rejected_before_any_query(db, call):
@@ -106,12 +108,12 @@ def test_gene_and_study_candidates_cover_case_variants():
 
 @pytest.mark.parametrize("given,limit", [(0, 1), (-5, 1), (7, 7), (1000, 100)])
 def test_top_n_is_clamped(db, given, limit):
-    domain_tools.get_top_altered_genes.fn("study_a", "mutation", given)
+    domain_tools.get_top_altered_genes.fn.__wrapped__("study_a", "mutation", given)
     assert f"LIMIT {limit}" in db.calls[0][1]
 
 
 def test_alteration_type_is_case_insensitive(db):
-    domain_tools.get_top_altered_genes.fn("study_a", "Amplification")
+    domain_tools.get_top_altered_genes.fn.__wrapped__("study_a", "Amplification")
     assert "alteration_type = 'amplification'" in db.calls[0][1]
 
 
@@ -253,7 +255,7 @@ def test_precomputed_hit_does_not_run_live_sql(db):
             "built_at": "2026-09-26 13:05:00",
         }
     ]
-    out = domain_tools.get_top_altered_genes.fn("study_a", "mutation", 5)
+    out = domain_tools.get_top_altered_genes.fn.__wrapped__("study_a", "mutation", 5)
 
     assert db.labels == [f"{LABEL}.precomputed"]
     assert out["source"] == "precomputed" and out["built_at"] == "2026-09-26 13:05:00"
@@ -275,7 +277,7 @@ def test_missing_table_falls_back_to_live_sql_with_a_flag(db):
     db.answers[f"{LABEL}.live"] = [
         {"hugo_gene_symbol": "KRAS", "altered_samples": 2, "profiled_samples": 8}
     ]
-    out = domain_tools.get_top_altered_genes.fn("study_a", "mutation", 5)
+    out = domain_tools.get_top_altered_genes.fn.__wrapped__("study_a", "mutation", 5)
 
     assert db.labels == [f"{LABEL}.precomputed", f"{LABEL}.live"]
     assert out["source"] == "live"
@@ -284,7 +286,7 @@ def test_missing_table_falls_back_to_live_sql_with_a_flag(db):
 
 
 def test_empty_table_falls_back_to_live_sql(db):
-    out = domain_tools.get_top_altered_genes.fn("study_a", "mutation", 5)
+    out = domain_tools.get_top_altered_genes.fn.__wrapped__("study_a", "mutation", 5)
     assert db.labels == [f"{LABEL}.precomputed", f"{LABEL}.live"]
     assert out["source"] == "live" and "no precomputed rows" in out["fallback_reason"]
     assert out["rows"] == [] and "note" in out
@@ -293,7 +295,8 @@ def test_empty_table_falls_back_to_live_sql(db):
 def test_live_failure_is_reported_not_raised(db):
     db.answers[f"{LABEL}.precomputed"] = RuntimeError("boom")
     db.answers[f"{LABEL}.live"] = RuntimeError("also boom")
-    assert domain_tools.get_top_altered_genes.fn("study_a")["error_message"] == "also boom"
+    result = domain_tools.get_top_altered_genes.fn.__wrapped__("study_a")
+    assert result["error_message"] == "also boom"
 
 
 # --- get_alteration_frequency ------------------------------------------------
@@ -314,7 +317,7 @@ def _pre(alteration_type, altered, profiled):
 
 def test_alteration_frequency_any_returns_breakdown_from_precomputed(db):
     db.answers[f"{AF}.precomputed"] = [_pre("any", 40, 100), _pre("mutation", 35, 100)]
-    out = domain_tools.get_alteration_frequency.fn("tp53", "study_a")
+    out = domain_tools.get_alteration_frequency.fn.__wrapped__("tp53", "study_a")
 
     assert db.labels == [f"{AF}.precomputed"]
     assert out["gene"] == "TP53" and out["source"] == "precomputed"
@@ -333,7 +336,7 @@ def test_alteration_frequency_unaltered_type_falls_back_for_the_denominator(db):
             "profiled_COPY_NUMBER_ALTERATION": 80,
         }
     ]
-    out = domain_tools.get_alteration_frequency.fn("TP53", "study_a", "amplification")
+    out = domain_tools.get_alteration_frequency.fn.__wrapped__("TP53", "study_a", "amplification")
 
     assert db.labels == [f"{AF}.precomputed", f"{AF}.live"]
     assert out["source"] == "live"
@@ -349,14 +352,14 @@ def test_alteration_frequency_unaltered_type_falls_back_for_the_denominator(db):
 
 def test_alteration_frequency_unknown_gene_is_an_error_not_zero(db):
     db.answers[f"{AF}.live"] = [{"matched_genes": [], "matched_studies": ["study_a"]}]
-    out = domain_tools.get_alteration_frequency.fn("NOTAGENE", "study_a")
+    out = domain_tools.get_alteration_frequency.fn.__wrapped__("NOTAGENE", "study_a")
     assert "not in the gene table" in out["error_message"]
 
 
 def test_alteration_frequency_unknown_study_uses_the_deployment_message(db, monkeypatch):
     monkeypatch.setattr(server, "_similar_study_identifiers", lambda study_id: [])
     db.answers[f"{AF}.live"] = [{"matched_genes": ["TP53"], "matched_studies": []}]
-    out = domain_tools.get_alteration_frequency.fn("TP53", "nope_2020")
+    out = domain_tools.get_alteration_frequency.fn.__wrapped__("TP53", "nope_2020")
     assert "did not match any study" in out["error_message"]
 
 
@@ -365,7 +368,7 @@ def test_alteration_frequency_unknown_study_uses_the_deployment_message(db, monk
 
 def test_profiled_counts_unknown_study(db, monkeypatch):
     monkeypatch.setattr(server, "_similar_study_identifiers", lambda study_id: [])
-    out = domain_tools.get_profiled_counts.fn("nope_2020")
+    out = domain_tools.get_profiled_counts.fn.__wrapped__("nope_2020")
     assert "did not match any study" in out["error_message"]
     assert db.labels == [
         "domain_tools.profiled_counts.precomputed",
@@ -383,7 +386,7 @@ def test_gene_frequency_by_cancer_type_shapes_rows(db):
             "built_at": "2026-09-26 13:05:00",
         }
     ]
-    out = domain_tools.get_gene_frequency_by_cancer_type.fn("tp53")
+    out = domain_tools.get_gene_frequency_by_cancer_type.fn.__wrapped__("tp53")
     assert out["gene"] == "TP53" and out["preference"] == "pan_cancer_tcga"
     assert out["rows"][0]["frequency_pct"] == 25.0
     assert "< 50 profiled samples omitted" in out["provenance"]
@@ -497,6 +500,8 @@ def test_cohort_built_but_nothing_reaches_threshold_stays_precomputed(db):
     """Rows exist for the cohort, all below 50 profiled: no live query needed."""
     label = "domain_tools.gene_frequency_by_cancer_type"
     db.answers[f"{label}.precomputed"] = [_ct("Breast Cancer", 3, 40)]
-    out = domain_tools.get_gene_frequency_by_cancer_type.fn("TP53", "mutation", 10, "cohort_x")
+    out = domain_tools.get_gene_frequency_by_cancer_type.fn.__wrapped__(
+        "TP53", "mutation", 10, "cohort_x"
+    )
     assert db.labels == [f"{label}.precomputed"]
     assert out["source"] == "precomputed" and out["rows"] == []

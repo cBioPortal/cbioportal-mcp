@@ -18,7 +18,7 @@ def test_list_studies_adds_clickable_study_urls(monkeypatch):
         ],
     )
 
-    studies = server.list_studies.fn(search="breast", limit=20)
+    studies = server.list_studies.fn.__wrapped__(search="breast", limit=20)
 
     assert studies == [
         {

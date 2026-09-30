@@ -48,6 +48,9 @@ export CLICKHOUSE_MCP_SERVER_TRANSPORT=stdio # or http or sse
 # Optional: how long table lists, column descriptions, and generated study
 # guides are cached in-process (default: 3600; 0 disables the cache).
 # export CBIOPORTAL_MCP_METADATA_CACHE_TTL_SECONDS=3600
+# Optional: most ClickHouse queries one server process runs at once, across
+# concurrent tool calls (default: 4).
+# export CBIOPORTAL_MCP_MAX_CONCURRENT_QUERIES=4
 ```
 
 ### Datadog Tool Metrics
