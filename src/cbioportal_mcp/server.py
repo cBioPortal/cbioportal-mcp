@@ -8,6 +8,8 @@ import typing
 import anyio.to_thread
 from ddtrace.llmobs import LLMObs
 
+from cbioportal_mcp import MAX_CONCURRENT_QUERIES, query_concurrency
+
 _dd_api_key = os.getenv("DD_API_KEY")
 if _dd_api_key:
     LLMObs.enable(
@@ -311,6 +313,13 @@ def main():
 
     # Get config
     config = get_mcp_config()
+
+    # Refuse to serve if mcp-clickhouse's query pool doesn't match the cap
+    # (see query_concurrency); report the pool's actual size, not the env.
+    query_concurrency.verify_query_pool(MAX_CONCURRENT_QUERIES)
+    logger.info(
+        "ClickHouse query pool: %d workers", query_concurrency.query_pool_size()
+    )
 
     try:
         ensure_db_permissions(config=config)
