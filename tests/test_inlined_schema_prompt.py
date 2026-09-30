@@ -111,6 +111,9 @@ def test_system_prompt_forbids_narration_between_tool_calls():
 
     assert "Emit tool calls directly — no narration between tool calls" in prompt
     assert "Batch independent calls in one turn" in prompt
+    assert "Sequence calls only when a later call needs an earlier result" in prompt
+    assert "Prefer one SQL query over several** when it stays simple" in prompt
+    assert "don't wrap those views in CTEs" in prompt
 
 
 def test_system_prompt_places_static_reference_before_behavioral_sections():
