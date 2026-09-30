@@ -24,7 +24,7 @@ def test_list_studies_default_uses_trimmed_sample_count_query(monkeypatch):
     monkeypatch.setattr(server, "_list_available_study_guides", lambda: [])
     monkeypatch.setattr(server, "run_select_query", fake_run_select_query)
 
-    rows = server.list_studies.fn()
+    rows = server.list_studies.fn.__wrapped__()
 
     assert rows[0]["cancer_study_identifier"] == "study_alpha"
     assert "description" not in rows[0]
@@ -49,15 +49,15 @@ def test_list_studies_refetches_after_ttl_expires(monkeypatch):
     monkeypatch.setattr(server, "_list_available_study_guides", lambda: [])
     monkeypatch.setattr(server, "run_select_query", fake_run_select_query)
 
-    server.list_studies.fn()
+    server.list_studies.fn.__wrapped__()
     assert call_count == 1
 
     fake_now[0] += 899  # still within TTL
-    server.list_studies.fn()
+    server.list_studies.fn.__wrapped__()
     assert call_count == 1
 
     fake_now[0] += 2  # past TTL
-    server.list_studies.fn()
+    server.list_studies.fn.__wrapped__()
     assert call_count == 2
 
 
@@ -73,10 +73,11 @@ def test_list_studies_caches_repeated_calls_across_search_terms(monkeypatch):
     monkeypatch.setattr(server, "_list_available_study_guides", lambda: [])
     monkeypatch.setattr(server, "run_select_query", fake_run_select_query)
 
-    assert server.list_studies.fn(limit=20) == server.list_studies.fn(limit=20)
+    list_studies = server.list_studies.fn.__wrapped__
+    assert list_studies(limit=20) == list_studies(limit=20)
     # A never-before-seen search term still hits the same cached snapshot,
     # unlike the old per-query-shape cache which would have missed here.
-    server.list_studies.fn(search="alpha")
+    server.list_studies.fn.__wrapped__(search="alpha")
     assert call_count == 1
 
 
@@ -91,7 +92,7 @@ def test_list_studies_verbose_includes_description(monkeypatch):
     monkeypatch.setattr(server, "_list_available_study_guides", lambda: [])
     monkeypatch.setattr(server, "run_select_query", fake_run_select_query)
 
-    rows = server.list_studies.fn(verbose=True)
+    rows = server.list_studies.fn.__wrapped__(verbose=True)
 
     assert rows[0]["description"] == "Long description"
     assert "cs.description" in queries[0]
@@ -126,7 +127,7 @@ def test_background_refresh_updates_cache_without_a_live_caller(monkeypatch):
     # A caller landing right after sees the already-fresh cache, not a third
     # fetch triggered by its own request.
     monkeypatch.setattr(server, "_list_available_study_guides", lambda: [])
-    server.list_studies.fn()
+    server.list_studies.fn.__wrapped__()
     assert call_count == 2
 
 
@@ -165,7 +166,7 @@ def test_list_studies_search_filters_in_python(monkeypatch):
     monkeypatch.setattr(server, "_list_available_study_guides", lambda: [])
     monkeypatch.setattr(server, "run_select_query", fake_run_select_query)
 
-    rows = server.list_studies.fn(search="beta")
+    rows = server.list_studies.fn.__wrapped__(search="beta")
 
     assert [row["cancer_study_identifier"] for row in rows] == ["study_beta"]
 

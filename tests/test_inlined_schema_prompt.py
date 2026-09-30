@@ -142,7 +142,7 @@ def test_system_prompt_has_no_dynamic_content():
 
 
 def test_pitfall_15_no_longer_mandates_schema_checks_for_listed_tables():
-    fragment = server.read_guide.fn("cbioportal://common-pitfalls#15")
+    fragment = server.read_guide.fn.__wrapped__("cbioportal://common-pitfalls#15")
 
     assert "HALLUCINATED TABLES OR COLUMNS" in fragment
     assert "Always check with `clickhouse_list_tables`" not in fragment
@@ -380,7 +380,7 @@ def _server_tools() -> dict[str, set[str]]:
 
 
 def _guide_uri_exists(uri: str) -> bool:
-    text = server.read_guide.fn(uri)
+    text = server.read_guide.fn.__wrapped__(uri)
     return not text.startswith(("Resource not found:", "No pitfall numbered"))
 
 

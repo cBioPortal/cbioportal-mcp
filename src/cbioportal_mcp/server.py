@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
 """cBioPortal MCP Server - FastMCP implementation."""
 
+import functools
 import os
+import typing
 
+import anyio.to_thread
 from ddtrace.llmobs import LLMObs
+
+from cbioportal_mcp import MAX_CONCURRENT_QUERIES, query_concurrency
 
 _dd_api_key = os.getenv("DD_API_KEY")
 if _dd_api_key:
@@ -82,6 +87,36 @@ def _cache_put(cache: MetadataCache, key, value) -> None:
         cache.put(key, value)
     except Exception:
         logger.debug("metadata cache put failed for %r; bypassing", key, exc_info=True)
+
+
+# FastMCP 2.x calls a sync tool function directly on the event loop, so a
+# batch of tool calls the client sends concurrently would otherwise run one
+# after another. Every tool that does I/O (ClickHouse or the filesystem) is
+# wrapped with run_off_event_loop so each call runs on a worker thread and a
+# batch costs roughly its slowest call. How many ClickHouse queries run at
+# once is bounded separately, by mcp-clickhouse's query pool (see
+# query_concurrency).
+
+
+def run_off_event_loop(fn):
+    """Make a blocking tool function async by running it on a worker thread.
+
+    Apply below @mcp.tool so FastMCP registers the async wrapper; the tool's
+    schema still comes from fn's signature. The worker thread gets a copy of
+    the caller's contextvars, so telemetry spans and the FastMCP request
+    context still belong to the right tool call. The undecorated function is
+    available as `.fn.__wrapped__` on the registered tool.
+    """
+
+    @functools.wraps(fn)
+    async def wrapper(*args, **kwargs):
+        return await anyio.to_thread.run_sync(functools.partial(fn, *args, **kwargs))
+
+    # Resolve hints against fn itself: on Python 3.10, get_type_hints() turns
+    # `x: str = None` into Optional[str] using the function's defaults, which
+    # the *args/**kwargs wrapper doesn't have, so the schema would change.
+    wrapper.__annotations__ = typing.get_type_hints(fn, include_extras=True)
+    return wrapper
 
 # Regex pattern for valid cBioPortal study identifiers
 # Allows alphanumeric characters, underscores, and hyphens
@@ -278,6 +313,17 @@ def main():
 
     # Get config
     config = get_mcp_config()
+
+    # Refuse to serve if mcp-clickhouse's query pool doesn't match the cap
+    # (see query_concurrency); report the pool's actual size, not the env.
+    try:
+        query_concurrency.verify_query_pool(MAX_CONCURRENT_QUERIES)
+    except RuntimeError as e:
+        logger.critical("❌ %s", e)
+        sys.exit(2)
+    logger.info(
+        "ClickHouse query pool: %d workers", query_concurrency.query_pool_size()
+    )
 
     try:
         ensure_db_permissions(config=config)
@@ -511,6 +557,7 @@ MAX_SELECT_MAX_ROWS = 10000
         - On failure: an object with a single field "error_message" containing a string describing the error.
 """
 )
+@run_off_event_loop
 def clickhouse_run_select_query(
     query: str, max_rows: int = DEFAULT_SELECT_MAX_ROWS
 ) -> dict[str, list[dict] | str | bool | int]:
@@ -554,6 +601,7 @@ def clickhouse_run_select_query(
         - On failure: an object with a single field "error_message" containing a string describing the error.
 """
 )
+@run_off_event_loop
 def clickhouse_list_tables() -> dict[str, list[dict] | str]:
     logger.info(f"clickhouse_list_tables: called")
 
@@ -587,6 +635,7 @@ def clickhouse_list_tables() -> dict[str, list[dict] | str]:
         - On failure: an object with a single field "error_message" containing a string describing the error.
 """
 )
+@run_off_event_loop
 def clickhouse_list_table_columns(table: str) -> dict[str, list[dict] | str]:
     logger.info(f"clickhouse_list_table_columns: called")
 
@@ -682,6 +731,7 @@ def zip_select_query_result(ch_query_result) -> list[dict]:
 
 # Resource Access Tools for AI Agents
 @mcp.tool()
+@run_off_event_loop
 def list_guides() -> list[dict]:
     """List all available query guides with their URIs and descriptions.
 
@@ -759,6 +809,7 @@ def list_guides() -> list[dict]:
 
 
 @mcp.tool()
+@run_off_event_loop
 def read_guide(uri: str) -> str:
     """Read the content of a specific guide by URI.
 
@@ -803,6 +854,7 @@ def read_guide(uri: str) -> str:
 
 
 @mcp.tool()
+@run_off_event_loop
 def get_general_guide(name: str) -> str:
     """Get a deployment-specific general guide by name.
 
@@ -891,6 +943,7 @@ def _study_not_in_deployment_message(study_id: str) -> str:
 
 
 @mcp.tool()
+@run_off_event_loop
 def get_study_guide(study_id: str) -> str:
     """Get a guide for a specific cBioPortal study.
     
@@ -1281,6 +1334,7 @@ def _filter_studies(search: str | None, limit: int, verbose: bool) -> list[dict]
 
 
 @mcp.tool()
+@run_off_event_loop
 def list_studies(search: str = None, limit: int = 20, verbose: bool = False) -> list[dict]:
     """List available cBioPortal studies.
 
@@ -1318,6 +1372,7 @@ def list_studies(search: str = None, limit: int = 20, verbose: bool = False) -> 
 
 
 @mcp.tool()
+@run_off_event_loop
 def list_study_guides() -> list[str]:
     """List all studies that have pre-generated guides available.
 
@@ -1328,6 +1383,7 @@ def list_study_guides() -> list[str]:
 
 
 @mcp.tool()
+@run_off_event_loop
 def search_oncotree(search_term: str) -> list[dict]:
     """Search OncoTree cancer types by code, name, or tissue.
 
