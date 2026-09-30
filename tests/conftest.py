@@ -1,5 +1,8 @@
+# Import the package before test modules import mcp_clickhouse: the package
+# sizes mcp-clickhouse's query pool before it is created (see query_concurrency).
 import pytest
 
+import cbioportal_mcp  # noqa: F401
 from cbioportal_mcp import result_format
 
 

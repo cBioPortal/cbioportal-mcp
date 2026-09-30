@@ -558,6 +558,7 @@ def _frequency_row(alteration_type, altered, profiled) -> dict:
     whose panel covers the gene, or WES). Report these numbers as-is.
     """
 )
+@server.run_off_event_loop
 def get_alteration_frequency(gene: str, study_id: str, alteration_type: str = "any") -> dict:
     try:
         gene = _validate_gene(gene)
@@ -645,6 +646,7 @@ def get_alteration_frequency(gene: str, study_id: str, alteration_type: str = "a
     altered_samples, profiled_samples (gene-specific denominator), frequency_pct.
     """
 )
+@server.run_off_event_loop
 def get_top_altered_genes(
     study_id: str, alteration_type: str = "mutation", top_n: int = 10
 ) -> dict:
@@ -701,6 +703,7 @@ def get_top_altered_genes(
     so they can exceed get_alteration_frequency's discrete-only ones.
     """
 )
+@server.run_off_event_loop
 def get_gene_frequency_by_cancer_type(
     gene: str,
     alteration_type: str = "mutation",
@@ -768,6 +771,7 @@ def get_gene_frequency_by_cancer_type(
     and can differ from the portal's case-list counts (cancer_study.*_sample_count).
     """
 )
+@server.run_off_event_loop
 def get_profiled_counts(study_id: str) -> dict:
     try:
         studies = _study_candidates(study_id)

@@ -15,7 +15,6 @@ def _patch_rows(monkeypatch, n):
         server, "run_select_query", lambda query, query_label=None, max_rows=None: _rows(n)
     )
 
-
 @pytest.fixture
 def legacy_format(monkeypatch):
     monkeypatch.setenv(result_format.RESULT_FORMAT_ENV, result_format.LEGACY)
@@ -27,7 +26,7 @@ def legacy_format(monkeypatch):
 def test_select_query_under_default_limit_is_not_truncated(monkeypatch):
     _patch_rows(monkeypatch, 5)
 
-    result = server.clickhouse_run_select_query.fn("SELECT 1")
+    result = server.clickhouse_run_select_query.fn.__wrapped__("SELECT 1")
 
     assert result == {"columns": ["i"], "rows": [[i] for i in range(5)], "row_count": 5}
 
@@ -35,7 +34,7 @@ def test_select_query_under_default_limit_is_not_truncated(monkeypatch):
 def test_select_query_over_default_limit_is_truncated(monkeypatch):
     _patch_rows(monkeypatch, server.DEFAULT_SELECT_MAX_ROWS + 50)
 
-    result = server.clickhouse_run_select_query.fn("SELECT * FROM huge_table")
+    result = server.clickhouse_run_select_query.fn.__wrapped__("SELECT * FROM huge_table")
 
     assert result["truncated"] is True
     assert result["row_count"] == server.DEFAULT_SELECT_MAX_ROWS
@@ -54,7 +53,7 @@ def test_select_query_uses_real_column_order_and_keeps_empty_values(monkeypatch)
         lambda q: json.dumps({"columns": ["a", "b", "c"], "rows": [[1, None, ""], [2, "x", "y"]]}),
     )
 
-    result = server.clickhouse_run_select_query.fn("SELECT a, b, c FROM t")
+    result = server.clickhouse_run_select_query.fn.__wrapped__("SELECT a, b, c FROM t")
 
     assert result == {
         "columns": ["a", "b", "c"],
@@ -70,7 +69,7 @@ def test_select_query_all_empty_column_is_still_listed(monkeypatch):
         lambda q: json.dumps({"columns": ["a", "b"], "rows": [[1, None], [2, None]]}),
     )
 
-    result = server.clickhouse_run_select_query.fn("SELECT a, b FROM t")
+    result = server.clickhouse_run_select_query.fn.__wrapped__("SELECT a, b FROM t")
 
     assert result["columns"] == ["a", "b"] and result["rows"] == [[1, None], [2, None]]
 
@@ -83,7 +82,7 @@ def test_select_query_cuts_long_cells(monkeypatch):
         lambda q: json.dumps({"columns": ["t"], "rows": [["x" * 25], ["short"]]}),
     )
 
-    result = server.clickhouse_run_select_query.fn("SELECT t FROM t")
+    result = server.clickhouse_run_select_query.fn.__wrapped__("SELECT t FROM t")
 
     assert result["rows"] == [["x" * 10 + "…[+15 chars]"], ["short"]]
     assert result["cut_cells"] == {"t": 1}
@@ -99,7 +98,7 @@ def test_select_query_passes_max_rows_through_to_run_select_query(monkeypatch):
 
     monkeypatch.setattr(server, "run_select_query", fake_run_select_query)
 
-    server.clickhouse_run_select_query.fn("SELECT 1", max_rows=42)
+    server.clickhouse_run_select_query.fn.__wrapped__("SELECT 1", max_rows=42)
 
     assert captured["max_rows"] == 42
 
@@ -107,7 +106,7 @@ def test_select_query_passes_max_rows_through_to_run_select_query(monkeypatch):
 def test_select_query_max_rows_can_be_raised(monkeypatch):
     _patch_rows(monkeypatch, server.DEFAULT_SELECT_MAX_ROWS + 50)
 
-    result = server.clickhouse_run_select_query.fn(
+    result = server.clickhouse_run_select_query.fn.__wrapped__(
         "SELECT * FROM huge_table", max_rows=server.DEFAULT_SELECT_MAX_ROWS + 50
     )
 
@@ -118,7 +117,7 @@ def test_select_query_max_rows_can_be_raised(monkeypatch):
 def test_select_query_max_rows_is_clamped_to_hard_cap(monkeypatch):
     _patch_rows(monkeypatch, server.MAX_SELECT_MAX_ROWS + 500)
 
-    result = server.clickhouse_run_select_query.fn(
+    result = server.clickhouse_run_select_query.fn.__wrapped__(
         "SELECT * FROM huge_table", max_rows=server.MAX_SELECT_MAX_ROWS + 5000
     )
 
@@ -145,7 +144,7 @@ def test_tool_description_documents_the_compact_shape():
 def test_legacy_select_query_under_default_limit_is_not_truncated(monkeypatch, legacy_format):
     _patch_rows(monkeypatch, 5)
 
-    result = server.clickhouse_run_select_query.fn("SELECT 1")
+    result = server.clickhouse_run_select_query.fn.__wrapped__("SELECT 1")
 
     assert result == {"rows": _rows(5)}
     assert "truncated" not in result
@@ -154,7 +153,7 @@ def test_legacy_select_query_under_default_limit_is_not_truncated(monkeypatch, l
 def test_legacy_select_query_over_default_limit_is_truncated(monkeypatch, legacy_format):
     _patch_rows(monkeypatch, server.DEFAULT_SELECT_MAX_ROWS + 50)
 
-    result = server.clickhouse_run_select_query.fn("SELECT * FROM huge_table")
+    result = server.clickhouse_run_select_query.fn.__wrapped__("SELECT * FROM huge_table")
 
     assert result["truncated"] is True
     assert result["returned_rows"] == server.DEFAULT_SELECT_MAX_ROWS
@@ -166,7 +165,7 @@ def test_legacy_select_query_over_default_limit_is_truncated(monkeypatch, legacy
 def test_legacy_select_query_max_rows_is_clamped_to_hard_cap(monkeypatch, legacy_format):
     _patch_rows(monkeypatch, server.MAX_SELECT_MAX_ROWS + 500)
 
-    result = server.clickhouse_run_select_query.fn(
+    result = server.clickhouse_run_select_query.fn.__wrapped__(
         "SELECT * FROM huge_table", max_rows=server.MAX_SELECT_MAX_ROWS + 5000
     )
 
@@ -185,8 +184,8 @@ def test_legacy_schema_tools_keep_list_of_dicts(monkeypatch, legacy_format):
         ),
     )
     try:
-        assert server.clickhouse_list_tables.fn() == {"tables": [{"name": "sample_id"}]}
-        assert server.clickhouse_list_table_columns.fn("sample") == {
+        assert server.clickhouse_list_tables.fn.__wrapped__() == {"tables": [{"name": "sample_id"}]}
+        assert server.clickhouse_list_table_columns.fn.__wrapped__("sample") == {
             "columns": [{"name": "sample_id", "type": "String", "comment": "Sample id"}]
         }
     finally:
