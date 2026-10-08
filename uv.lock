@@ -164,7 +164,6 @@ dependencies = [
     { name = "opentelemetry-exporter-otlp-proto-http" },
     { name = "opentelemetry-sdk" },
     { name = "py-key-value-aio", extra = ["redis"] },
-    { name = "python-dotenv" },
 ]
 
 [package.optional-dependencies]
@@ -187,7 +186,6 @@ requires-dist = [
     { name = "py-key-value-aio", extras = ["redis"], specifier = ">=0.2.8,<0.4.0" },
     { name = "pytest", marker = "extra == 'dev'" },
     { name = "pytest-asyncio", marker = "extra == 'dev'" },
-    { name = "python-dotenv" },
     { name = "ruff", marker = "extra == 'dev'" },
 ]
 provides-extras = ["dev"]

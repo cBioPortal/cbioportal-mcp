@@ -17,13 +17,13 @@ def test_pitfall_numbers_are_unique():
 
 
 def test_lettered_pitfalls_are_each_reachable():
-    assert "IMPLIED LITERATURE REVIEW" in server.read_guide.fn.__wrapped__("cbioportal://common-pitfalls#17b")
-    assert "AMBIGUOUS ACC" in server.read_guide.fn.__wrapped__("cbioportal://common-pitfalls#17c")
-    assert "LEFT- VS RIGHT-SIDED" in server.read_guide.fn.__wrapped__("cbioportal://common-pitfalls#17d")
+    assert "IMPLIED LITERATURE REVIEW" in server.read_guide.fn("cbioportal://common-pitfalls#17b")
+    assert "AMBIGUOUS ACC" in server.read_guide.fn("cbioportal://common-pitfalls#17c")
+    assert "LEFT- VS RIGHT-SIDED" in server.read_guide.fn("cbioportal://common-pitfalls#17d")
 
 
 def test_fragment_returns_only_the_requested_pitfall():
-    fragment = server.read_guide.fn.__wrapped__("cbioportal://common-pitfalls#16")
+    fragment = server.read_guide.fn("cbioportal://common-pitfalls#16")
 
     assert "SILENT QUERY SUBSTITUTION" in fragment
     assert "CRITICAL MUTATION FREQUENCY ERRORS" not in fragment
@@ -31,14 +31,14 @@ def test_fragment_returns_only_the_requested_pitfall():
 
 
 def test_fragment_is_much_smaller_than_full_guide():
-    full_guide = server.read_guide.fn.__wrapped__("cbioportal://common-pitfalls")
-    fragment = server.read_guide.fn.__wrapped__("cbioportal://common-pitfalls#16")
+    full_guide = server.read_guide.fn("cbioportal://common-pitfalls")
+    fragment = server.read_guide.fn("cbioportal://common-pitfalls#16")
 
     assert len(fragment.split()) < len(full_guide.split()) / 5
 
 
 def test_unknown_pitfall_number_lists_available_numbers_instead_of_crashing():
-    result = server.read_guide.fn.__wrapped__("cbioportal://common-pitfalls#999")
+    result = server.read_guide.fn("cbioportal://common-pitfalls#999")
 
     assert "No pitfall numbered '999'" in result
     assert "16" in result
@@ -46,7 +46,7 @@ def test_unknown_pitfall_number_lists_available_numbers_instead_of_crashing():
 
 
 def test_full_guide_is_unchanged_and_still_readable():
-    result = server.read_guide.fn.__wrapped__("cbioportal://common-pitfalls")
+    result = server.read_guide.fn("cbioportal://common-pitfalls")
 
     assert "FLAWED PREMISE OR NONEXISTENT DATA FIELD" in result
     assert "SILENT QUERY SUBSTITUTION" in result

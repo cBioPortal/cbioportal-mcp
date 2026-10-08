@@ -37,9 +37,7 @@ if ! command -v clickhouse-client >/dev/null 2>&1; then
     exit 1
 fi
 
-# clickhouse-client TLS flag is a bare --secure (no value). It is expanded as
-# ${secure_flag[@]+...} because bash < 4.4 (macOS /bin/bash) treats an empty
-# array as unbound under `set -u`.
+# clickhouse-client TLS flag is a bare --secure (no value)
 secure_flag=()
 if [[ "$CLICKHOUSE_SECURE" == "true" || "$CLICKHOUSE_SECURE" == "1" ]]; then
     secure_flag+=(--secure)
@@ -54,9 +52,6 @@ echo
 #   2. Portal-specific files: SQL_DIR/portal-specific/<portal>/*.sql.
 #      Subdirectories iterate alphabetically, then numerically within each.
 #      Files without a leading digit are treated as docs (e.g. README.md).
-#   3. Final files: SQL_DIR/final/*.sql in numeric order. These build
-#      aggregates over everything phases 1-2 created, including the
-#      portal-specific cancer_study_query_preferences rows.
 shopt -s nullglob
 
 apply_one() {
@@ -69,7 +64,7 @@ apply_one() {
     clickhouse-client \
         --host "$CLICKHOUSE_HOST" \
         --port "$CLICKHOUSE_PORT" \
-        ${secure_flag[@]+"${secure_flag[@]}"} \
+        "${secure_flag[@]}" \
         --user "$CLICKHOUSE_ADMIN_USER" \
         --password "$CLICKHOUSE_ADMIN_PASSWORD" \
         --database "$CLICKHOUSE_DATABASE" \
@@ -92,12 +87,6 @@ for d in "$SQL_DIR"/portal-specific/*/; do
     for f in "$d"*.sql; do
         apply_one "$f"
     done
-done
-
-# Phase 3: final files. They read every preference row, so they must run
-# after the portal-specific phase.
-for f in "$SQL_DIR"/final/*.sql; do
-    apply_one "$f"
 done
 
 echo
