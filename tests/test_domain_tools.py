@@ -1,4 +1,4 @@
-"""Unit tests for the precomputed-aggregate tools (no database).
+"""Unit tests for the purpose-built frequency tools (no database).
 
 The database-backed equivalence proof lives in test_domain_tools_equivalence.py.
 """
@@ -13,8 +13,6 @@ from cbioportal_mcp import domain_tools, server
 from cbioportal_mcp.result_format import table_to_records as _records
 
 REPO = Path(__file__).resolve().parent.parent
-AGGREGATES_SQL = REPO / "sql" / "final" / "0-precomputed-aggregates.sql"
-APPLY_SQL = REPO / "scripts" / "apply_sql.sh"
 SQL_4 = REPO / "sql" / "4-mutation-frequency-views.sql"
 TOOL_NAMES = {
     "get_alteration_frequency",
@@ -114,29 +112,12 @@ def test_top_n_is_clamped(db, given, limit):
 
 
 def test_alteration_type_is_case_insensitive(db):
-    domain_tools.get_top_altered_genes.fn.__wrapped__("study_a", "Amplification")
-    assert "alteration_type = 'amplification'" in db.calls[0][1]
+    out = domain_tools.get_top_altered_genes.fn.__wrapped__("study_a", "Amplification")
+    assert out["alteration_type"] == "amplification"
+    assert "(variant_type = 'cna' AND cna_alteration = 2)" in db.calls[0][1]
 
 
 # --- SQL building ------------------------------------------------------------
-
-
-def test_precomputed_queries_read_the_aggregate_tables():
-    assert "FROM study_gene_alteration_counts" in _norm(
-        domain_tools.build_alteration_frequency_precomputed_sql(("TP53",), ("s",), ["any"])
-    )
-    assert "FROM study_gene_alteration_counts" in _norm(
-        domain_tools.build_top_altered_genes_precomputed_sql(("s",), "mutation", 5)
-    )
-    by_type = _norm(
-        domain_tools.build_frequency_by_cancer_type_precomputed_sql(("TP53",), "mutation", "p")
-    )
-    assert "FROM cancer_type_gene_alteration_counts" in by_type
-    # Threshold, order and limit are applied in Python (_select_cancer_types).
-    assert "profiled_samples >=" not in by_type and "LIMIT" not in by_type
-    assert "FROM study_profiled_counts" in _norm(
-        domain_tools.build_profiled_counts_precomputed_sql(("s",))
-    )
 
 
 def test_single_study_live_sql_uses_discrete_cna_and_drops_uncalled_svs():
@@ -242,62 +223,40 @@ def test_frequency_pct_matches_clickhouse_round_at_half_boundaries(altered, prof
     assert domain_tools._frequency_pct(altered, profiled) == expected
 
 
-# --- fallback ----------------------------------------------------------------
+# --- live path -----------------------------------------------------------------
 
 LABEL = "domain_tools.top_altered_genes"
 
 
-def test_precomputed_hit_does_not_run_live_sql(db):
-    db.answers[f"{LABEL}.precomputed"] = [
-        {
-            "hugo_gene_symbol": "TP53",
-            "altered_samples": 30,
-            "profiled_samples": 100,
-            "built_at": "2026-09-26 13:05:00",
-        }
-    ]
-    out = domain_tools.get_top_altered_genes.fn.__wrapped__("study_a", "mutation", 5)
-
-    assert db.labels == [f"{LABEL}.precomputed"]
-    assert out["source"] == "precomputed" and out["built_at"] == "2026-09-26 13:05:00"
-    assert _records(out) == [
-        {
-            "hugo_gene_symbol": "TP53",
-            "altered_samples": 30,
-            "profiled_samples": 100,
-            "frequency_pct": 30.0,
-        }
-    ]
-    assert "fallback_reason" not in out and "denominator" in out["provenance"]
-
-
-def test_missing_table_falls_back_to_live_sql_with_a_flag(db):
-    db.answers[f"{LABEL}.precomputed"] = RuntimeError(
-        "Table study_gene_alteration_counts doesn't exist"
-    )
+def test_top_altered_genes_runs_one_live_query(db):
     db.answers[f"{LABEL}.live"] = [
         {"hugo_gene_symbol": "KRAS", "altered_samples": 2, "profiled_samples": 8}
     ]
     out = domain_tools.get_top_altered_genes.fn.__wrapped__("study_a", "mutation", 5)
 
-    assert db.labels == [f"{LABEL}.precomputed", f"{LABEL}.live"]
-    assert out["source"] == "live"
-    assert "unavailable" in out["fallback_reason"]
-    assert _records(out)[0]["frequency_pct"] == 25.0
+    assert db.labels == [f"{LABEL}.live"]
+    assert out["source"] == "live" and "fallback_reason" not in out
+    assert _records(out) == [
+        {
+            "hugo_gene_symbol": "KRAS",
+            "altered_samples": 2,
+            "profiled_samples": 8,
+            "frequency_pct": 25.0,
+        }
+    ]
+    assert "denominator" in out["provenance"]
 
 
-def test_empty_table_falls_back_to_live_sql(db):
+def test_empty_live_result_has_a_note(db):
     out = domain_tools.get_top_altered_genes.fn.__wrapped__("study_a", "mutation", 5)
-    assert db.labels == [f"{LABEL}.precomputed", f"{LABEL}.live"]
-    assert out["source"] == "live" and "no precomputed rows" in out["fallback_reason"]
-    assert _records(out) == [] and "note" in out
+    assert db.labels == [f"{LABEL}.live"]
+    assert out["source"] == "live" and _records(out) == [] and "note" in out
 
 
 def test_live_failure_is_reported_not_raised(db):
-    db.answers[f"{LABEL}.precomputed"] = RuntimeError("boom")
-    db.answers[f"{LABEL}.live"] = RuntimeError("also boom")
+    db.answers[f"{LABEL}.live"] = RuntimeError("boom")
     result = domain_tools.get_top_altered_genes.fn.__wrapped__("study_a")
-    assert result["error_message"] == "also boom"
+    assert result["error_message"] == "boom"
 
 
 # --- get_alteration_frequency ------------------------------------------------
@@ -305,41 +264,36 @@ def test_live_failure_is_reported_not_raised(db):
 AF = "domain_tools.alteration_frequency"
 
 
-def _pre(alteration_type, altered, profiled):
-    return {
-        "hugo_gene_symbol": "TP53",
-        "cancer_study_identifier": "study_a",
-        "alteration_type": alteration_type,
-        "altered_samples": altered,
-        "profiled_samples": profiled,
-        "built_at": "2026-09-26 13:05:00",
-    }
+def _live_row(**counts):
+    return {"matched_genes": ["TP53"], "matched_studies": ["study_a"], **counts}
 
 
-def test_alteration_frequency_any_returns_breakdown_from_precomputed(db):
-    db.answers[f"{AF}.precomputed"] = [_pre("any", 40, 100), _pre("mutation", 35, 100)]
+def test_alteration_frequency_any_returns_breakdown_of_occurring_types(db):
+    db.answers[f"{AF}.live"] = [
+        _live_row(
+            altered_any=40,
+            profiled_ANY=100,
+            altered_mutation=35,
+            profiled_MUTATION_EXTENDED=100,
+            altered_amplification=0,
+            profiled_COPY_NUMBER_ALTERATION=80,
+        )
+    ]
     out = domain_tools.get_alteration_frequency.fn.__wrapped__("tp53", "study_a")
 
-    assert db.labels == [f"{AF}.precomputed"]
-    assert out["gene"] == "TP53" and out["source"] == "precomputed"
+    assert db.labels == [f"{AF}.live"]
+    assert out["gene"] == "TP53" and out["source"] == "live" and "fallback_reason" not in out
     assert [r["alteration_type"] for r in _records(out)] == ["any", "mutation"]
     assert _records(out)[0]["frequency_pct"] == 40.0
 
 
-def test_alteration_frequency_unaltered_type_falls_back_for_the_denominator(db):
-    """No stored row = 0 altered; only the live query knows how many were profiled."""
-    db.answers[f"{AF}.precomputed"] = [_pre("any", 40, 100), _pre("mutation", 35, 100)]
+def test_alteration_frequency_unaltered_requested_type_reports_the_denominator(db):
     db.answers[f"{AF}.live"] = [
-        {
-            "matched_genes": ["TP53"],
-            "matched_studies": ["study_a"],
-            "altered_amplification": 0,
-            "profiled_COPY_NUMBER_ALTERATION": 80,
-        }
+        _live_row(altered_amplification=0, profiled_COPY_NUMBER_ALTERATION=80)
     ]
     out = domain_tools.get_alteration_frequency.fn.__wrapped__("TP53", "study_a", "amplification")
 
-    assert db.labels == [f"{AF}.precomputed", f"{AF}.live"]
+    assert db.labels == [f"{AF}.live"]
     assert out["source"] == "live"
     assert _records(out) == [
         {
@@ -371,23 +325,21 @@ def test_profiled_counts_unknown_study(db, monkeypatch):
     monkeypatch.setattr(server, "_similar_study_identifiers", lambda study_id: [])
     out = domain_tools.get_profiled_counts.fn.__wrapped__("nope_2020")
     assert "did not match any study" in out["error_message"]
-    assert db.labels == [
-        "domain_tools.profiled_counts.precomputed",
-        "domain_tools.profiled_counts.live",
-    ]
+    assert db.labels == ["domain_tools.profiled_counts.live"]
 
 
 def test_gene_frequency_by_cancer_type_shapes_rows(db):
-    db.answers["domain_tools.gene_frequency_by_cancer_type.precomputed"] = [
+    db.answers["domain_tools.gene_frequency_by_cancer_type.live"] = [
         {
             "cancer_type": "Breast Cancer",
             "hugo_gene_symbol": "TP53",
             "altered_samples": 50,
             "profiled_samples": 200,
-            "built_at": "2026-09-26 13:05:00",
         }
     ]
     out = domain_tools.get_gene_frequency_by_cancer_type.fn.__wrapped__("tp53")
+    assert db.labels == ["domain_tools.gene_frequency_by_cancer_type.live"]
+    assert out["source"] == "live"
     assert out["gene"] == "TP53" and out["preference"] == "pan_cancer_tcga"
     assert _records(out)[0]["frequency_pct"] == 25.0
     assert "< 50 profiled samples omitted" in out["provenance"]
@@ -410,58 +362,7 @@ def test_cross_study_description_discloses_broader_cna_denominator():
     assert "incl. log2" in _norm(tool.description)
 
 
-# --- apply order ---------------------------------------------------------------
-
-
-def test_apply_sql_runs_final_phase_after_portal_specific():
-    script = APPLY_SQL.read_text()
-    portable = script.index('for f in "$SQL_DIR"/*.sql; do')
-    portal = script.index('"$SQL_DIR"/portal-specific/*/')
-    final = script.index('for f in "$SQL_DIR"/final/*.sql; do')
-    assert portable < portal < final
-
-
-def test_aggregates_are_not_in_the_portable_phase():
-    """A portable sql/*.sql file would run before portal-specific preferences exist."""
-    assert not list((REPO / "sql").glob("*precomputed-aggregates*.sql"))
-    assert AGGREGATES_SQL.exists()
-
-
-# --- aggregate SQL file hygiene ----------------------------------------------
-
-
-def _sql8_without_comments():
-    return re.sub(r"--[^\n]*", "", AGGREGATES_SQL.read_text())
-
-
-def test_every_table_is_dropped_before_create():
-    sql = AGGREGATES_SQL.read_text()
-    tables = re.findall(r"^CREATE TABLE (\w+)", sql, re.M)
-    assert set(tables) == {
-        "study_gene_alteration_counts",
-        "cancer_type_gene_alteration_counts",
-        "study_profiled_counts",
-    }
-    for table in tables:
-        assert f"DROP TABLE IF EXISTS {table};" in sql, table
-
-
-def test_sql8_does_not_reference_database_names():
-    assert not re.search(r"\b(FROM|JOIN|INTO|TABLE)\s+\w+\.\w+", _sql8_without_comments())
-
-
-def test_sql8_has_no_semicolons_inside_string_literals():
-    """Keeps the file safe for naive ;-splitting (tests, ad-hoc tooling)."""
-    for literal in re.findall(r"'(?:[^']|'')*'", _sql8_without_comments()):
-        assert ";" not in literal, literal
-
-
-def test_aggregates_file_is_listed_in_sql_readme():
-    assert "sql/final/0-precomputed-aggregates.sql" in (REPO / "sql" / "README.md").read_text()
-
-
-def test_aggregates_file_does_not_claim_a_configurable_threshold():
-    assert "min_profiled" not in AGGREGATES_SQL.read_text()
+# --- sql/4 recipe hygiene -------------------------------------------------------
 
 
 def test_co_altered_view_does_not_double_count_wes_plus_panel():
@@ -470,49 +371,11 @@ def test_co_altered_view_does_not_double_count_wes_plus_panel():
     assert "NOT IN (SELECT sample_unique_id FROM wes_samples)" in panel_cte
 
 
-# --- cross-study selection -----------------------------------------------------
-
-
-def _ct(cancer_type, altered, profiled):
-    return {
-        "cancer_type": cancer_type,
-        "hugo_gene_symbol": "TP53",
-        "altered_samples": altered,
-        "profiled_samples": profiled,
-        "built_at": "2026-09-26 13:05:00",
-    }
-
-
-def test_select_cancer_types_applies_threshold_order_and_limit():
-    rows = [
-        _ct("B", 10, 100),  # 10%
-        _ct("A", 20, 200),  # 10%, more altered -> before B
-        _ct("C", 30, 49),  # below threshold
-        _ct("D", 5, 50),  # 10%, fewer altered -> after B
-        _ct("E", 40, 80),  # 50%
-        _ct("F", 10, 100),  # ties B exactly -> cancer_type ASC
-    ]
-    got = [r["cancer_type"] for r in domain_tools._select_cancer_types(rows, 10)]
-    assert got == ["E", "A", "B", "F", "D"]
-    assert [r["cancer_type"] for r in domain_tools._select_cancer_types(rows, 2)] == ["E", "A"]
-
-
-def test_cohort_built_but_nothing_reaches_threshold_stays_precomputed(db):
-    """Rows exist for the cohort, all below 50 profiled: no live query needed."""
-    label = "domain_tools.gene_frequency_by_cancer_type"
-    db.answers[f"{label}.precomputed"] = [_ct("Breast Cancer", 3, 40)]
-    out = domain_tools.get_gene_frequency_by_cancer_type.fn.__wrapped__(
-        "TP53", "mutation", 10, "cohort_x"
-    )
-    assert db.labels == [f"{label}.precomputed"]
-    assert out["source"] == "precomputed" and _records(out) == []
-
-
 # --- result format -------------------------------------------------------------
 
 
 def _top_genes_answer(db):
-    db.answers[f"{LABEL}.precomputed"] = [
+    db.answers[f"{LABEL}.live"] = [
         {"hugo_gene_symbol": "TP53", "altered_samples": 30, "profiled_samples": 100},
         {"hugo_gene_symbol": "KRAS", "altered_samples": 3, "profiled_samples": 7},
     ]

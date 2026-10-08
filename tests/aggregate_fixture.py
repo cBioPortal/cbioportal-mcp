@@ -1,6 +1,6 @@
-"""Synthetic cBioPortal derived-table fixture for the precomputed-aggregate tests.
+"""Synthetic cBioPortal derived-table fixture for the domain-tool equivalence tests.
 
-Builds the handful of tables sql/4 and sql/8 read, in the same shape as
+Builds the handful of tables sql/4 and the domain tools read, in the same shape as
 cbioportal's db-scripts/clickhouse/clickhouse.sql, with the edge cases the
 frequency recipes exist to get right:
 

@@ -1,10 +1,8 @@
 """Purpose-built tools for the recurring gene-frequency / cohort-count questions.
 
-Each tool answers one question template in a single call, reading the
-precomputed tables from sql/final/0-precomputed-aggregates.sql. When a table is
-missing, empty, or has no row for the request, the tool runs the live recipe
-SQL instead (the sql/4-mutation-frequency-views.sql recipes) and says
-so with ``source: "live"`` plus a ``fallback_reason``.
+Each tool answers one question template in a single call by running the
+live recipe SQL (the sql/4-mutation-frequency-views.sql recipes) and reports
+``source: "live"``.
 
 run_select_query() only accepts a SQL string (mcp_clickhouse has no bind
 parameters), so every value that reaches SQL goes through an allow-list
@@ -156,26 +154,10 @@ def _frequency_pct(altered, profiled):
     return round(int(altered) * 100.0 / int(profiled) * 10) / 10
 
 
-def _run_with_fallback(label: str, precomputed_sql: str, live_sql_factory):
-    """Run the precomputed query; fall back to live SQL if it errors or is empty.
-
-    Returns (rows, meta) where meta carries source/fallback_reason/built_at.
-    live_sql_factory is only called on fallback so its SQL is never built
-    on the fast path.
-    """
-    try:
-        rows = server.run_select_query(precomputed_sql, query_label=f"{label}.precomputed")
-    except Exception as e:  # table missing (fresh DB, mid-rebuild) or query error
-        logger.warning(f"{label}: precomputed query failed, falling back to live SQL: {e}")
-        reason = f"precomputed table unavailable ({str(e)[:160]})"
-    else:
-        if rows:
-            built_at = rows[0].get("built_at")
-            return rows, {"source": "precomputed", "built_at": str(built_at) if built_at else None}
-        reason = "no precomputed rows (table empty, or nothing matched)"
-
-    rows = server.run_select_query(live_sql_factory(), query_label=f"{label}.live")
-    return rows, {"source": "live", "fallback_reason": reason}
+def _run_live(label: str, sql: str):
+    """Run the live recipe SQL. Returns (rows, meta) for _finish()."""
+    rows = server.run_select_query(sql, query_label=f"{label}.live")
+    return rows, {"source": "live"}
 
 
 # Row fields of each tool, in output order. In the compact result format
@@ -196,27 +178,12 @@ def _finish(result: dict, meta: dict, columns) -> dict:
             for k, v in (table.items() if key == "rows" else [(key, value)])
         }
     result["source"] = meta["source"]
-    if meta.get("built_at"):
-        result["built_at"] = meta["built_at"]
-    if meta.get("fallback_reason"):
-        result["fallback_reason"] = meta["fallback_reason"]
     return result
 
 
 # ---------------------------------------------------------------------------
 # SQL builders (pure functions — unit-tested without a database)
 # ---------------------------------------------------------------------------
-
-
-def build_alteration_frequency_precomputed_sql(genes, studies, alteration_types) -> str:
-    return f"""
-        SELECT hugo_gene_symbol, cancer_study_identifier, alteration_type,
-               altered_samples, profiled_samples, built_at
-        FROM study_gene_alteration_counts
-        WHERE cancer_study_identifier IN {_sql_list(studies)}
-          AND hugo_gene_symbol IN {_sql_list(genes)}
-          AND alteration_type IN {_sql_list(alteration_types)}
-    """
 
 
 def build_alteration_frequency_live_sql(genes, studies) -> str:
@@ -296,17 +263,6 @@ def _profiled_key(alteration_type: str) -> str:
     return f"profiled_{'ANY' if len(profile_types) > 1 else profile_types[0]}"
 
 
-def build_top_altered_genes_precomputed_sql(studies, alteration_type, top_n) -> str:
-    return f"""
-        SELECT hugo_gene_symbol, altered_samples, profiled_samples, built_at
-        FROM study_gene_alteration_counts
-        WHERE cancer_study_identifier IN {_sql_list(studies)}
-          AND alteration_type = {_sql_str(alteration_type)}
-        ORDER BY altered_samples DESC, hugo_gene_symbol ASC
-        LIMIT {int(top_n)}
-    """
-
-
 def build_top_altered_genes_live_sql(studies, alteration_type, top_n) -> str:
     """Top-N like top_{mutated,cna,sv}_genes_in_study, for any alteration type.
 
@@ -356,39 +312,6 @@ def build_top_altered_genes_live_sql(studies, alteration_type, top_n) -> str:
         LEFT JOIN panel_profiled p ON a.hugo_gene_symbol = p.hugo_gene_symbol
         ORDER BY altered_samples DESC, hugo_gene_symbol ASC
     """
-
-
-def build_frequency_by_cancer_type_precomputed_sql(genes, alteration_type, preference) -> str:
-    """Every stored cancer type for the gene, below the threshold too (one row each).
-
-    The >= 50 threshold, order and limit are applied by _select_cancer_types(),
-    so an empty result means the gene has no altered sample in the cohort (or
-    the cohort was not built) rather than "nothing reached 50 profiled".
-    """
-    return f"""
-        SELECT cancer_type, hugo_gene_symbol, altered_samples, profiled_samples, built_at
-        FROM cancer_type_gene_alteration_counts
-        WHERE preference_name = {_sql_str(preference)}
-          AND hugo_gene_symbol IN {_sql_list(genes)}
-          AND alteration_type = {_sql_str(alteration_type)}
-    """
-
-
-def _select_cancer_types(rows, top_n):
-    """The recipe's WHERE profiled_samples >= 50, ORDER BY and LIMIT, on stored rows.
-
-    Same order as the live SQL: altered / profiled as a double DESC, then
-    altered DESC, then cancer_type ASC (UTF-8 byte order == code point order).
-    """
-    kept = [r for r in rows if int(r["profiled_samples"]) >= MIN_PROFILED_SAMPLES]
-    kept.sort(
-        key=lambda r: (
-            -(int(r["altered_samples"]) / int(r["profiled_samples"])),
-            -int(r["altered_samples"]),
-            r["cancer_type"],
-        )
-    )
-    return kept[:top_n]
 
 
 def build_frequency_by_cancer_type_live_sql(genes, alteration_type, preference, top_n) -> str:
@@ -469,16 +392,6 @@ def build_frequency_by_cancer_type_live_sql(genes, alteration_type, preference, 
         JOIN profiled p ON a.cancer_type = p.cancer_type AND a.hugo_gene_symbol = p.hugo_gene_symbol
         WHERE p.profiled_samples >= {MIN_PROFILED_SAMPLES}
         {order_limit}
-    """
-
-
-def build_profiled_counts_precomputed_sql(studies) -> str:
-    return f"""
-        SELECT cancer_study_identifier, profile_type, samples, patients, wes_samples, built_at
-        FROM study_profiled_counts
-        WHERE cancer_study_identifier IN {_sql_list(studies)}
-        ORDER BY cancer_study_identifier, profile_type = 'ALL_SAMPLES' DESC,
-                 profile_type = 'ANY_MUT_CNA_SV' DESC, samples DESC, profile_type
     """
 
 
@@ -568,43 +481,7 @@ def get_alteration_frequency(gene: str, study_id: str, alteration_type: str = "a
         wanted = list(ALTERATION_TYPES) if alteration_type == "any" else [alteration_type]
         label = "domain_tools.alteration_frequency"
 
-        try:
-            rows = server.run_select_query(
-                build_alteration_frequency_precomputed_sql(genes, studies, wanted),
-                query_label=f"{label}.precomputed",
-            )
-            reason = None if rows else "no precomputed row (gene unaltered in study, or unknown)"
-        except Exception as e:
-            logger.warning(f"{label}: precomputed query failed, falling back to live SQL: {e}")
-            rows, reason = [], f"precomputed table unavailable ({str(e)[:160]})"
-
         result = {"gene": gene, "study_id": study_id}
-        if rows:
-            by_type = {r["alteration_type"]: r for r in rows}
-            result["gene"] = rows[0].get("hugo_gene_symbol", gene)
-            result["study_id"] = rows[0].get("cancer_study_identifier", study_id)
-            out = []
-            for t in wanted:
-                r = by_type.get(t)
-                if r is not None:
-                    out.append(
-                        _frequency_row(t, r.get("altered_samples"), r.get("profiled_samples"))
-                    )
-                elif t == alteration_type:
-                    # Requested type unaltered in this study: denominator still needed.
-                    out = None
-                    reason = f"no precomputed row for alteration_type={t} (0 altered)"
-                    break
-            if out is not None:
-                result["rows"] = out
-                result["provenance"] = _STUDY_PROVENANCE
-                built_at = rows[0].get("built_at")
-                return _finish(
-                    result,
-                    {"source": "precomputed", "built_at": str(built_at) if built_at else None},
-                    FREQUENCY_COLUMNS,
-                )
-
         live = server.run_select_query(
             build_alteration_frequency_live_sql(genes, studies), query_label=f"{label}.live"
         )
@@ -628,7 +505,7 @@ def get_alteration_frequency(gene: str, study_id: str, alteration_type: str = "a
             out.append(_frequency_row(t, altered, row.get(_profiled_key(t), 0)))
         result["rows"] = out
         result["provenance"] = _STUDY_PROVENANCE
-        return _finish(result, {"source": "live", "fallback_reason": reason}, FREQUENCY_COLUMNS)
+        return _finish(result, {"source": "live"}, FREQUENCY_COLUMNS)
     except Exception as e:
         logger.error(f"get_alteration_frequency: {e}")
         return {"error_message": str(e)}
@@ -654,10 +531,9 @@ def get_top_altered_genes(
         studies = _study_candidates(study_id)
         alteration_type = _validate_alteration_type(alteration_type)
         top_n = _clamp_top_n(top_n)
-        rows, meta = _run_with_fallback(
+        rows, meta = _run_live(
             "domain_tools.top_altered_genes",
-            build_top_altered_genes_precomputed_sql(studies, alteration_type, top_n),
-            lambda: build_top_altered_genes_live_sql(studies, alteration_type, top_n),
+            build_top_altered_genes_live_sql(studies, alteration_type, top_n),
         )
         result = {
             "study_id": study_id,
@@ -716,15 +592,10 @@ def get_gene_frequency_by_cancer_type(
         preference = _validate_preference(preference)
         top_n = _clamp_top_n(top_n)
         genes = _gene_candidates(gene)
-        rows, meta = _run_with_fallback(
+        rows, meta = _run_live(
             "domain_tools.gene_frequency_by_cancer_type",
-            build_frequency_by_cancer_type_precomputed_sql(genes, alteration_type, preference),
-            lambda: build_frequency_by_cancer_type_live_sql(
-                genes, alteration_type, preference, top_n
-            ),
+            build_frequency_by_cancer_type_live_sql(genes, alteration_type, preference, top_n),
         )
-        if meta["source"] == "precomputed":
-            rows = _select_cancer_types(rows, top_n)
         result = {
             "gene": rows[0].get("hugo_gene_symbol", gene) if rows else gene,
             "alteration_type": alteration_type,
@@ -775,10 +646,8 @@ def get_gene_frequency_by_cancer_type(
 def get_profiled_counts(study_id: str) -> dict:
     try:
         studies = _study_candidates(study_id)
-        rows, meta = _run_with_fallback(
-            "domain_tools.profiled_counts",
-            build_profiled_counts_precomputed_sql(studies),
-            lambda: build_profiled_counts_live_sql(studies),
+        rows, meta = _run_live(
+            "domain_tools.profiled_counts", build_profiled_counts_live_sql(studies)
         )
         if not rows:
             return {"error_message": server._study_not_in_deployment_message(study_id)}

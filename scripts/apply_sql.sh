@@ -54,9 +54,6 @@ echo
 #   2. Portal-specific files: SQL_DIR/portal-specific/<portal>/*.sql.
 #      Subdirectories iterate alphabetically, then numerically within each.
 #      Files without a leading digit are treated as docs (e.g. README.md).
-#   3. Final files: SQL_DIR/final/*.sql in numeric order. These build
-#      aggregates over everything phases 1-2 created, including the
-#      portal-specific cancer_study_query_preferences rows.
 shopt -s nullglob
 
 apply_one() {
@@ -92,12 +89,6 @@ for d in "$SQL_DIR"/portal-specific/*/; do
     for f in "$d"*.sql; do
         apply_one "$f"
     done
-done
-
-# Phase 3: final files. They read every preference row, so they must run
-# after the portal-specific phase.
-for f in "$SQL_DIR"/final/*.sql; do
-    apply_one "$f"
 done
 
 echo
