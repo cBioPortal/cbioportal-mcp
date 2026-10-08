@@ -1,4 +1,4 @@
-"""Precomputed aggregates == live recipes, on a real ClickHouse.
+"""Domain tools == sql/4 recipe views == a pure-Python oracle, on a real ClickHouse.
 
 Opt-in: set CBIOPORTAL_MCP_TEST_CLICKHOUSE_URL to a server you can create
 scratch databases on. Docker or a native binary both work:
@@ -11,13 +11,13 @@ scratch databases on. Docker or a native binary both work:
 
 The module loads the synthetic fixture (tests/aggregate_fixture.py) into a
 fresh database and applies the SQL in the real phase order: sql/3 and sql/4,
-then the fixture's preference rows (standing in for sql/portal-specific/),
-then sql/final/. It then checks three independent implementations against
-each other: the sql/final tables, the canonical sql/4 recipe views (and the
-tools' live-fallback SQL), and a pure-Python oracle over the generated rows.
+then the fixture's preference rows (standing in for sql/portal-specific/).
+It then checks three independent implementations against each other: the
+canonical sql/4 recipe views, the tools' live SQL, and a pure-Python oracle
+over the generated rows.
 
 test_real_apply_order_* additionally runs scripts/apply_sql.sh itself against
-the real sql/3, sql/4, sql/portal-specific/public-portal and sql/final files.
+the real sql/3, sql/4 and sql/portal-specific/public-portal files.
 It needs CBIOPORTAL_MCP_TEST_CLICKHOUSE_NATIVE_PORT and `clickhouse-client` on
 PATH (a symlink named clickhouse-client to the `clickhouse` binary works).
 """
@@ -41,13 +41,7 @@ pytestmark = pytest.mark.skipif(not URL, reason="CBIOPORTAL_MCP_TEST_CLICKHOUSE_
 
 REPO = Path(__file__).resolve().parent.parent
 SQL_DIR = REPO / "sql"
-AGGREGATES_SQL = SQL_DIR / "final" / "0-precomputed-aggregates.sql"
 ALTERATIONS = ["mutation", "amplification", "deep_deletion", "structural_variant"]
-AGGREGATE_TABLES = (
-    "study_gene_alteration_counts",
-    "cancer_type_gene_alteration_counts",
-    "study_profiled_counts",
-)
 
 
 def _statements(path: Path) -> list[str]:
@@ -100,8 +94,6 @@ def ch():
             preferences,
             column_names=["preference_name", "cancer_study_identifier", "notes"],
         )
-        # Phase 3 (final): the aggregates.
-        _apply(client, AGGREGATES_SQL)
         tables["cancer_study_query_preferences"] = preferences
         yield client, tables
     finally:
@@ -138,50 +130,65 @@ def tool_db(ch, monkeypatch):
     return _point_tools_at(client, monkeypatch)
 
 
-# --- sql/final tables vs the pure-Python oracle ------------------------------
+# --- tools (live SQL) vs the pure-Python oracle ------------------------------
 
 
-def test_study_table_matches_oracle(ch):
-    client, tables = ch
-    got = {
-        (r["cancer_study_identifier"], r["hugo_gene_symbol"], r["alteration_type"]): (
-            r["altered_samples"],
-            r["profiled_samples"],
-            r["altered_events"],
-        )
-        for r in _rows(client, "SELECT * FROM study_gene_alteration_counts")
+@pytest.mark.parametrize("study", list(fx.STUDIES.values()))
+@pytest.mark.parametrize("alteration", ["any"] + ALTERATIONS)
+def test_top_altered_genes_tool_matches_oracle(ch, tool_db, study, alteration):
+    _, tables = ch
+    expected = {
+        gene: (altered, profiled)
+        for (s, gene, alt), (altered, profiled, _) in fx.oracle_study_counts(tables).items()
+        if s == study and alt == alteration
     }
-    assert got == fx.oracle_study_counts(tables)
+    out = domain_tools.get_top_altered_genes.fn.__wrapped__(study, alteration, 100)
+    rows = _records(out)
+    assert {r["hugo_gene_symbol"]: (r["altered_samples"], r["profiled_samples"]) for r in rows} == (
+        expected
+    )
+    order = [(-r["altered_samples"], r["hugo_gene_symbol"]) for r in rows]
+    assert order == sorted(order)
 
 
-def test_cancer_type_table_matches_oracle(ch):
-    client, tables = ch
-    got = {
-        (r["preference_name"], r["cancer_type"], r["hugo_gene_symbol"], r["alteration_type"]): (
-            r["altered_samples"],
-            r["profiled_samples"],
+@pytest.mark.parametrize("preference", sorted(fx.PREFERENCES))
+@pytest.mark.parametrize("alteration", ["any"] + ALTERATIONS)
+def test_gene_frequency_tool_matches_oracle(ch, tool_db, preference, alteration):
+    _, tables = ch
+    oracle = fx.oracle_cancer_type_counts(tables)
+    for gene in fx.GENES:
+        expected = {
+            ct: counts
+            for (pref, ct, g, alt), counts in oracle.items()
+            if (pref, g, alt) == (preference, gene, alteration) and counts[1] >= 50
+        }
+        out = domain_tools.get_gene_frequency_by_cancer_type.fn.__wrapped__(
+            gene, alteration, 100, preference
         )
-        for r in _rows(client, "SELECT * FROM cancer_type_gene_alteration_counts")
+        got = {
+            r["cancer_type"]: (r["altered_samples"], r["profiled_samples"]) for r in _records(out)
+        }
+        assert got == expected, (gene, out)
+
+
+@pytest.mark.parametrize("study", list(fx.STUDIES.values()))
+def test_profiled_counts_tool_matches_oracle(ch, tool_db, study):
+    _, tables = ch
+    expected = {
+        profile_type: counts
+        for (s, profile_type), counts in fx.oracle_profiled_counts(tables).items()
+        if s == study
     }
-    assert got == fx.oracle_cancer_type_counts(tables)
-
-
-def test_profiled_counts_table_matches_oracle(ch):
-    client, tables = ch
+    out = domain_tools.get_profiled_counts.fn.__wrapped__(study)
     got = {
-        (r["cancer_study_identifier"], r["profile_type"]): (
-            r["samples"],
-            r["patients"],
-            r["wes_samples"],
-        )
-        for r in _rows(client, "SELECT * FROM study_profiled_counts")
+        r["profile_type"]: (r["samples"], r["patients"], r["wes_samples"]) for r in _records(out)
     }
-    assert got == fx.oracle_profiled_counts(tables)
+    assert got == expected
 
 
 def test_fixture_exercises_the_edge_cases(ch):
     """Guard against a fixture change silently removing what the tests rely on."""
-    client, _ = ch
+    client, tables = ch
 
     def n(sql):
         return _rows(client, sql)[0]["n"]
@@ -229,14 +236,8 @@ def test_fixture_exercises_the_edge_cases(ch):
         )
         > 0
     )
-    assert (
-        n(
-            """
-        SELECT count() AS n FROM cancer_type_gene_alteration_counts WHERE profiled_samples >= 50
-    """
-        )
-        > 50
-    )
+    qualifying = [c for c in fx.oracle_cancer_type_counts(tables).values() if c[1] >= 50]
+    assert len(qualifying) > 50
 
 
 def test_uncalled_svs_change_the_fixture_result(ch):
@@ -258,22 +259,45 @@ def test_uncalled_svs_change_the_fixture_result(ch):
     assert rows[0]["all_sv"] > rows[0]["called_sv"]
 
 
-# --- sql/final tables vs the canonical recipe views (sql/4) ------------------
+# --- canonical recipe views (sql/4) vs the pure-Python oracle ----------------
 
 
-def _recipe_vs_table(client, recipe_parts, table_sql, key):
-    recipe = _rows(client, _union(recipe_parts))
-    table = _rows(client, table_sql)
-    return sorted(table, key=key), sorted(recipe, key=key)
+def _recipe(client, recipe_parts, key):
+    return sorted(_rows(client, _union(recipe_parts)), key=key)
+
+
+def _oracle_cancer_types(tables, preference, alteration, key):
+    rows = [
+        {"gene": gene, "cancer_type": ct, "altered_samples": a, "profiled_samples": p}
+        for (pref, ct, gene, alt), (a, p) in fx.oracle_cancer_type_counts(tables).items()
+        if pref == preference and alt == alteration and p >= 50
+    ]
+    return sorted(rows, key=key)
+
+
+def _oracle_study(tables, study, alteration):
+    """Oracle rows for one study, ordered like top_*_genes_in_study."""
+    rows = [
+        {
+            "hugo_gene_symbol": gene,
+            "alteration_type": alt,
+            "altered_samples": a,
+            "profiled_samples": p,
+            "altered_events": e,
+            "frequency_pct": domain_tools._frequency_pct(a, p),
+        }
+        for (s, gene, alt), (a, p, e) in fx.oracle_study_counts(tables).items()
+        if s == study and alt in alteration
+    ]
+    return sorted(rows, key=lambda r: (-r["altered_samples"], r["hugo_gene_symbol"]))
 
 
 @pytest.mark.parametrize("preference", sorted(fx.PREFERENCES))
 @pytest.mark.parametrize("alteration", ALTERATIONS)
-def test_cancer_type_table_equals_gene_alteration_frequency_by_cancer_type(
-    ch, preference, alteration
-):
-    client, _ = ch
-    table, recipe = _recipe_vs_table(
+def test_gene_alteration_frequency_by_cancer_type_equals_oracle(ch, preference, alteration):
+    client, tables = ch
+    key = lambda r: (r["gene"], r["cancer_type"])  # noqa: E731
+    recipe = _recipe(
         client,
         [
             f"""
@@ -283,35 +307,24 @@ def test_cancer_type_table_equals_gene_alteration_frequency_by_cancer_type(
             """
             for gene in fx.GENES
         ],
-        f"""
-        SELECT hugo_gene_symbol AS gene, cancer_type, altered_samples, profiled_samples
-        FROM cancer_type_gene_alteration_counts
-        WHERE preference_name = '{preference}' AND alteration_type = '{alteration}'
-          AND profiled_samples >= 50
-        """,
-        key=lambda r: (r["gene"], r["cancer_type"]),
+        key,
     )
-    assert table == recipe
+    assert recipe == _oracle_cancer_types(tables, preference, alteration, key)
 
 
 def test_cancer_type_comparison_is_not_vacuous(ch):
-    client, _ = ch
-    per_alteration = _rows(
-        client,
-        """
-        SELECT alteration_type, count() AS n FROM cancer_type_gene_alteration_counts
-        WHERE profiled_samples >= 50 GROUP BY alteration_type
-    """,
-    )
-    assert {r["alteration_type"] for r in per_alteration if r["n"] > 0} == set(ALTERATIONS) | {
-        "any"
+    _, tables = ch
+    qualifying = {
+        alt for (_, _, _, alt), (_, p) in fx.oracle_cancer_type_counts(tables).items() if p >= 50
     }
+    assert qualifying == set(ALTERATIONS) | {"any"}
 
 
 @pytest.mark.parametrize("preference", sorted(fx.PREFERENCES))
-def test_cancer_type_table_equals_gene_mutation_frequency_by_cancer_type(ch, preference):
-    client, _ = ch
-    table, recipe = _recipe_vs_table(
+def test_gene_mutation_frequency_by_cancer_type_equals_oracle(ch, preference):
+    client, tables = ch
+    key = lambda r: (r["gene"], r["cancer_type"])  # noqa: E731
+    recipe = _recipe(
         client,
         [
             f"""
@@ -320,20 +333,15 @@ def test_cancer_type_table_equals_gene_mutation_frequency_by_cancer_type(ch, pre
             """
             for gene in fx.GENES
         ],
-        f"""
-        SELECT hugo_gene_symbol AS gene, cancer_type, altered_samples, profiled_samples
-        FROM cancer_type_gene_alteration_counts
-        WHERE preference_name = '{preference}' AND alteration_type = 'mutation'
-          AND profiled_samples >= 50
-        """,
-        key=lambda r: (r["gene"], r["cancer_type"]),
+        key,
     )
-    assert table == recipe
+    assert recipe == _oracle_cancer_types(tables, preference, "mutation", key)
 
 
-def test_single_study_preference_equals_gene_mutation_frequency_in_study(ch):
-    client, _ = ch
-    table, recipe = _recipe_vs_table(
+def test_gene_mutation_frequency_in_study_equals_single_study_preference_oracle(ch):
+    client, tables = ch
+    key = lambda r: (r["gene"], r["cancer_type"])  # noqa: E731
+    recipe = _recipe(
         client,
         [
             f"""
@@ -342,15 +350,9 @@ def test_single_study_preference_equals_gene_mutation_frequency_in_study(ch):
             """
             for gene in fx.GENES
         ],
-        """
-        SELECT hugo_gene_symbol AS gene, cancer_type, altered_samples, profiled_samples
-        FROM cancer_type_gene_alteration_counts
-        WHERE preference_name = 'pref_panel' AND alteration_type = 'mutation'
-          AND profiled_samples >= 50
-        """,
-        key=lambda r: (r["gene"], r["cancer_type"]),
+        key,
     )
-    assert table == recipe
+    assert recipe == _oracle_cancer_types(tables, "pref_panel", "mutation", key)
 
 
 # study_mixed has samples that are WES for one mutation profile AND on a panel
@@ -378,8 +380,8 @@ def test_study_mixed_really_has_overlapping_coverage(ch):
 
 
 @pytest.mark.parametrize("study", STUDIES_WITH_DATA)
-def test_study_table_equals_top_mutated_genes_in_study(ch, study):
-    client, _ = ch
+def test_top_mutated_genes_in_study_equals_oracle(ch, study):
+    client, tables = ch
     recipe = _rows(
         client,
         f"""
@@ -388,40 +390,24 @@ def test_study_table_equals_top_mutated_genes_in_study(ch, study):
         FROM top_mutated_genes_in_study(study='{study}', top_n=1000)
     """,
     )
-    table = _rows(
-        client,
-        f"""
-        SELECT hugo_gene_symbol, altered_samples, profiled_samples,
-               altered_events AS total_mutation_events
-        FROM study_gene_alteration_counts
-        WHERE cancer_study_identifier = '{study}' AND alteration_type = 'mutation'
-        ORDER BY altered_samples DESC, hugo_gene_symbol ASC
-    """,
-    )
-    for r in table:
-        r["frequency_pct"] = domain_tools._frequency_pct(
-            r["altered_samples"], r["profiled_samples"]
-        )
-    assert recipe and table == [
+    expected = [
         {
-            k: r[k]
-            for k in (
-                "hugo_gene_symbol",
-                "altered_samples",
-                "profiled_samples",
-                "total_mutation_events",
-                "frequency_pct",
-            )
+            "hugo_gene_symbol": r["hugo_gene_symbol"],
+            "altered_samples": r["altered_samples"],
+            "profiled_samples": r["profiled_samples"],
+            "frequency_pct": r["frequency_pct"],
+            "total_mutation_events": r["altered_events"],
         }
-        for r in recipe
+        for r in _oracle_study(tables, study, ("mutation",))
     ]
+    assert recipe and recipe == expected
 
 
 @pytest.mark.parametrize(
     "preference,study", [("pref_mixed", "study_mixed"), ("pref_panel", "study_panel")]
 )
-def test_single_study_cohort_equals_top_mutated_genes_in_cohort(ch, preference, study):
-    client, _ = ch
+def test_top_mutated_genes_in_cohort_equals_single_study_oracle(ch, preference, study):
+    client, tables = ch
     recipe = _rows(
         client,
         f"""
@@ -429,26 +415,20 @@ def test_single_study_cohort_equals_top_mutated_genes_in_cohort(ch, preference, 
         FROM top_mutated_genes_in_cohort(preference='{preference}', top_n=1000)
     """,
     )
-    table = _rows(
-        client,
-        f"""
-        SELECT hugo_gene_symbol, altered_samples, profiled_samples
-        FROM study_gene_alteration_counts
-        WHERE cancer_study_identifier = '{study}' AND alteration_type = 'mutation'
-        ORDER BY altered_samples DESC, hugo_gene_symbol ASC
-    """,
-    )
-    for r in table:
-        r["frequency_pct"] = domain_tools._frequency_pct(
-            r["altered_samples"], r["profiled_samples"]
-        )
-    assert recipe and table == recipe
+    expected = [
+        {
+            k: r[k]
+            for k in ("hugo_gene_symbol", "altered_samples", "profiled_samples", "frequency_pct")
+        }
+        for r in _oracle_study(tables, study, ("mutation",))
+    ]
+    assert recipe and recipe == expected
 
 
 @pytest.mark.parametrize("study", STUDIES_WITH_DATA)
-def test_study_table_equals_top_cna_genes_in_study(ch, study):
+def test_top_cna_genes_in_study_equals_oracle(ch, study):
     """Includes study_mixed: log2-only samples must not enter the CNA denominator."""
-    client, _ = ch
+    client, tables = ch
     recipe = _rows(
         client,
         f"""
@@ -458,26 +438,26 @@ def test_study_table_equals_top_cna_genes_in_study(ch, study):
         FROM top_cna_genes_in_study(study='{study}', top_n=1000)
     """,
     )
-    table = _rows(
-        client,
-        f"""
-        SELECT hugo_gene_symbol, alteration_type, altered_samples, profiled_samples
-        FROM study_gene_alteration_counts
-        WHERE cancer_study_identifier = '{study}'
-          AND alteration_type IN ('amplification', 'deep_deletion')
-    """,
-    )
-    for r in table:
-        r["frequency_pct"] = domain_tools._frequency_pct(
-            r["altered_samples"], r["profiled_samples"]
-        )
+    expected = [
+        {
+            k: r[k]
+            for k in (
+                "hugo_gene_symbol",
+                "alteration_type",
+                "altered_samples",
+                "profiled_samples",
+                "frequency_pct",
+            )
+        }
+        for r in _oracle_study(tables, study, ("amplification", "deep_deletion"))
+    ]
     key = lambda r: (r["hugo_gene_symbol"], r["alteration_type"])  # noqa: E731
-    assert recipe and sorted(table, key=key) == sorted(recipe, key=key)
+    assert recipe and sorted(recipe, key=key) == sorted(expected, key=key)
 
 
 @pytest.mark.parametrize("study", STUDIES_WITH_DATA)
-def test_study_table_equals_top_sv_genes_in_study(ch, study):
-    client, _ = ch
+def test_top_sv_genes_in_study_equals_oracle(ch, study):
+    client, tables = ch
     recipe = _rows(
         client,
         f"""
@@ -486,22 +466,18 @@ def test_study_table_equals_top_sv_genes_in_study(ch, study):
         FROM top_sv_genes_in_study(study='{study}', top_n=1000)
     """,
     )
-    table = _rows(
-        client,
-        f"""
-        SELECT hugo_gene_symbol, altered_samples, profiled_samples,
-               altered_events AS total_sv_events
-        FROM study_gene_alteration_counts
-        WHERE cancer_study_identifier = '{study}' AND alteration_type = 'structural_variant'
-        ORDER BY altered_samples DESC, hugo_gene_symbol ASC
-    """,
-    )
-    for r in table:
-        r["frequency_pct"] = domain_tools._frequency_pct(
-            r["altered_samples"], r["profiled_samples"]
-        )
+    expected = [
+        {
+            "hugo_gene_symbol": r["hugo_gene_symbol"],
+            "altered_samples": r["altered_samples"],
+            "profiled_samples": r["profiled_samples"],
+            "frequency_pct": r["frequency_pct"],
+            "total_sv_events": r["altered_events"],
+        }
+        for r in _oracle_study(tables, study, ("structural_variant",))
+    ]
     key = lambda r: r["hugo_gene_symbol"]  # noqa: E731
-    assert recipe and sorted(table, key=key) == sorted(recipe, key=key)
+    assert recipe and sorted(recipe, key=key) == sorted(expected, key=key)
 
 
 def test_co_altered_denominators_are_the_distinct_union(ch):
@@ -598,16 +574,12 @@ def test_top_altered_genes_tool_equals_recipe_including_frequency_pct(ch, tool_d
         (r["hugo_gene_symbol"], r["altered_samples"], r["profiled_samples"], r["frequency_pct"])
         for r in _records(out)
     ]
-    assert out["source"] == "precomputed" and tool == recipe
+    assert out["source"] == "live" and tool == recipe
 
 
-# --- tools: precomputed path == live fallback path ---------------------------
+# --- tools: every call is one live query ---------------------------------------
 
 TOOL_GENES = ["TP53", "BRAF", "ALK", "C1orf112", "tp53"]
-
-
-def _without_source(result):
-    return {k: v for k, v in result.items() if k not in ("source", "built_at", "fallback_reason")}
 
 
 def _tool_calls():
@@ -627,24 +599,14 @@ def _tool_calls():
     return calls
 
 
-def test_tools_return_identical_results_from_precomputed_and_live(ch, tool_db):
-    client, _ = ch
+def test_tools_answer_every_call_with_one_live_query(ch, tool_db):
     calls = _tool_calls()
-    precomputed = [fn.fn.__wrapped__(*args) for fn, args in calls]
-
-    for t in AGGREGATE_TABLES:
-        client.command(f"RENAME TABLE {t} TO {t}__hidden")
-    try:
-        live = [fn.fn.__wrapped__(*args) for fn, args in calls]
-    finally:
-        for t in AGGREGATE_TABLES:
-            client.command(f"RENAME TABLE {t}__hidden TO {t}")
-
-    assert all(r.get("source") == "live" for r in live), "fallback path not exercised"
-    assert sum(r.get("source") == "precomputed" for r in precomputed) > len(calls) // 2
-    for (fn, args), p, v in zip(calls, precomputed, live, strict=True):
-        assert "error_message" not in p, (fn.name, args, p)
-        assert _without_source(p) == _without_source(v), (fn.name, args)
+    for fn, args in calls:
+        before = len(tool_db)
+        out = fn.fn.__wrapped__(*args)
+        assert "error_message" not in out, (fn.name, args, out)
+        assert out["source"] == "live" and "fallback_reason" not in out, (fn.name, args)
+        assert len(tool_db) == before + 1 and tool_db[-1].endswith(".live"), (fn.name, args)
 
 
 def test_alteration_frequency_matches_oracle_including_zero_rows(ch, tool_db):
@@ -667,12 +629,14 @@ def test_alteration_frequency_matches_oracle_including_zero_rows(ch, tool_db):
                 assert row["frequency_pct"] == domain_tools._frequency_pct(altered, profiled)
 
 
-def test_query_labels_tag_each_path(ch, tool_db):
+def test_query_labels_name_the_tool(ch, tool_db):
     domain_tools.get_top_altered_genes.fn.__wrapped__("study_wes", "mutation", 5)
     # 0 altered
     domain_tools.get_alteration_frequency.fn.__wrapped__("BRAF", "study_panel", "mutation")
-    assert "domain_tools.top_altered_genes.precomputed" in tool_db
-    assert "domain_tools.alteration_frequency.live" in tool_db
+    assert tool_db == [
+        "domain_tools.top_altered_genes.live",
+        "domain_tools.alteration_frequency.live",
+    ]
 
 
 def test_unknown_gene_and_study_are_errors_not_zeros(ch, tool_db):
@@ -706,13 +670,8 @@ PUBLIC_COHORTS = [
 ]
 
 
-def _stage_real_sql_dir(root: Path, aggregates_dir: str) -> Path:
-    """The real sql files apply_sql.sh reads, minus files that need the full cBioPortal schema.
-
-    aggregates_dir "final" is this branch's layout; "" puts the aggregate
-    file in the portable phase (the old layout) to prove it then misses the
-    portal-specific cohorts.
-    """
+def _stage_real_sql_dir(root: Path) -> Path:
+    """The real sql files apply_sql.sh reads, minus files that need the full cBioPortal schema."""
     sql = root / "sql"
     (sql / "portal-specific" / "public-portal").mkdir(parents=True)
     for name in ("3-add-cancer-study-query-preferences.sql", "4-mutation-frequency-views.sql"):
@@ -721,11 +680,6 @@ def _stage_real_sql_dir(root: Path, aggregates_dir: str) -> Path:
         SQL_DIR / "portal-specific" / "public-portal" / "0-preferences.sql",
         sql / "portal-specific" / "public-portal" / "0-preferences.sql",
     )
-    if aggregates_dir:
-        (sql / aggregates_dir).mkdir()
-        shutil.copy(AGGREGATES_SQL, sql / aggregates_dir / AGGREGATES_SQL.name)
-    else:
-        shutil.copy(AGGREGATES_SQL, sql / "8-precomputed-aggregates.sql")
     return sql
 
 
@@ -758,23 +712,24 @@ needs_client = pytest.mark.skipif(
 )
 
 
-@pytest.fixture(params=["final", ""], ids=["final-phase", "portable-phase"])
-def applied(request, tmp_path):
+@pytest.fixture
+def applied(tmp_path):
     admin = _client()
     db = f"mcp_aggorder_{uuid.uuid4().hex[:10]}"
     admin.command(f"CREATE DATABASE {db}")
     try:
         client = _client(database=db)
         _load(client, fx.generate(names=PUBLIC_NAMES, preferences=False))
-        log = _run_apply_sql(_stage_real_sql_dir(tmp_path, request.param), db)
-        yield request.param, client, log
+        log = _run_apply_sql(_stage_real_sql_dir(tmp_path), db)
+        yield client, log
     finally:
         admin.command(f"DROP DATABASE IF EXISTS {db}")
 
 
 @needs_client
-def test_real_apply_order_precomputes_every_public_cohort(applied, monkeypatch):
-    layout, client, log = applied
+def test_real_apply_order_tools_equal_recipe_for_public_cohorts(applied, monkeypatch):
+    client, log = applied
+    assert log.index("apply  portal-specific/") > log.index("apply  4-")
     cohorts = {
         r["preference_name"]
         for r in _rows(
@@ -782,50 +737,28 @@ def test_real_apply_order_precomputes_every_public_cohort(applied, monkeypatch):
         )
     }
     assert set(PUBLIC_COHORTS) <= cohorts, cohorts  # the real files created them
-    built = {
-        r["preference_name"]
-        for r in _rows(
-            client, "SELECT DISTINCT preference_name FROM cancer_type_gene_alteration_counts"
-        )
-    }
     _point_tools_at(client, monkeypatch)
     frequency_by_cancer_type = domain_tools.get_gene_frequency_by_cancer_type.fn.__wrapped__
-    sources = {
-        pref: frequency_by_cancer_type("TP53", "mutation", 10, pref)["source"]
-        for pref in PUBLIC_COHORTS
-    }
-    if layout == "final":
-        assert log.index("apply  final/") > log.index("apply  portal-specific/")
-        assert built == cohorts
-        assert sources == {pref: "precomputed" for pref in PUBLIC_COHORTS}
-    else:
-        # The old layout: aggregates built before the portal-specific phase
-        # see only sql/3's pan_cancer_tcga, so the public cohorts fall back.
-        assert built == {"pan_cancer_tcga"}
-        assert sources["pan_cancer_tcga"] == "precomputed"
-        assert {sources[p] for p in PUBLIC_COHORTS[1:]} == {"live"}
-
-
-@needs_client
-@pytest.mark.parametrize("applied", ["final"], indirect=True, ids=["final-phase"])
-def test_real_apply_order_precomputed_equals_live_for_public_cohorts(applied, monkeypatch):
-    _, client, _ = applied
-    _point_tools_at(client, monkeypatch)
-    calls = [
-        (gene, alt, pref)
-        for pref in PUBLIC_COHORTS
-        for alt in ["any"] + ALTERATIONS
-        for gene in ("TP53", "KRAS", "ALK")
-    ]
-    frequency_by_cancer_type = domain_tools.get_gene_frequency_by_cancer_type.fn.__wrapped__
-    precomputed = [frequency_by_cancer_type(g, a, 100, p) for g, a, p in calls]
-    client.command("RENAME TABLE cancer_type_gene_alteration_counts TO ctgac__hidden")
-    try:
-        live = [frequency_by_cancer_type(g, a, 100, p) for g, a, p in calls]
-    finally:
-        client.command("RENAME TABLE ctgac__hidden TO cancer_type_gene_alteration_counts")
-    # A call with no qualifying cancer type falls back to live on both passes.
-    assert sum(p["source"] == "precomputed" for p in precomputed) > len(calls) // 2
-    for args, p, v in zip(calls, precomputed, live, strict=True):
-        assert v["source"] == "live", args
-        assert _without_source(p) == _without_source(v), args
+    nonempty = 0
+    for pref in PUBLIC_COHORTS:
+        for alt in ALTERATIONS:
+            for gene in ("TP53", "KRAS", "ALK"):
+                out = frequency_by_cancer_type(gene, alt, 100, pref)
+                assert out["source"] == "live", (gene, alt, pref)
+                tool = {
+                    r["cancer_type"]: (r["altered_samples"], r["profiled_samples"])
+                    for r in _records(out)
+                }
+                recipe = {
+                    r["cancer_type"]: (r["altered_samples"], r["profiled_samples"])
+                    for r in _rows(
+                        client,
+                        f"""
+                        SELECT * FROM gene_alteration_frequency_by_cancer_type(
+                            preference='{pref}', gene='{gene}', alteration='{alt}')
+                    """,
+                    )
+                }
+                assert tool == recipe, (gene, alt, pref)
+                nonempty += bool(tool)
+    assert nonempty > 0
