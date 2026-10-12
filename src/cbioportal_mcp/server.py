@@ -546,10 +546,11 @@ DEFAULT_SELECT_MAX_ROWS = min(result_format.default_max_rows(), MAX_SELECT_MAX_R
     For complex analysis patterns, consult these query guides:
     - cbioportal://mutation-frequency-guide - Gene mutation frequency calculations with proper denominators
     - cbioportal://clinical-data-guide - Patient vs sample-level clinical data queries
-    - cbioportal://sample-filtering-guide - Study and sample type filtering strategies
+    - cbioportal://sample-filtering-guide - Study/sample filtering; subtype in a mixed study: ONCOTREE_CODE
     - cbioportal://external-resources-guide - External linked resources such as imaging viewers
     - cbioportal://gene-resolution-guide - Ambiguous gene symbols and aliases
-    - cbioportal://study-resolution-guide - Missing studies, external portals, and substitute cohorts
+    - cbioportal://study-resolution-guide - Missing studies (e.g. HTAN OHSU), external portals, substitutes
+    - cbioportal://faq-guide - What cancer types, data types and studies the database has
     - cbioportal://common-pitfalls - Common query mistakes and how to avoid them
 
     Args:
@@ -830,7 +831,7 @@ def list_guides() -> list[dict]:
         },
         {
             "uri": "cbioportal://sample-filtering-guide",
-            "description": "Guide for filtering samples and studies in cBioPortal queries"
+            "description": "Guide for filtering samples and studies in cBioPortal queries, including a subtype inside a multi-subtype study (e.g. adenoid cystic carcinoma in acc_2019: filter by ONCOTREE_CODE)"
         },
         {
             "uri": "cbioportal://common-pitfalls",
@@ -842,7 +843,7 @@ def list_guides() -> list[dict]:
         },
         {
             "uri": "cbioportal://faq-guide",
-            "description": "General cBioPortal FAQ: history, how to cite, data types, reference genome, abbreviations, GISTIC thresholds, API access"
+            "description": "General cBioPortal FAQ: what cancer types, data types and studies the database has, history, how to cite, reference genome, abbreviations, GISTIC thresholds, API access, germline support"
         },
         {
             "uri": "cbioportal://statistical-tests-guide",
@@ -862,7 +863,7 @@ def list_guides() -> list[dict]:
         },
         {
             "uri": "cbioportal://study-resolution-guide",
-            "description": "Guide for resolving requested studies, avoiding silent substitute cohorts, and redirecting to known external cBioPortal instances when data is not in this deployment"
+            "description": "Guide for resolving requested studies when list_studies finds nothing (e.g. HTAN centers such as OHSU, which appear only as atlas codes in study ids), avoiding silent substitute cohorts, and redirecting to known external cBioPortal instances when data is not in this deployment"
         },
         {
             "uri": "cbioportal://germline-guide",
@@ -1407,6 +1408,14 @@ def _filter_studies(search: str | None, limit: int, verbose: bool) -> list[dict]
     return rows
 
 
+NO_STUDY_MATCH_NOTE = (
+    "No studies matched {search!r}. Before saying the study isn't available, read "
+    "cbioportal://study-resolution-guide: names can omit centers or consortia (HTAN centers appear only "
+    "as atlas codes in study ids, e.g. hta9 = OHSU), try fewer words, or it may be on another cBioPortal "
+    "instance."
+)
+
+
 @mcp.tool()
 @run_off_event_loop
 def list_studies(search: str = None, limit: int = 20, verbose: bool = False) -> list[dict]:
@@ -1421,7 +1430,8 @@ def list_studies(search: str = None, limit: int = 20, verbose: bool = False) -> 
 
     Returns:
         List of studies with identifiers, names, cancer types, sample counts, cBioPortal URLs,
-        and guide availability. Descriptions are included only when verbose=true.
+        and guide availability. Descriptions are included only when verbose=true. A search
+        with no matches returns a single {"note": ...} pointing to the study-resolution-guide.
     """
     available_guides = set(_list_available_study_guides())
     
@@ -1430,6 +1440,8 @@ def list_studies(search: str = None, limit: int = 20, verbose: bool = False) -> 
     
     try:
         results = _filter_studies(search, safe_limit, bool(verbose))
+        if search and not results:
+            return [{"note": NO_STUDY_MATCH_NOTE.format(search=search)}]
 
         # Add has_guide field
         for study in results:
