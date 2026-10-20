@@ -23,7 +23,12 @@ from cbioportal_mcp.authentication.row_policy_catalog import (
     STUDY_SCOPED_VIEWS,
     classified_names,
 )
-from cbioportal_mcp.clickhouse_query_settings import RESTRICTED_ROLE_PROBES, is_access_denied
+from cbioportal_mcp.clickhouse_query_settings import (
+    READONLY_CODE,
+    RESTRICTED_ROLE_PROBES,
+    clickhouse_error_code,
+    is_access_denied,
+)
 
 
 def _jsonish(value: Any) -> Any:
@@ -478,7 +483,7 @@ async def run(keycloak_url: str, proxy_url: str, clickhouse_url: str) -> None:
             settings=request_settings,
         )
     except Exception as e:
-        assert "164" in str(e) or "readonly" in str(e).lower(), e
+        assert clickhouse_error_code(e) == READONLY_CODE, e
     else:
         raise AssertionError("ClickHouse accepted an in-query allowlist override")
     empty = direct.query(

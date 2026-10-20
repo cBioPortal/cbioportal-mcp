@@ -271,6 +271,11 @@ def main():
 
     if config.clickhouse_row_policy_enabled:
         try:
+            recheck_seconds = config.row_policy_recheck_seconds
+        except ValueError as e:
+            logger.critical("❌ Invalid CBIOPORTAL_MCP_ROW_POLICY_RECHECK_SECONDS: %s", e)
+            sys.exit(2)
+        try:
             verify_allowlist_lockdown(config.clickhouse_allowed_studies_setting)
             verify_restricted_surface(config.clickhouse_allowed_studies_setting)
             logger.info(
@@ -281,9 +286,7 @@ def main():
         except AllowlistLockdownError as e:
             logger.critical("❌ ClickHouse study allowlist is not locked down: %s", e)
             sys.exit(2)
-        start_surface_monitor(
-            config.clickhouse_allowed_studies_setting, config.row_policy_recheck_seconds
-        )
+        start_surface_monitor(config.clickhouse_allowed_studies_setting, recheck_seconds)
 
     # Warm the list_studies cache immediately, without blocking server
     # startup on the ClickHouse round trip, then keep it proactively

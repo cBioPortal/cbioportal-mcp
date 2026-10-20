@@ -1,5 +1,6 @@
 {
   "realm": "cbioportal-mcp-local",
+  "sslRequired": "none",
   "enabled": true,
   "groups": [
     {"name": "research", "subGroups": [{"name": "alpha"}, {"name": "beta"}]},

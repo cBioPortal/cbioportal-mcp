@@ -176,8 +176,10 @@ set again by the policy file for older views. A `DEFINER` or `NONE` view, a
 materialized view or a dictionary would bypass the caller's row policies; the
 coverage check below and the server's startup check reject them, and in
 row-policy mode the server re-runs that check every
-`CBIOPORTAL_MCP_ROW_POLICY_RECHECK_SECONDS` (default 300, `0` disables) and
-refuses study-data queries while it fails. Apply the policy file after the
+`CBIOPORTAL_MCP_ROW_POLICY_RECHECK_SECONDS` (default 300; must be 1-86400 -
+anything else, including 0, NaN or inf, stops the server from starting) and
+refuses study-data queries while it fails, while the re-check thread isn't
+running, or when its last completed check is older than three intervals. Apply the policy file after the
 portable `sql/*.sql` files on every run.
 This is the recommended defense-in-depth mode for restricted deployments; the
 app-level guard still rejects explicit requests for denied study IDs and

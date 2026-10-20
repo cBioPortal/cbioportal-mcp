@@ -235,8 +235,15 @@ class McpConfig:
 
     @property
     def row_policy_recheck_seconds(self) -> float:
-        """How often row-policy mode re-checks views/grants after startup (0 = off)."""
-        return float(os.getenv("CBIOPORTAL_MCP_ROW_POLICY_RECHECK_SECONDS", "300"))
+        """How often row-policy mode re-checks views/grants after startup.
+
+        Seconds in [1, 86400], default 300. Invalid values (NaN, inf, zero,
+        negative, unparseable) raise ValueError - the server refuses to start
+        in row-policy mode rather than run without the re-check.
+        """
+        from cbioportal_mcp.clickhouse_query_settings import parse_recheck_interval
+
+        return parse_recheck_interval(os.getenv("CBIOPORTAL_MCP_ROW_POLICY_RECHECK_SECONDS"))
 
     @property
     def clickhouse_allowed_studies_setting(self) -> str:
