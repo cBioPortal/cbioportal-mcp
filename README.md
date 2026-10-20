@@ -127,7 +127,7 @@ docker run -i -p 8000:8000 cbioportal-mcp
 
 ## License
 
-Apache License 2.0 - see [LICENSE](LICENSE) for details. To cite this software, see [CITATION.cff](CITATION.cff).
+Apache License 2.0 - see [LICENSE](LICENSE) for details.
 
 ## Related Projects
 
