@@ -47,6 +47,224 @@ export CLICKHOUSE_MCP_SERVER_TRANSPORT=stdio # or http or sse
 # export CLICKHOUSE_MCP_HTTP_PATH=/db/mcp
 ```
 
+### Study-Level Access Control
+
+Public deployments default to unrestricted study access:
+
+```bash
+export CBIOPORTAL_MCP_STUDY_ACCESS_MODE=public
+```
+
+Internal deployments can enable per-request study authorization:
+
+```bash
+export CBIOPORTAL_MCP_STUDY_ACCESS_MODE=restricted
+export CBIOPORTAL_MCP_AUTH_REQUIRED=true
+export CBIOPORTAL_MCP_AUTH_PROXY_SECRET=shared-secret-known-only-to-the-proxy
+```
+
+The MCP server expects authentication to be handled by a trusted reverse proxy
+or gateway backed by Keycloak. The proxy should validate the user session or
+token, strip spoofable inbound identity headers, and inject trusted headers such
+as:
+
+```text
+x-user-id: <keycloak-sub-or-username>
+x-user-email: <email>
+x-forwarded-groups: /group/a,/group/b
+x-cbioportal-allowed-studies: study_a,study_b
+```
+
+The server reads identity only from the configured header names (defaults
+above); if your proxy uses others, set them explicitly, e.g. for
+oauth2-proxy:
+
+```bash
+export CBIOPORTAL_MCP_AUTH_USER_ID_HEADERS=x-auth-request-user
+export CBIOPORTAL_MCP_AUTH_EMAIL_HEADERS=x-auth-request-email
+export CBIOPORTAL_MCP_AUTH_GROUPS_HEADERS=x-auth-request-groups
+```
+
+The proxy must drop every one of these headers - plus the allowed-studies
+header and the proxy-secret header - from inbound client requests before
+injecting its own values; otherwise a client can add its own groups header.
+`authz_header_names()` in `study_access.py` lists the full set, and the
+reference proxy (`local_keycloak_proxy.py`) strips exactly that.
+
+If your proxy can inject allowed studies directly, no ACL file is required. If
+you prefer to manage access in the MCP deployment, configure a JSON ACL:
+
+```bash
+export CBIOPORTAL_MCP_STUDY_ACL_FILE=/etc/cbioportal-mcp/study-acl.json
+```
+
+```json
+{
+  "users": {
+    "alice@example.org": ["brca_msk_2024"],
+    "keycloak-subject-id": ["study_a", "study_b"]
+  },
+  "groups": {
+    "/cbioportal/admins": ["*"],
+    "/research/brca": ["brca_msk_2024"]
+  },
+  "default": []
+}
+```
+
+`CBIOPORTAL_MCP_AUTH_PROXY_SECRET` (set above) is **required** in restricted
+mode, not optional: it is the only thing that lets the server verify that
+`x-user-id` / `x-forwarded-groups` / `x-cbioportal-allowed-studies` actually
+came from your trusted proxy rather than a direct caller who can reach this
+process on the network. The server refuses to start in restricted mode
+without it (`validate_study_access_startup_config`, called from `main()`)
+rather than silently trusting unverified headers. Only the header name
+carrying the secret is configurable:
+
+```bash
+# optional; default is x-cbioportal-mcp-proxy-secret
+export CBIOPORTAL_MCP_AUTH_PROXY_SECRET_HEADER=x-cbioportal-mcp-proxy-secret
+```
+
+In restricted mode, `list_studies`, study guide access, and arbitrary ClickHouse
+queries are checked against the current user's allowed studies. Arbitrary SQL is
+intentionally conservative: study-scoped queries must include literal
+`cancer_study_identifier` filters, or parameterized view arguments such as
+`study='...'` / `studies=['...']`, so the server can verify the requested study
+IDs before ClickHouse executes the query.
+
+For stronger isolation, enable ClickHouse row-policy enforcement:
+
+```bash
+export CBIOPORTAL_MCP_CLICKHOUSE_ROW_POLICY_ENABLED=true
+# optional; ClickHouse custom settings generally need an allowed prefix.
+export CBIOPORTAL_MCP_CLICKHOUSE_ALLOWED_STUDIES_SETTING=SQL_cbiomcp_allowed_studies
+```
+
+In this mode, the MCP server passes the resolved study allowlist to ClickHouse
+as a query setting on every SELECT, and ClickHouse row policies filter every
+study-scoped table by following its real foreign-key path back to
+`cancer_study.cancer_study_identifier`. The production policies live in
+[`sql/study-authz/0-row-policies.sql`](sql/study-authz/0-row-policies.sql) and
+are **opt-in** (restricted deployments only):
+
+```bash
+APPLY_STUDY_AUTHZ_SQL=true ./scripts/apply_sql.sh   # see sql/README.md
+# then, once per runtime user:
+#   GRANT cbioportal_mcp_study_restricted TO <mcp_user>;
+#   SET DEFAULT ROLE cbioportal_mcp_study_restricted TO <mcp_user>;
+```
+
+They cover the cBioPortal ClickHouse schema (3.1.0 and the legacy schema
+cloned deployments use): direct `cancer_study_identifier` tables
+(`clinical_data_derived`, `genomic_event_derived`, the other `*_derived`
+tables, `cancer_study_query_preferences`), `cancer_study_id` tables
+(`patient`, `genetic_profile`, `sample_list`, `copy_number_seg`, ...),
+tables reached through `patient` (`sample`, `clinical_event`,
+`clinical_patient`) or `sample` (`clinical_sample`), every per-profile table
+through `genetic_profile` (`mutation`, `genetic_alteration`,
+`structural_variant`, `sample_cna_event`, ...), multi-hop tables
+(`clinical_event_data` -> `clinical_event` -> `patient`), and the shared
+`mutation_event` / `cna_event` dimensions (visible only when observed in an
+allowed study). The classification is in
+[`row_policy_catalog.py`](src/cbioportal_mcp/authentication/row_policy_catalog.py).
+Views (`sql/4`-`sql/7`, including parameterized views) get a `USING 1`
+pass-through policy and inherit filtering from their underlying tables
+because every view is `SQL SECURITY INVOKER`: declared in each `CREATE VIEW`
+in `sql/4`, `sql/5`, `sql/7` (so the daily DROP + CREATE stays INVOKER) and
+set again by the policy file for older views. A `DEFINER` or `NONE` view, a
+materialized view or a dictionary would bypass the caller's row policies; the
+coverage check below and the server's startup check reject them, and in
+row-policy mode the server re-runs that check every
+`CBIOPORTAL_MCP_ROW_POLICY_RECHECK_SECONDS` (default 300; must be 1-86400 -
+anything else, including 0, NaN or inf, stops the server from starting) and
+refuses study-data queries while it fails, while the re-check thread isn't
+running, or when its last completed check is older than three intervals. Apply the policy file after the
+portable `sql/*.sql` files on every run.
+This is the recommended defense-in-depth mode for restricted deployments; the
+app-level guard still rejects explicit requests for denied study IDs and
+rejects any query mentioning an internal `SQL_cbiomcp_*` setting (tokenized,
+so quoting, escapes and comments don't hide it). ClickHouse enforces the same
+thing independently: the server sends `readonly=1` with every row-policy
+query, which makes ClickHouse reject any `SETTINGS`/`SET` inside the query
+while still applying the allowlist sent with the request. This only holds if
+the runtime user's settings profile leaves `readonly` at its default (0) and
+does not mark the setting `CHANGEABLE_IN_READONLY`; at startup the server
+checks both directions (`verify_allowlist_lockdown`) and refuses to start
+otherwise. Profiles with `readonly=1` or `readonly=2` are therefore
+unsupported for row-policy mode. The same startup check refuses to run if
+any view in the database is not explicitly `SQL SECURITY INVOKER`, if the
+database holds a materialized view or dictionary, if the runtime user's
+effective grants (`SHOW GRANTS FINAL`) are anything beyond
+`SELECT ON <db>.*`, or if it can use `url()` / `remote()` / `file()` or read
+`system.processes` / `system.dictionaries` / `system.row_policies` (other
+requests' SQL carries their allowlists). Only ClickHouse error 497
+(`ACCESS_DENIED`) counts as denied; any other error fails the check as
+inconclusive. Keep the server's `select_from_system_db_requires_grant`
+enabled (verified on ClickHouse 25.8). Running restricted
+mode without it logs a startup warning: the app-level guard is a heuristic
+pattern check on arbitrary SELECT queries, not a real SQL parser, so it's the
+weaker of the two supported modes.
+
+Per-table grants (no wildcard) would mechanically close the "forgotten
+table" gap on their own - ClickHouse just denies an ungranted table
+outright, which is fail-closed too. Two things rule that out here,
+independent of whether it would work: the MCP server's own startup
+permission check requires the literal wildcard-scoped
+`GRANT SELECT ON db.* TO <restricted-role>` (per-table grants don't satisfy
+that check even when every existing table is individually granted), and
+`SHOW TABLES` / schema discovery is grant-scoped in ClickHouse, so per-table
+grants would make an unscoped table invisible to `clickhouse_list_tables()`,
+not just inaccessible. Keeping the wildcard grant for those two reasons
+means it says yes to every table, forgotten or not, by construction - there
+is no room left in the grant layer to say no to one specific table. Instead,
+pair it with a database-wide **default-deny row policy**, which is the only
+layer left that can say no:
+
+```sql
+CREATE ROW POLICY cbioportal_mcp_default_deny
+ON <db>.* USING 0 TO <restricted-role>;
+```
+
+This auto-covers tables created after the policy, the same way the wildcard
+grant does. ClickHouse combines multiple `PERMISSIVE` row policies on one
+table with `OR`, so a table with no policy of its own is stuck at `0`
+(nothing visible), while a table with its own policy gets
+`0 OR <real condition>` = `<real condition>`. A newly added table is
+therefore unreadable by default until someone adds a policy deciding how it
+maps back to a study (or explicitly allowlists it as study-agnostic
+reference data, e.g. `gene`/`type_of_cancer`, with its own `USING 1` policy).
+The default-deny also matches views, which is why every view needs its own
+pass-through policy.
+
+For a runnable local Keycloak + ClickHouse + MCP authz stack see
+[`docker/local-e2e/`](docker/local-e2e/). Its ClickHouse fixture mirrors the
+production linkage (no study column on `sample`/`patient`) and has the repo's
+real `sql/*.sql` plus the production row-policy file applied on top, and the
+verifier runs unfiltered `SELECT *` as restricted users against every
+study-scoped table and several views. `tests/test_row_policy_sql.py` keeps the
+policy file, the catalog, the views defined in `sql/` and the fixture in sync
+without needing ClickHouse.
+
+Before enabling `CBIOPORTAL_MCP_CLICKHOUSE_ROW_POLICY_ENABLED=true` against a
+real database - and periodically after, since an unrelated cBioPortal schema
+migration can add a table nobody's scoped yet - run
+[`scripts/verify_row_policy_coverage.py`](scripts/verify_row_policy_coverage.py)
+against the live `system.tables` / `system.row_policies`. It fails if the
+default-deny is missing, if a study-scoped table has only the default-deny
+(fully denied by accident) or an unfiltered policy, if a reference table or
+view has no policy, on `SQL SECURITY DEFINER` views, materialized views and
+dictionaries, and on unclassified tables. It takes
+**admin** credentials (`CLICKHOUSE_ADMIN_USER`/`CLICKHOUSE_ADMIN_PASSWORD`,
+the same split [`scripts/apply_sql.sh`](scripts/apply_sql.sh) uses), not the
+MCP's runtime SELECT-only user: reading `system.row_policies` requires a
+grant that is *not* scoped to the querying user's own database access, so
+granting it to the runtime role would leak policy metadata for every
+database on the cluster through the `clickhouse_run_select_query`
+arbitrary-SQL tool. The admin identity only needs `SHOW TABLES` /
+`SHOW DICTIONARIES` on the target database (metadata, not row data) plus
+`SELECT ON system.row_policies` and `system.dictionaries`.
+
 ### Datadog Tool Metrics
 
 The server emits one OpenTelemetry span per MCP tool call and can also emit

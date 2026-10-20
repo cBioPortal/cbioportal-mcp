@@ -16,7 +16,7 @@ def _fake_rows():
 def test_list_studies_default_uses_trimmed_sample_count_query(monkeypatch):
     queries = []
 
-    def fake_run_select_query(query, query_label=None):
+    def fake_run_select_query(query, query_label=None, **kwargs):
         queries.append(query)
         return _fake_rows()
 
@@ -36,7 +36,7 @@ def test_list_studies_default_uses_trimmed_sample_count_query(monkeypatch):
 def test_list_studies_refetches_after_ttl_expires(monkeypatch):
     call_count = 0
 
-    def fake_run_select_query(query, query_label=None):
+    def fake_run_select_query(query, query_label=None, **kwargs):
         nonlocal call_count
         call_count += 1
         return _fake_rows()
@@ -64,7 +64,7 @@ def test_list_studies_refetches_after_ttl_expires(monkeypatch):
 def test_list_studies_caches_repeated_calls_across_search_terms(monkeypatch):
     call_count = 0
 
-    def fake_run_select_query(query, query_label=None):
+    def fake_run_select_query(query, query_label=None, **kwargs):
         nonlocal call_count
         call_count += 1
         return _fake_rows()
@@ -83,7 +83,7 @@ def test_list_studies_caches_repeated_calls_across_search_terms(monkeypatch):
 def test_list_studies_verbose_includes_description(monkeypatch):
     queries = []
 
-    def fake_run_select_query(query, query_label=None):
+    def fake_run_select_query(query, query_label=None, **kwargs):
         queries.append(query)
         return _fake_rows()
 
@@ -100,7 +100,7 @@ def test_list_studies_verbose_includes_description(monkeypatch):
 def test_background_refresh_updates_cache_without_a_live_caller(monkeypatch):
     call_count = 0
 
-    def fake_run_select_query(query, query_label=None):
+    def fake_run_select_query(query, query_label=None, **kwargs):
         nonlocal call_count
         call_count += 1
         return _fake_rows()
@@ -131,7 +131,7 @@ def test_background_refresh_updates_cache_without_a_live_caller(monkeypatch):
 
 
 def test_background_refresh_failure_is_logged_not_raised(monkeypatch, caplog):
-    def failing_run_select_query(query, query_label=None):
+    def failing_run_select_query(query, query_label=None, **kwargs):
         raise RuntimeError("clickhouse unreachable")
 
     server._clear_studies_cache()
@@ -143,7 +143,7 @@ def test_background_refresh_failure_is_logged_not_raised(monkeypatch, caplog):
 
 
 def test_list_studies_search_filters_in_python(monkeypatch):
-    def fake_run_select_query(query, query_label=None):
+    def fake_run_select_query(query, query_label=None, **kwargs):
         return [
             {
                 "cancer_study_identifier": "study_alpha",

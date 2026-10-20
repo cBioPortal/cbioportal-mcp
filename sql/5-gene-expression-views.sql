@@ -44,7 +44,7 @@
 
 DROP VIEW IF EXISTS gene_pair_coexpression;
 
-CREATE VIEW gene_pair_coexpression AS
+CREATE VIEW gene_pair_coexpression SQL SECURITY INVOKER AS
 WITH a AS (
     SELECT sample_unique_id, toFloat64OrNull(alteration_value) AS v
     FROM genetic_alteration_derived

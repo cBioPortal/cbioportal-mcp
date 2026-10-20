@@ -46,7 +46,7 @@
 
 DROP VIEW IF EXISTS treatment_counts_in_study;
 
-CREATE VIEW treatment_counts_in_study AS
+CREATE VIEW treatment_counts_in_study SQL SECURITY INVOKER AS
 WITH study_patients AS (
     SELECT DISTINCT patient_unique_id
     FROM sample_derived
@@ -116,7 +116,7 @@ GROUP BY agent;
 
 DROP VIEW IF EXISTS treatment_regimens_in_study;
 
-CREATE VIEW treatment_regimens_in_study AS
+CREATE VIEW treatment_regimens_in_study SQL SECURITY INVOKER AS
 WITH study_patients AS (
     SELECT DISTINCT patient_unique_id
     FROM sample_derived
@@ -199,7 +199,7 @@ GROUP BY agents;
 
 DROP VIEW IF EXISTS clinical_attribute_counts;
 
-CREATE VIEW clinical_attribute_counts AS
+CREATE VIEW clinical_attribute_counts SQL SECURITY INVOKER AS
 WITH attribute_level AS (
     SELECT max(m.patient_attribute) AS is_patient, count() AS found
     FROM clinical_attribute_meta m

@@ -13,6 +13,36 @@ On startup we verify that the configured ClickHouse user:
    - No INSERT / UPDATE / DELETE / DDL / admin privileges on *.*.
 
 If checks fail, we raise PermissionError so the application can fail fast.
+
+Scope, deliberately: this module only ever checks database-wide GRANT
+breadth via `CHECK GRANT ... ON db.*` / `*.*`. It never enumerates
+individual tables, and it never checks ROW POLICY coverage (whether a
+specific table's rows are actually scoped to a study). Those are a
+different privilege axis in ClickHouse - GRANT controls whether a table is
+reachable at all; ROW POLICY controls which rows come back once it is - and
+checking one tells you nothing about the other.
+
+Row-policy coverage is deliberately NOT added here, even though it sounds
+like the same kind of "is this deployment configured correctly" question.
+Verifying it requires reading `system.row_policies`, which is not scoped to
+the querying user's own database access - once granted, it exposes policy
+metadata for every database on the cluster, not just this one. Granting
+that to this module's low-privilege runtime user (config.mcp_user, the same
+identity behind the `clickhouse_run_select_query` arbitrary-SQL tool) would
+leak that metadata to anyone using the tool. So row-policy coverage lives in
+a standalone, admin-credentialed script instead -
+scripts/verify_row_policy_coverage.py, run at deploy time (before enabling
+CBIOPORTAL_MCP_CLICKHOUSE_ROW_POLICY_ENABLED=true) and periodically after,
+never loaded by this running process.
+
+Also deliberately a startup check, not a per-call one: the property here
+(this user's static grants) doesn't change between requests within a
+running process, and ClickHouse itself already enforces the real access
+control on every query regardless of what this module does - if a grant
+were revoked mid-session, the next query would fail with ClickHouse's own
+ACCESS_DENIED. This check exists purely to fail fast and loud at startup,
+before any traffic is served, rather than have a misconfiguration surface
+as a confusing error on whichever request happens to hit it first.
 """
 
 from __future__ import annotations

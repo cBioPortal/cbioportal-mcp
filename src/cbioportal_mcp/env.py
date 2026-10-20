@@ -1,9 +1,9 @@
 """Environment configuration for cBioPortal MCP server."""
 
-from dataclasses import dataclass
 import os
-from typing import Optional
+from dataclasses import dataclass
 from enum import Enum
+from typing import Optional
 
 
 class TransportType(str, Enum):
@@ -17,6 +17,31 @@ class TransportType(str, Enum):
     def values(cls) -> list[str]:
         """Get all valid transport values."""
         return [transport.value for transport in cls]
+
+
+class StudyAccessMode(str, Enum):
+    """Supported end-user study access modes."""
+
+    PUBLIC = "public"
+    RESTRICTED = "restricted"
+
+    @classmethod
+    def values(cls) -> list[str]:
+        """Get all valid study access modes."""
+        return [mode.value for mode in cls]
+
+
+def _parse_header_list(name: str, default: str) -> tuple[str, ...]:
+    """Comma-separated, lowercased header names from ``name`` (or ``default``)."""
+    raw = os.getenv(name) or default
+    return tuple(part.strip().lower() for part in raw.split(",") if part.strip())
+
+
+def _parse_bool_env(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "t", "yes", "y", "on"}
 
 
 @dataclass
@@ -114,6 +139,119 @@ class McpConfig:
         """
 
         return str(os.getenv("CLICKHOUSE_DATABASE", "cgds_public_2025_06_24"))
+
+    @property
+    def study_access_mode(self) -> str:
+        """Get the end-user study access mode.
+
+        ``public`` keeps public cBioPortal behavior: all studies visible.
+        ``restricted`` resolves allowed studies from headers and/or an ACL file.
+        """
+        mode = os.getenv("CBIOPORTAL_MCP_STUDY_ACCESS_MODE", StudyAccessMode.PUBLIC.value).lower()
+        if mode in {"off", "disabled", "none"}:
+            mode = StudyAccessMode.PUBLIC.value
+        if mode not in StudyAccessMode.values():
+            valid_options = ", ".join(f'"{m}"' for m in StudyAccessMode.values())
+            raise ValueError(f"Invalid study access mode '{mode}'. Valid options: {valid_options}")
+        return mode
+
+    @property
+    def auth_required(self) -> bool:
+        """Whether request identity headers are required.
+
+        Restricted study access usually needs an authenticated reverse proxy.
+        Public mode defaults to false; restricted mode defaults to true.
+        """
+        default = self.study_access_mode == StudyAccessMode.RESTRICTED.value
+        return _parse_bool_env("CBIOPORTAL_MCP_AUTH_REQUIRED", default)
+
+    @property
+    def study_acl_file(self) -> Optional[str]:
+        """Path to a JSON ACL mapping users/groups to allowed study IDs."""
+        value = os.getenv("CBIOPORTAL_MCP_STUDY_ACL_FILE")
+        return value if value else None
+
+    @property
+    def auth_user_id_headers(self) -> tuple[str, ...]:
+        """Headers, in priority order, that carry the proxy-verified user id.
+
+        Only these are read: anything else a client sends is ignored. The
+        trusted proxy must strip all of them from inbound requests before
+        injecting its own (see local_keycloak_proxy.py).
+        """
+        return _parse_header_list("CBIOPORTAL_MCP_AUTH_USER_ID_HEADERS", "x-user-id")
+
+    @property
+    def auth_email_headers(self) -> tuple[str, ...]:
+        """Headers, in priority order, that carry the proxy-verified email."""
+        return _parse_header_list("CBIOPORTAL_MCP_AUTH_EMAIL_HEADERS", "x-user-email")
+
+    @property
+    def auth_groups_headers(self) -> tuple[str, ...]:
+        """Headers whose (unioned) values are the proxy-verified groups."""
+        return _parse_header_list("CBIOPORTAL_MCP_AUTH_GROUPS_HEADERS", "x-forwarded-groups")
+
+    @property
+    def allowed_studies_header(self) -> str:
+        """Header carrying a comma-separated or JSON array list of allowed studies."""
+        return os.getenv(
+            "CBIOPORTAL_MCP_ALLOWED_STUDIES_HEADER",
+            "x-cbioportal-allowed-studies",
+        ).lower()
+
+    @property
+    def global_allowed_studies(self) -> str:
+        """Static comma-separated allowed studies for service-scoped deployments."""
+        return os.getenv("CBIOPORTAL_MCP_ALLOWED_STUDIES", "")
+
+    @property
+    def auth_admin_groups(self) -> str:
+        """Comma-separated groups that receive access to all studies."""
+        return os.getenv("CBIOPORTAL_MCP_AUTH_ADMIN_GROUPS", "")
+
+    @property
+    def auth_proxy_secret(self) -> Optional[str]:
+        """Shared secret expected from the trusted auth proxy, when configured."""
+        value = os.getenv("CBIOPORTAL_MCP_AUTH_PROXY_SECRET")
+        return value if value else None
+
+    @property
+    def auth_proxy_secret_header(self) -> str:
+        """Header used to carry the trusted auth proxy shared secret."""
+        return os.getenv(
+            "CBIOPORTAL_MCP_AUTH_PROXY_SECRET_HEADER",
+            "x-cbioportal-mcp-proxy-secret",
+        ).lower()
+
+    @property
+    def clickhouse_row_policy_enabled(self) -> bool:
+        """Whether ClickHouse row policies enforce per-request study access.
+
+        When enabled, the MCP server passes the resolved study allowlist to
+        ClickHouse as a query setting. Row policies can then filter rows even
+        for tables that do not carry a direct cancer_study_identifier column.
+        """
+        return _parse_bool_env("CBIOPORTAL_MCP_CLICKHOUSE_ROW_POLICY_ENABLED", False)
+
+    @property
+    def row_policy_recheck_seconds(self) -> float:
+        """How often row-policy mode re-checks views/grants after startup.
+
+        Seconds in [1, 86400], default 300. Invalid values (NaN, inf, zero,
+        negative, unparseable) raise ValueError - the server refuses to start
+        in row-policy mode rather than run without the re-check.
+        """
+        from cbioportal_mcp.clickhouse_query_settings import parse_recheck_interval
+
+        return parse_recheck_interval(os.getenv("CBIOPORTAL_MCP_ROW_POLICY_RECHECK_SECONDS"))
+
+    @property
+    def clickhouse_allowed_studies_setting(self) -> str:
+        """ClickHouse custom setting name containing the request study allowlist."""
+        return os.getenv(
+            "CBIOPORTAL_MCP_CLICKHOUSE_ALLOWED_STUDIES_SETTING",
+            "SQL_cbiomcp_allowed_studies",
+        )
 
     @property
     def google_client_id(self) -> Optional[str]:

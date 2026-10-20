@@ -28,7 +28,7 @@ def fake_db(monkeypatch):
     """Stand in for ClickHouse: only the exact lowercase identifier is stored."""
     seen = []
 
-    def run_select_query(query: str, query_label=None):
+    def run_select_query(query: str, query_label=None, **kwargs):
         seen.append(" ".join(query.split()))
         q = query.lower()
         if "from cancer_study" in q and "lower(cancer_study_identifier) = lower(" in q:
@@ -63,7 +63,7 @@ def test_downstream_sections_use_the_canonical_identifier(fake_db):
 
 
 def test_miss_message_never_asserts_nonexistence(monkeypatch):
-    monkeypatch.setattr(server, "run_select_query", lambda q, query_label=None: [])
+    monkeypatch.setattr(server, "run_select_query", lambda q, query_label=None, **kwargs: [])
     out = _guide("totally_made_up_study")
 
     assert "does not exist" in out  # only as the instruction NOT to say it
@@ -72,7 +72,7 @@ def test_miss_message_never_asserts_nonexistence(monkeypatch):
 
 
 def test_miss_message_lists_the_three_recoverable_causes(monkeypatch):
-    monkeypatch.setattr(server, "run_select_query", lambda q, query_label=None: [])
+    monkeypatch.setattr(server, "run_select_query", lambda q, query_label=None, **kwargs: [])
     out = _guide("nbl_msk_9999")
 
     assert "Different identifier" in out
@@ -88,7 +88,7 @@ def test_miss_message_offers_similar_identifiers(fake_db):
 
 
 def test_similar_study_lookup_tolerates_a_db_error(monkeypatch):
-    def boom(query: str, query_label=None):
+    def boom(query: str, query_label=None, **kwargs):
         raise RuntimeError("clickhouse unavailable")
 
     monkeypatch.setattr(server, "run_select_query", boom)
@@ -102,7 +102,7 @@ def test_dynamic_guide_labels_each_query_by_call_site(monkeypatch):
     seven queries into one run_select_query number."""
     labels_seen = []
 
-    def run_select_query(query: str, query_label=None):
+    def run_select_query(query: str, query_label=None, **kwargs):
         labels_seen.append(query_label)
         q = query.lower()
         if "from cancer_study" in q and "lower(cancer_study_identifier) = lower(" in q:
@@ -140,7 +140,7 @@ def test_dynamic_guide_section_order_is_stable_despite_concurrent_completion(mon
         "study_guide.sample_types": 0.0,
     }
 
-    def run_select_query(query: str, query_label=None):
+    def run_select_query(query: str, query_label=None, **kwargs):
         q = query.lower()
         if "from cancer_study" in q and "lower(cancer_study_identifier) = lower(" in q:
             return [CANCER_STUDY_ROW]
@@ -177,7 +177,7 @@ def test_dynamic_guide_section_order_is_stable_despite_concurrent_completion(mon
 
 
 def test_similar_study_lookup_ignores_short_tokens(monkeypatch):
-    def fail_if_called(q, query_label=None):
+    def fail_if_called(q, query_label=None, **kwargs):
         pytest.fail("should not query")
 
     monkeypatch.setattr(server, "run_select_query", fail_if_called)

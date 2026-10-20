@@ -13,6 +13,10 @@
 #   CLICKHOUSE_PORT             default 9440 (native+TLS)
 #   CLICKHOUSE_SECURE           default true
 #   SQL_DIR                     default <repo>/sql
+#   APPLY_STUDY_AUTHZ_SQL       default false; true also applies the opt-in
+#                               study-level row policies in sql/study-authz/
+#                               (restricted deployments only; needs CREATE
+#                               ROLE / CREATE ROW POLICY rights)
 #
 # Requires the `clickhouse-client` binary on PATH.
 
@@ -64,7 +68,7 @@ apply_one() {
     clickhouse-client \
         --host "$CLICKHOUSE_HOST" \
         --port "$CLICKHOUSE_PORT" \
-        "${secure_flag[@]}" \
+        ${secure_flag[@]+"${secure_flag[@]}"} \
         --user "$CLICKHOUSE_ADMIN_USER" \
         --password "$CLICKHOUSE_ADMIN_PASSWORD" \
         --database "$CLICKHOUSE_DATABASE" \
@@ -88,6 +92,29 @@ for d in "$SQL_DIR"/portal-specific/*/; do
         apply_one "$f"
     done
 done
+
+# Phase 3 (opt-in): study-level row policies for restricted deployments.
+# These files qualify every table with __CLICKHOUSE_DATABASE__ (unqualified
+# names in a row policy's subquery resolve against the *querying* session's
+# database), so they are rendered for the target database first.
+if [[ "${APPLY_STUDY_AUTHZ_SQL:-false}" == "true" || "${APPLY_STUDY_AUTHZ_SQL:-}" == "1" ]]; then
+    if [[ ! "$CLICKHOUSE_DATABASE" =~ ^[A-Za-z0-9_]+$ ]]; then
+        echo "error: CLICKHOUSE_DATABASE must match ^[A-Za-z0-9_]+$ to render study-authz SQL" >&2
+        exit 1
+    fi
+    rendered_dir=$(mktemp -d)
+    trap 'rm -rf "$rendered_dir"' EXIT
+    for f in "$SQL_DIR"/study-authz/*.sql; do
+        base=$(basename "$f")
+        [[ "$base" =~ ^[0-9]+- ]] || continue
+        mkdir -p "$rendered_dir/study-authz"
+        sed "s/__CLICKHOUSE_DATABASE__/${CLICKHOUSE_DATABASE}/g" "$f" > "$rendered_dir/study-authz/$base"
+        echo "render study-authz/$base -> $CLICKHOUSE_DATABASE"
+        SQL_DIR="$rendered_dir" apply_one "$rendered_dir/study-authz/$base"
+    done
+else
+    echo "skip   study-authz/ (set APPLY_STUDY_AUTHZ_SQL=true for restricted deployments)"
+fi
 
 echo
 echo "Done."
