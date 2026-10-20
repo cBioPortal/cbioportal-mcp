@@ -26,7 +26,7 @@ This stack validates the restricted-study access flow end to end:
    default-deny also matches *views*, which is why each view gets a
    `USING 1` pass-through policy; its rows are then filtered by the
    underlying tables' policies (views run as the invoker). Verified against
-   ClickHouse 24.12. `tests/test_row_policy_sql.py` fails CI if the policy
+   ClickHouse 24.12 and 25.8. `tests/test_row_policy_sql.py` fails CI if the policy
    file, `row_policy_catalog.py`, the views in `sql/` or this fixture drift
    apart.
 8. `scripts/verify_row_policy_coverage.py` checks coverage *live*, against a
@@ -71,17 +71,33 @@ In another shell, run the verifier:
 uv run python scripts/local_e2e_keycloak_authz.py
 ```
 
-It checks, through the MCP's `clickhouse_run_select_query` tool, that an
-unfiltered `SELECT *` on every study-scoped fixture table returns exactly
-alice's (`study_alpha`) or bob's (`study_beta`) rows and both for
-`admin-user`; that reference tables stay readable and cBioPortal's auth
-tables stay denied; that a filter the app-level guard can't read
-(`concat('study_', 'beta')`) is still enforced; and that the `sql/4`
-coverage view and the parameterized `sql/5` / `sql/7` views inherit the
-filtering. Expected output:
+It fails unless the fixture contains every table and view in
+`row_policy_catalog.py`, then checks, through the MCP's
+`clickhouse_run_select_query` tool:
+
+- an unfiltered `SELECT *` on every study-scoped table returns exactly
+  alice's (`study_alpha`) or bob's (`study_beta`) rows, both for `admin-user`,
+  and nothing for `carol` (no groups, so an empty allowlist); the shared
+  `mutation_event` / `cna_event` rows observed in both studies are visible to
+  both;
+- reference tables stay readable and cBioPortal's auth tables stay denied;
+- every one of the 21 `sql/4`/`sql/5`/`sql/7` views (parameterized ones with
+  real arguments) returns the caller's data and nothing from the other study,
+  including when the other study is passed in a form the app-level guard
+  can't read (`concat('study_', 'beta')`);
+- allowlist override attempts (`SETTINGS SQL_cbiomcp_allowed_studies='*'`
+  behind a `'--'` literal, escaped identifiers, `getSetting`) are rejected by
+  the guard, and - connecting to ClickHouse directly as `mcp_authz` with
+  `readonly=1` - by ClickHouse itself; an empty allowlist returns no rows and
+  an absent one fails;
+- concurrent alice/bob requests never see each other's rows.
+
+Expected output:
 
 ```text
-Row policies OK on 44 study-scoped tables.
+Row policies OK on 45 study-scoped tables.
+Row policies OK through all 21 views.
+Allowlist override, empty/absent allowlist and concurrency checks passed.
 Local Keycloak authz e2e passed.
 Alice access: {'user_id': '...', 'user_email': 'alice@example.org', ...}
 Bob access: {'user_id': '...', 'user_email': 'bob@example.org', ...}
@@ -118,7 +134,7 @@ authorization path after changing auth, ACL, or row-policy logic.
 
    - password-grant client `mcp-local`
    - token-introspection client `mcp-local-proxy`
-   - users `alice`, `bob`, and `admin-user`
+   - users `alice`, `bob`, `admin-user`, and `carol` (no groups)
    - groups `/research/alpha`, `/research/beta`, and `/cbioportal/admins`
 
 4. Confirm the local auth proxy is configured to introspect Keycloak tokens and
@@ -165,7 +181,9 @@ authorization path after changing auth, ACL, or row-policy logic.
 6. Expected success output:
 
    ```text
-   Row policies OK on 44 study-scoped tables.
+   Row policies OK on 45 study-scoped tables.
+   Row policies OK through all 21 views.
+   Allowlist override, empty/absent allowlist and concurrency checks passed.
    Local Keycloak authz e2e passed.
    Alice access: {'user_id': '...', 'user_email': 'alice@example.org', ...}
    Bob access: {'user_id': '...', 'user_email': 'bob@example.org', ...}
@@ -270,6 +288,7 @@ authorization path after changing auth, ACL, or row-policy logic.
 | `alice` | `alice` | `/research/alpha` | `study_alpha` |
 | `bob` | `bob` | `/research/beta` | `study_beta` |
 | `admin-user` | `admin-user` | `/cbioportal/admins` | all studies |
+| `carol` | `carol` | none | none (empty allowlist) |
 
 Keycloak admin console:
 

@@ -83,20 +83,6 @@ def test_get_study_guide_section_queries_keep_request_context(restricted, monkey
     assert "study_guide.counts" in seen and "study_guide.top_genes" in seen
 
 
-def test_get_study_guide_rejects_case_variant_of_unauthorized_study(restricted, monkeypatch):
-    monkeypatch.setattr(server, "_load_study_guide", lambda study_id: None)
-    monkeypatch.setattr(
-        server,
-        "run_select_query",
-        lambda query, query_label=None, **kwargs: [_study("study_beta")],
-    )
-    _REQUEST_HEADERS.set({"x-user-id": "alice", "x-cbioportal-allowed-studies": "STUDY_BETA"})
-
-    guide = server.get_study_guide.fn("STUDY_BETA")
-
-    assert "Not authorized" in guide and "study_beta" in guide
-
-
 def test_all_studies_settings_skip_request_resolution(monkeypatch):
     monkeypatch.setenv("CBIOPORTAL_MCP_STUDY_ACCESS_MODE", "restricted")
     monkeypatch.setenv("CBIOPORTAL_MCP_CLICKHOUSE_ROW_POLICY_ENABLED", "true")
@@ -112,3 +98,65 @@ def test_request_settings_carry_allowed_studies(restricted, monkeypatch):
     assert clickhouse_study_access_settings(McpConfig()) == {
         "SQL_cbiomcp_allowed_studies": "study_alpha"
     }
+
+
+def _allow(studies: str) -> None:
+    _REQUEST_HEADERS.set({"x-user-id": "alice", "x-cbioportal-allowed-studies": studies})
+
+
+def _no_db(query, query_label=None, **kwargs):
+    raise AssertionError(f"curated guide path must not query the database: {query_label}")
+
+
+@pytest.mark.parametrize("requested", ["MSK_CHORD_2024", "msk_chord_2024", "Msk_Chord_2024"])
+def test_curated_guide_allowed_for_canonical_acl_in_any_casing(restricted, monkeypatch, requested):
+    monkeypatch.setattr(server, "run_select_query", _no_db)
+    _allow("msk_chord_2024")
+
+    guide = server.get_study_guide.fn(requested)
+
+    assert not guide.startswith("Error"), guide[:200]
+
+
+@pytest.mark.parametrize("requested", ["MSK_CHORD_2024", "msk_chord_2024"])
+def test_curated_guide_denied_for_non_canonical_acl_spelling(restricted, monkeypatch, requested):
+    # An ACL entry 'MSK_CHORD_2024' is not the study msk_chord_2024.
+    monkeypatch.setattr(server, "run_select_query", _no_db)
+    _allow("MSK_CHORD_2024")
+
+    guide = server.get_study_guide.fn(requested)
+
+    assert guide == "Error: Not authorized to access study 'msk_chord_2024'."
+
+
+@pytest.mark.parametrize("requested", ["STUDY_ALPHA", "study_alpha"])
+def test_dynamic_guide_allowed_for_canonical_acl_in_any_casing(restricted, monkeypatch, requested):
+    def fake_run_select_query(query, query_label=None, **kwargs):
+        if query_label == "study_guide.study_info":
+            return [_study("study_alpha")]
+        server.guard_query_study_access(query)
+        return []
+
+    monkeypatch.setattr(server, "run_select_query", fake_run_select_query)
+    _allow("study_alpha")
+
+    guide = server.get_study_guide.fn(requested)
+
+    assert guide.startswith("# Study Guide"), guide[:200]
+
+
+@pytest.mark.parametrize("requested", ["STUDY_BETA", "study_beta"])
+def test_dynamic_guide_denied_for_non_canonical_acl_spelling(restricted, monkeypatch, requested):
+    seen = []
+
+    def fake_run_select_query(query, query_label=None, **kwargs):
+        seen.append(query_label)
+        return [_study("study_beta")] if query_label == "study_guide.study_info" else []
+
+    monkeypatch.setattr(server, "run_select_query", fake_run_select_query)
+    _allow("STUDY_BETA")
+
+    guide = server.get_study_guide.fn(requested)
+
+    assert guide == "Error: Not authorized to access study 'study_beta'."
+    assert seen == ["study_guide.study_info"]  # no section queries ran

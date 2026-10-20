@@ -142,3 +142,19 @@ def test_restrictive_policies_do_not_count_as_coverage():
         Policy("r", "sample", STUDY_FILTER, is_restrictive=True)
     ]
     assert any("fully denied" in e for e in _evaluate(objects, policies).errors)
+
+
+def test_unknown_view_with_a_policy_is_still_unclassified():
+    objects, policies = _good()
+    objects["surprise_view"] = _table("View", "CREATE VIEW cbio.s AS SELECT * FROM sample")
+    policies.append(Policy("cbioportal_mcp_view_surprise", "surprise_view", "1"))
+    report = _evaluate(objects, policies)
+    assert report.unclassified == ["surprise_view"]
+    assert not report.ok
+
+
+def test_unknown_table_with_a_policy_is_still_unclassified():
+    objects, policies = _good()
+    objects["surprise_table"] = _table()
+    policies.append(Policy("p", "surprise_table", "1"))
+    assert _evaluate(objects, policies).unclassified == ["surprise_table"]

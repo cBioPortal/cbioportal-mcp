@@ -15,7 +15,7 @@ if _dd_api_key:
         integrations_enabled=True,
     )
 
-import contextvars
+import contextvars  # noqa: E402 - imported after LLMObs setup, like the rest
 import json
 import logging
 import re
@@ -26,7 +26,6 @@ from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 from importlib import resources as importlib_resources
 from pathlib import Path
-from threading import Lock
 from typing import Optional
 from fastmcp import FastMCP
 
@@ -35,7 +34,7 @@ import mcp.types as mt
 
 from cbioportal_mcp.env import get_mcp_config, TransportType
 from cbioportal_mcp.authentication.permissions import ensure_db_permissions
-from cbioportal_mcp.authentication.study_access import (
+from cbioportal_mcp.authentication.study_access import (  # noqa: E402 - imported after LLMObs setup, like the rest
     AuthorizationError,
     StudyAccessConfigError,
     authorize_study,
@@ -45,6 +44,11 @@ from cbioportal_mcp.authentication.study_access import (
     validate_study_access_startup_config,
 )
 from cbioportal_mcp.auth import _build_auth_provider
+from cbioportal_mcp.clickhouse_query_settings import (  # noqa: E402 - imported after LLMObs setup, like the rest
+    AllowlistLockdownError,
+    run_query_with_settings,
+    verify_allowlist_lockdown,
+)
 from cbioportal_mcp.telemetry import (
     TelemetryMiddleware,
     configure_telemetry,
@@ -53,7 +57,6 @@ from cbioportal_mcp.telemetry import (
 )
 
 logger = logging.getLogger(__name__)
-_CLICKHOUSE_CUSTOM_SETTINGS_LOCK = Lock()
 
 # Regex pattern for valid cBioPortal study identifiers
 # Allows alphanumeric characters, underscores, and hyphens
@@ -262,6 +265,17 @@ def main():
     except PermissionError as e:
         logger.critical("❌ ClickHouse permission check failed: %s", e)
         sys.exit(2)
+
+    if config.clickhouse_row_policy_enabled:
+        try:
+            verify_allowlist_lockdown(config.clickhouse_allowed_studies_setting)
+            logger.info(
+                "✅ ClickHouse accepts the per-request %s and rejects in-query overrides",
+                config.clickhouse_allowed_studies_setting,
+            )
+        except AllowlistLockdownError as e:
+            logger.critical("❌ ClickHouse study allowlist is not locked down: %s", e)
+            sys.exit(2)
 
     # Warm the list_studies cache immediately, without blocking server
     # startup on the ClickHouse round trip, then keep it proactively
@@ -593,33 +607,17 @@ def clickhouse_list_table_columns(table: str) -> dict[str, list[dict] | str]:
 
 
 def _run_select_query_with_clickhouse_settings(query: str, *, all_studies: bool = False) -> dict:
-    """Execute a query while passing per-request ClickHouse settings.
+    """Execute a query with the request's study allowlist as a ClickHouse setting.
 
-    ``all_studies`` sends the unrestricted ``*`` allowlist instead of the
-    current request's. Only for server-internal queries whose results are
-    filtered per request in Python afterwards (the shared list_studies
-    snapshot), which run on a background thread with no request identity.
+    Goes through mcp-clickhouse's pooled, timeout-cancelling run_query (see
+    clickhouse_query_settings), with readonly=1 forced so the query itself
+    can't change the setting. ``all_studies`` sends the unrestricted ``*``
+    allowlist instead of the current request's. Only for server-internal
+    queries whose results are filtered per request in Python afterwards (the
+    shared list_studies snapshot), which run on a background thread with no
+    request identity.
     """
-    from clickhouse_connect import common as clickhouse_connect_common
-    from mcp_clickhouse.mcp_server import create_clickhouse_client, get_readonly_setting
-
-    client = create_clickhouse_client()
-    read_only = get_readonly_setting(client)
-    settings = {"readonly": read_only}
-    settings.update(clickhouse_study_access_settings(all_studies=all_studies))
-    with _CLICKHOUSE_CUSTOM_SETTINGS_LOCK:
-        previous_invalid_setting_action = clickhouse_connect_common.get_setting(
-            "invalid_setting_action"
-        )
-        clickhouse_connect_common.set_setting("invalid_setting_action", "send")
-        try:
-            result = client.query(query, settings=settings)
-        finally:
-            clickhouse_connect_common.set_setting(
-                "invalid_setting_action",
-                previous_invalid_setting_action,
-            )
-    return {"columns": result.column_names, "rows": result.result_rows}
+    return run_query_with_settings(query, clickhouse_study_access_settings(all_studies=all_studies))
 
 
 def run_select_query(
@@ -923,24 +921,35 @@ def get_study_guide(study_id: str) -> str:
     # Validate study_id to prevent SQL injection
     try:
         study_id = _validate_study_id(study_id)
-        authorize_study(study_id)
     except ValueError as e:
         return f"Error: {str(e)}"
-    except AuthorizationError as e:
-        return f"Error: {str(e)}"
-    
-    # First, check for a pre-generated guide file. `_load_study_guide` returns
-    # None when no guide file exists (fall through to dynamic); it raises when
-    # a guide was resolved but couldn't be read — that's a real problem and
-    # we surface it rather than silently degrading.
-    try:
-        static_guide = _load_study_guide(study_id)
-    except Exception as e:
-        logger.error(f"Error reading resolved static guide for {study_id}: {e}")
-        return f"Error: A study guide was found for '{study_id}' but could not be read: {e}"
-    if static_guide:
-        logger.info(f"Loaded static study guide for {study_id}")
-        return static_guide
+
+    # Study access is always checked against the canonical identifier - the
+    # curated guide's file name, else the database's spelling - never the
+    # caller's spelling, and before any guide content is returned. Checking
+    # the caller's spelling would reject 'STUDY_ALPHA' for an ACL listing
+    # study_alpha, and let an ACL listing only 'STUDY_BETA' read study_beta.
+    canonical_guide = _resolve_study_guide_name(study_id)
+    if canonical_guide is not None:
+        try:
+            authorize_study(canonical_guide)
+        except AuthorizationError as e:
+            return f"Error: {str(e)}"
+
+        # `_load_study_guide` returns None when no guide file exists (fall
+        # through to dynamic); it raises when a guide was resolved but couldn't
+        # be read — that's a real problem and we surface it rather than
+        # silently degrading.
+        try:
+            static_guide = _load_study_guide(canonical_guide)
+        except Exception as e:
+            logger.error(f"Error reading resolved static guide for {canonical_guide}: {e}")
+            return (
+                f"Error: A study guide was found for '{canonical_guide}' but could not be read: {e}"
+            )
+        if static_guide:
+            logger.info(f"Loaded static study guide for {canonical_guide}")
+            return static_guide
 
     # Fall back to dynamic generation
     logger.info(f"Generating dynamic study guide for {study_id}")
@@ -950,6 +959,9 @@ def get_study_guide(study_id: str) -> str:
         # 1. Basic study info
         # Match case-insensitively: identifiers are lowercase by convention, but a
         # user who types 'NBL_MSK_2023' must not be told the study is missing.
+        # The SQL guard can't verify a lower(...) comparison, so it is skipped
+        # here; nothing from this row is returned until the identifier the
+        # database matched has been authorized below.
         study_info = run_select_query(f"""
             SELECT
                 cancer_study_identifier,
@@ -959,10 +971,6 @@ def get_study_guide(study_id: str) -> str:
             FROM cancer_study
             WHERE lower(cancer_study_identifier) = lower('{study_id}')
         """, query_label="study_guide.study_info", enforce_study_access=False)
-        # The SQL guard can't verify a lower(...) comparison, so it is skipped
-        # above; study_id itself was authorized at the top of this function,
-        # and the identifier the database actually matched is re-authorized
-        # below before anything about it is returned.
 
         if not study_info:
             return _study_not_in_deployment_message(study_id)
@@ -971,7 +979,10 @@ def get_study_guide(study_id: str) -> str:
         # Adopt the identifier exactly as the database spells it, so every section
         # below queries the real study rather than the user's casing.
         study_id = info.get("cancer_study_identifier") or study_id
-        authorize_study(study_id)
+        try:
+            authorize_study(study_id)
+        except AuthorizationError as e:
+            return f"Error: {str(e)}"
         guide_sections.append(f"""# Study Guide: {info.get('name', study_id)}
 
 **Study ID:** `{study_id}`

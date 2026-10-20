@@ -32,8 +32,14 @@ from cbioportal_mcp.env import McpConfig, StudyAccessMode, get_mcp_config
 logger = logging.getLogger(__name__)
 
 VALID_STUDY_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
+# Matches '...' literals in normalized SQL (see _normalize_sql), where quotes
+# are always doubled rather than backslash-escaped.
 SQL_STRING_PATTERN = re.compile(r"'((?:''|[^'])*)'")
 
+# Identity header names used by common auth proxies (oauth2-proxy, Keycloak
+# gatekeepers, ...). The MCP only *reads* the ones configured in
+# McpConfig.auth_*_headers; this full list exists so a proxy can strip every
+# one of them from inbound requests (see authz_header_names).
 IDENTITY_HEADER_CANDIDATES = (
     "x-user-id",
     "x-auth-request-user",
@@ -175,8 +181,36 @@ def validate_study_ids(study_ids: Iterable[str]) -> frozenset[str]:
     return frozenset(valid)
 
 
-def extract_request_identity() -> RequestIdentity:
-    """Read identity headers from the active FastMCP HTTP request."""
+def authz_header_names(config: McpConfig | None = None) -> frozenset[str]:
+    """Every inbound header that study authorization could consume.
+
+    A trusted proxy must drop all of these from client requests before
+    injecting its verified values; otherwise a client could add, say, an
+    extra groups header and have it trusted.
+    """
+    config = config or get_mcp_config()
+    return frozenset(
+        {
+            *IDENTITY_HEADER_CANDIDATES,
+            *EMAIL_HEADER_CANDIDATES,
+            *GROUP_HEADER_CANDIDATES,
+            *config.auth_user_id_headers,
+            *config.auth_email_headers,
+            *config.auth_groups_headers,
+            config.allowed_studies_header,
+            config.auth_proxy_secret_header,
+        }
+    )
+
+
+def extract_request_identity(config: McpConfig | None = None) -> RequestIdentity:
+    """Read identity headers from the active FastMCP HTTP request.
+
+    Only the configured header names are read (McpConfig.auth_*_headers), so
+    a header the trusted proxy doesn't set - and therefore may not strip -
+    can't contribute identity or groups.
+    """
+    config = config or get_mcp_config()
     try:
         from fastmcp.server.dependencies import get_http_headers
 
@@ -185,10 +219,10 @@ def extract_request_identity() -> RequestIdentity:
         logger.debug("Could not read HTTP headers for authz: %s", exc)
         headers = {}
 
-    user_id = _first_header(headers, IDENTITY_HEADER_CANDIDATES)
-    user_email = _first_header(headers, EMAIL_HEADER_CANDIDATES)
+    user_id = _first_header(headers, config.auth_user_id_headers)
+    user_email = _first_header(headers, config.auth_email_headers)
     groups: set[str] = set()
-    for name in GROUP_HEADER_CANDIDATES:
+    for name in config.auth_groups_headers:
         groups.update(parse_list_value(headers.get(name)))
 
     client = "authenticated-proxy" if user_id or user_email or groups else "direct"
@@ -266,7 +300,7 @@ def get_current_study_access(config: McpConfig | None = None) -> StudyAccess:
     entries, group ACL entries, and default ACL entries.
     """
     config = config or get_mcp_config()
-    identity = extract_request_identity()
+    identity = extract_request_identity(config)
 
     if config.study_access_mode == StudyAccessMode.PUBLIC.value:
         return StudyAccess(identity=identity, all_studies=True, studies=frozenset())
@@ -399,17 +433,163 @@ def authorize_study(study_id: str, config: McpConfig | None = None) -> None:
         raise AuthorizationError(f"Not authorized to access study '{study_id}'.")
 
 
-def _strip_sql_comments(query: str) -> str:
-    query = re.sub(r"/\*.*?\*/", " ", query, flags=re.DOTALL)
-    return re.sub(r"--[^\n\r]*", " ", query)
+# Backslash escapes ClickHouse decodes inside '...' strings and "..." / `...`
+# quoted identifiers (\xHH is handled separately).
+_SQL_ESCAPES = {
+    "b": "\b",
+    "f": "\f",
+    "r": "\r",
+    "n": "\n",
+    "t": "\t",
+    "0": "\0",
+    "a": "\a",
+    "v": "\v",
+    "e": "\x1b",
+}
+_PLAIN_IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_HEREDOC_DELIMITER = re.compile(r"\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$")
+# Every internal setting the MCP sends to ClickHouse uses this prefix.
+INTERNAL_SETTING_PREFIX = "sql_cbiomcp_"
+
+
+@dataclass(frozen=True)
+class _SqlToken:
+    kind: str  # "code", "string", "identifier" or "comment"
+    text: str  # raw source text
+    value: str = ""  # decoded content, for strings and quoted identifiers
+
+
+def _read_quoted(query: str, start: int) -> tuple[str, int]:
+    """Decode the quoted token opening at ``start``; return (value, end index)."""
+    quote = query[start]
+    i = start + 1
+    out: list[str] = []
+    while i < len(query):
+        c = query[i]
+        if c == "\\":
+            if i + 1 >= len(query):
+                break
+            nxt = query[i + 1]
+            hex_digits = query[i + 2 : i + 4]
+            if nxt in "xX" and re.fullmatch(r"[0-9A-Fa-f]{2}", hex_digits):
+                out.append(chr(int(hex_digits, 16)))
+                i += 4
+                continue
+            out.append(_SQL_ESCAPES.get(nxt, nxt))
+            i += 2
+            continue
+        if c == quote:
+            if query[i + 1 : i + 2] == quote:  # doubled quote
+                out.append(quote)
+                i += 2
+                continue
+            return "".join(out), i + 1
+        out.append(c)
+        i += 1
+    raise AuthorizationError("Query has an unterminated quoted string or identifier.")
+
+
+def _lex_sql(query: str) -> list[_SqlToken]:
+    """Split a query into code, string literals, quoted identifiers and comments.
+
+    Follows ClickHouse's lexer (verified on 24.12 and 25.8): '...' strings and "..." /
+    `...` identifiers with backslash escapes and doubled quotes, $tag$...$tag$
+    heredoc strings, `--` and `# ` / `#!` line comments, and nested
+    `/* ... */` block comments. Unterminated strings or comments are rejected
+    rather than guessed at.
+    """
+    tokens: list[_SqlToken] = []
+    code_start = 0
+    i = 0
+    n = len(query)
+
+    def flush(end: int) -> None:
+        if end > code_start:
+            tokens.append(_SqlToken("code", query[code_start:end]))
+
+    while i < n:
+        c = query[i]
+        if c in "'\"`":
+            flush(i)
+            value, end = _read_quoted(query, i)
+            kind = "string" if c == "'" else "identifier"
+            tokens.append(_SqlToken(kind, query[i:end], value))
+            i = code_start = end
+        elif query.startswith("--", i) or (
+            c == "#" and (i + 1 == n or query[i + 1].isspace() or query[i + 1] == "!")
+        ):
+            flush(i)
+            newline = query.find("\n", i)
+            end = n if newline == -1 else newline
+            tokens.append(_SqlToken("comment", query[i:end]))
+            i = code_start = end
+        elif query.startswith("/*", i):
+            flush(i)
+            depth, j = 1, i + 2
+            while j < n and depth:
+                if query.startswith("/*", j):
+                    depth, j = depth + 1, j + 2
+                elif query.startswith("*/", j):
+                    depth, j = depth - 1, j + 2
+                else:
+                    j += 1
+            if depth:
+                raise AuthorizationError("Query has an unterminated /* comment.")
+            tokens.append(_SqlToken("comment", query[i:j]))
+            i = code_start = j
+        elif c == "$" and (match := _HEREDOC_DELIMITER.match(query, i)):
+            delimiter = match.group(0)
+            close = query.find(delimiter, match.end())
+            if close == -1:
+                raise AuthorizationError("Query has an unterminated heredoc string.")
+            flush(i)
+            end = close + len(delimiter)
+            tokens.append(_SqlToken("string", query[i:end], query[match.end() : close]))
+            i = code_start = end
+        else:
+            i += 1
+    flush(n)
+    return tokens
+
+
+def _normalize_sql(query: str) -> str:
+    r"""Canonical text for the guard's pattern checks.
+
+    Comments become spaces, string literals are re-quoted as '...' with ''
+    doubling, and quoted identifiers are replaced by their decoded name (so
+    `mut\x61tion` is checked as mutation) - or by a placeholder when the
+    decoded name isn't a plain identifier, so an alias such as
+    `cancer_study_identifier = 'x'` can't pose as a study filter.
+    """
+    parts: list[str] = []
+    for token in _lex_sql(query):
+        if token.kind == "comment":
+            parts.append(" ")
+        elif token.kind == "string":
+            parts.append("'" + token.value.replace("'", "''") + "'")
+        elif token.kind == "identifier":
+            if _PLAIN_IDENTIFIER.fullmatch(token.value):
+                parts.append(token.value)
+            else:
+                parts.append(" __quoted_identifier__ ")
+        else:
+            parts.append(token.text)
+    return "".join(parts)
 
 
 def _strip_sql_literals(query: str) -> str:
+    """Blank out '...' literals in already-normalized SQL."""
     return SQL_STRING_PATTERN.sub("''", query)
 
 
 def _extract_literals(segment: str) -> set[str]:
     return {match.group(1).replace("''", "'") for match in SQL_STRING_PATTERN.finditer(segment)}
+
+
+def _unescape_everywhere(query: str) -> str:
+    """Apply ClickHouse's backslash escapes across the whole text, token-agnostic."""
+    query = re.sub(r"\\[xX]([0-9A-Fa-f]{2})", lambda m: chr(int(m.group(1), 16)), query)
+    return re.sub(r"\\(.)", lambda m: _SQL_ESCAPES.get(m.group(1), m.group(1)), query)
 
 
 def extract_study_filters(query: str) -> tuple[set[str], bool]:
@@ -419,7 +599,7 @@ def extract_study_filters(query: str) -> tuple[set[str], bool]:
     reference a study-scoped selector but does not use a literal equality/list
     form that can be checked safely.
     """
-    stripped = _strip_sql_comments(query)
+    stripped = _normalize_sql(query)
     study_ids: set[str] = set()
 
     equality_patterns = (
@@ -455,13 +635,13 @@ def extract_study_filters(query: str) -> tuple[set[str], bool]:
 
 def references_protected_study_data(query: str) -> bool:
     """Conservatively identify queries that may read study-scoped data."""
-    lower = _strip_sql_comments(query).lower()
+    lower = _normalize_sql(query).lower()
     return any(re.search(rf"\b{re.escape(marker)}\b", lower) for marker in PROTECTED_QUERY_MARKERS)
 
 
 def has_restricted_sql_bypass_shape(query: str) -> bool:
     """Detect query constructs this lightweight guard cannot prove safe."""
-    normalized = _strip_sql_literals(_strip_sql_comments(query)).lower()
+    normalized = _strip_sql_literals(_normalize_sql(query)).lower()
     blocked_patterns = (
         r"\bor\b",
         r"\bunion\b",
@@ -472,10 +652,22 @@ def has_restricted_sql_bypass_shape(query: str) -> bool:
     return any(re.search(pattern, normalized) for pattern in blocked_patterns)
 
 
-def _references_clickhouse_study_setting(query: str, config: McpConfig) -> bool:
-    setting_name = _clickhouse_study_setting_name(config)
-    normalized = _strip_sql_literals(_strip_sql_comments(query))
-    return re.search(rf"\b{re.escape(setting_name)}\b", normalized, flags=re.IGNORECASE) is not None
+def references_internal_setting(query: str, config: McpConfig) -> bool:
+    r"""True if the query mentions any internal SQL_cbiomcp_* setting, anywhere.
+
+    Deliberately blunt: checked against the raw text, the raw text with every
+    backslash escape decoded, and every decoded string literal and quoted
+    identifier - so a SETTINGS clause, a SET, getSetting('...') or an escaped
+    `\x53QL_cbiomcp_...` identifier are all caught regardless of comments or
+    quoting. Legitimate SQL never needs these names.
+    """
+    names = {INTERNAL_SETTING_PREFIX, _clickhouse_study_setting_name(config).lower()}
+    candidates = [query, _unescape_everywhere(query)]
+    try:
+        candidates.extend(token.value for token in _lex_sql(query) if token.value)
+    except AuthorizationError:
+        pass  # unterminated input is rejected separately by the guard
+    return any(name in candidate.lower() for candidate in candidates for name in names)
 
 
 def guard_query_study_access(query: str, config: McpConfig | None = None) -> None:
@@ -485,10 +677,11 @@ def guard_query_study_access(query: str, config: McpConfig | None = None) -> Non
     if access.all_studies:
         return
 
-    if config.clickhouse_row_policy_enabled and _references_clickhouse_study_setting(query, config):
+    if references_internal_setting(query, config):
         raise AuthorizationError(
             "Queries may not set or reference the internal ClickHouse study allowlist setting."
         )
+    _lex_sql(query)  # raises on unterminated strings/comments
 
     protected_query = references_protected_study_data(query)
     if (

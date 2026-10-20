@@ -16,7 +16,7 @@ Every table falls in exactly one bucket:
 - ``DENIED_TABLES``: cBioPortal's own auth tables. They get no policy, so the
   default-deny keeps them unreadable for the restricted role.
 - ``STUDY_SCOPED_VIEWS``: views from ``sql/4..7``. A view is itself caught by
-  the database-wide ``USING 0`` default-deny (verified on ClickHouse 24.12),
+  the database-wide ``USING 0`` default-deny (verified on 24.12 and 25.8),
   so each needs a ``USING 1`` pass-through policy; the underlying tables'
   policies then filter the rows, because views default to
   ``SQL SECURITY INVOKER``.
@@ -103,7 +103,6 @@ STUDY_AGNOSTIC_REFERENCE_TABLES: frozenset[str] = frozenset(
         "geneset_hierarchy_leaf",
         "geneset_hierarchy_node",
         "info",
-        "oncotree",
         "reference_genome",
         "reference_genome_gene",
         "type_of_cancer",

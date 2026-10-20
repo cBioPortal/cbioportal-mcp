@@ -14,7 +14,9 @@ from fastmcp.client.transports import StreamableHttpTransport
 
 from cbioportal_mcp.authentication.row_policy_catalog import (
     DENIED_TABLES,
+    STUDY_AGNOSTIC_REFERENCE_TABLES,
     STUDY_SCOPED_TABLES,
+    STUDY_SCOPED_VIEWS,
     classified_names,
 )
 
@@ -74,23 +76,27 @@ async def _token(base_url: str, username: str, password: str) -> str:
     return response.json()["access_token"]
 
 
-async def _call_with_token(proxy_url: str, token: str, tool: str, args: dict | None = None) -> Any:
+async def _call_with_token(
+    proxy_url: str,
+    token: str,
+    tool: str,
+    args: dict | None = None,
+    extra_headers: dict[str, str] | None = None,
+) -> Any:
     transport = StreamableHttpTransport(
         proxy_url,
-        headers={"authorization": f"Bearer {token}"},
+        headers={**(extra_headers or {}), "authorization": f"Bearer {token}"},
     )
     async with Client(transport) as client:
         result = await client.call_tool(tool, args or {}, raise_on_error=False)
     return _payload(result)
 
 
-# For every study-scoped table in the fixture: (key column, keys owned by
-# study_alpha, keys owned by study_beta). An unfiltered `SELECT *` as alice
-# (study_alpha only) must return exactly the alpha keys - non-empty, and
-# nothing from beta - and vice versa for bob; admin-user (all studies) must
-# see both. Covers every STUDY_SCOPED_TABLES entry that exists in
-# docker/local-e2e/clickhouse-init.sql (checked below, so a new fixture table
-# can't silently skip this).
+# For every study-scoped table: (key column, keys owned by study_alpha, keys
+# owned by study_beta). An unfiltered `SELECT *` as alice (study_alpha only)
+# must return exactly the alpha keys - non-empty, and nothing from beta - and
+# vice versa for bob; admin-user (all studies) must see both. Every table and
+# view in row_policy_catalog must exist in the fixture (checked below).
 _ALPHA, _BETA = "study_alpha", "study_beta"
 EXPECTED_STUDY_ROWS: dict[str, tuple[str, set, set]] = {
     "cancer_study": ("cancer_study_id", {1}, {2}),
@@ -110,13 +116,14 @@ EXPECTED_STUDY_ROWS: dict[str, tuple[str, set, set]] = {
     "genetic_profile_samples": ("genetic_profile_id", {13}, {23}),
     "genetic_alteration": ("genetic_profile_id", {13}, {23}),
     "sample_profile": ("sample_id", {1, 2}, {3}),
-    "mutation_event": ("mutation_event_id", {101}, {102}),
-    "mutation": ("mutation_event_id", {101}, {102}),
+    # 103 / 203 are observed in both studies, so both users see them.
+    "mutation_event": ("mutation_event_id", {101, 103}, {102, 103}),
+    "mutation": ("mutation_event_id", {101, 103}, {102, 103}),
     "mutation_count_by_keyword": ("genetic_profile_id", {11}, {21}),
     "alteration_driver_annotation": ("alteration_event_id", {101}, {102}),
     "allele_specific_copy_number": ("mutation_event_id", {101}, {102}),
-    "cna_event": ("cna_event_id", {201}, {202}),
-    "sample_cna_event": ("cna_event_id", {201}, {202}),
+    "cna_event": ("cna_event_id", {201, 203}, {202, 203}),
+    "sample_cna_event": ("cna_event_id", {201, 203}, {202, 203}),
     "structural_variant": ("internal_id", {301}, {302}),
     "copy_number_seg": ("seg_id", {401}, {402}),
     "copy_number_seg_file": ("seg_file_id", {501}, {502}),
@@ -127,6 +134,7 @@ EXPECTED_STUDY_ROWS: dict[str, tuple[str, set, set]] = {
     "resource_sample": ("internal_id", {1}, {3}),
     "resource_patient": ("internal_id", {1}, {3}),
     "resource_study": ("internal_id", {1}, {2}),
+    "resource": ("cancer_study_id", {1}, {2}),
     "clinical_data_derived": ("cancer_study_identifier", {_ALPHA}, {_BETA}),
     "clinical_event_derived": ("cancer_study_identifier", {_ALPHA}, {_BETA}),
     "clinical_event_data_derived": ("cancer_study_identifier", {_ALPHA}, {_BETA}),
@@ -148,123 +156,264 @@ EXPECTED_STUDY_ROWS: dict[str, tuple[str, set, set]] = {
 }
 
 
+_BETA_CANCER_TYPE = "Non-Small Cell Lung Cancer"
+
+# Every sql/4, sql/5, sql/7 view: (kind, arguments). "{study}" is filled with
+# the study under test. Kinds:
+# - coverage:   plain view with a cancer_study_identifier column;
+# - study:      parameterized by one study - alpha's data for alice, nothing
+#               when the beta study is passed in a form the guard can't read;
+# - preference: runs over a preference cohort holding both studies - alice
+#               must get her share only (fewer rows/counts than admin, no beta
+#               cancer type).
+VIEW_CASES: dict[str, tuple[str, str]] = {
+    "mutation_panel_gene_coverage": ("coverage", ""),
+    "mutation_wes_coverage": ("coverage", ""),
+    "cna_panel_gene_coverage": ("coverage", ""),
+    "cna_wes_coverage": ("coverage", ""),
+    "sv_panel_gene_coverage": ("coverage", ""),
+    "sv_wes_coverage": ("coverage", ""),
+    "gene_mutation_frequency_by_cancer_type": (
+        "preference",
+        "(preference='local_e2e', gene='TP53')",
+    ),
+    "gene_alteration_frequency_by_cancer_type": (
+        "preference",
+        "(preference='local_e2e', gene='EGFR', alteration='amplification')",
+    ),
+    "top_mutated_genes_in_cohort": ("preference", "(preference='local_e2e', top_n=10)"),
+    "gene_mutation_frequency_in_study": ("study", "(study={study}, gene='TP53')"),
+    "gene_mutation_frequency_in_studies": ("study", "(studies=[{study}], gene='TP53')"),
+    "top_mutated_genes_in_study": ("study", "(study={study}, top_n=10)"),
+    "gene_mutation_variants_in_study": ("study", "(study={study}, gene='TP53')"),
+    "co_altered_genes_in_study": ("study", "(study={study}, gene='TP53', top_n=10)"),
+    "top_cna_genes_in_study": ("study", "(study={study}, top_n=10)"),
+    "gene_cna_distribution_in_study": ("study", "(study={study}, gene='EGFR')"),
+    "top_sv_genes_in_study": ("study", "(study={study}, top_n=10)"),
+    "gene_pair_coexpression": (
+        "study",
+        "(study={study}, gene_a='TP53', gene_b='EGFR', profile_type='mrna')",
+    ),
+    "treatment_counts_in_study": ("study", "(study={study})"),
+    "treatment_regimens_in_study": ("study", "(study={study})"),
+    "clinical_attribute_counts": ("study", "(study={study}, attribute='CANCER_TYPE')"),
+}
+_HIDDEN_BETA = "concat('study_', 'beta')"
+
+
 def _rows(result: Any, label: str) -> list[dict]:
     assert isinstance(result, dict) and "rows" in result, f"{label}: {result}"
     return result["rows"]
 
 
-async def run(keycloak_url: str, proxy_url: str) -> None:
+def _is_empty_aggregate(rows: list[dict]) -> bool:
+    """gene_pair_coexpression always returns one row; empty means num_samples 0."""
+    if len(rows) == 1 and "num_samples" in rows[0]:
+        return str(rows[0]["num_samples"]) == "0"
+    return rows == []
+
+
+async def run(keycloak_url: str, proxy_url: str, clickhouse_url: str) -> None:
     alice_token = await _token(keycloak_url, "alice", "alice")
     bob_token = await _token(keycloak_url, "bob", "bob")
     admin_token = await _token(keycloak_url, "admin-user", "admin-user")
+    carol_token = await _token(keycloak_url, "carol", "carol")
 
     alice_access = await _call_with_token(proxy_url, alice_token, "get_current_study_access")
     bob_access = await _call_with_token(proxy_url, bob_token, "get_current_study_access")
+    carol_access = await _call_with_token(proxy_url, carol_token, "get_current_study_access")
 
     assert alice_access["studies"] == ["study_alpha"], alice_access
     assert bob_access["studies"] == ["study_beta"], bob_access
+    assert carol_access["studies"] == [] and not carol_access["all_studies"], carol_access
+
+    # Client-supplied identity/group/allowlist headers are dropped by the proxy.
+    spoofed = await _call_with_token(
+        proxy_url,
+        alice_token,
+        "get_current_study_access",
+        extra_headers={
+            "x-keycloak-groups": "/cbioportal/admins",
+            "x-user-groups": "/cbioportal/admins",
+            "x-forwarded-groups": "/cbioportal/admins",
+            "x-cbioportal-allowed-studies": "*",
+            "x-user-id": "admin",
+        },
+    )
+    assert spoofed["studies"] == ["study_alpha"] and not spoofed["all_studies"], spoofed
+    assert spoofed["user_id"] == alice_access["user_id"], spoofed
 
     alice_studies = await _call_with_token(proxy_url, alice_token, "list_studies")
     alice_study_ids = {row["cancer_study_identifier"] for row in alice_studies}
     assert alice_study_ids == {"study_alpha"}, alice_studies
 
-    async def select(token: str, query: str, label: str) -> list[dict]:
-        result = await _call_with_token(
+    async def call(token: str, query: str) -> Any:
+        return await _call_with_token(
             proxy_url, token, "clickhouse_run_select_query", {"query": query, "max_rows": 1000}
         )
-        return _rows(result, label)
+
+    async def select(token: str, query: str, label: str) -> list[dict]:
+        return _rows(await call(token, query), label)
 
     allowed_query = await select(
         alice_token,
-        "SELECT sample_unique_id FROM clinical_data_derived "
+        "SELECT DISTINCT sample_unique_id FROM clinical_data_derived "
         "WHERE cancer_study_identifier = 'study_alpha'",
         "explicit allowed study",
     )
-    assert len(allowed_query) == 2, allowed_query
+    assert {"study_alpha_S1", "study_alpha_S2"} <= {r["sample_unique_id"] for r in allowed_query}
 
-    denied_query = await _call_with_token(
-        proxy_url,
+    denied_query = await call(
         alice_token,
-        "clickhouse_run_select_query",
-        {
-            "query": (
-                "SELECT sample_unique_id FROM clinical_data_derived "
-                "WHERE cancer_study_identifier = 'study_beta'"
-            )
-        },
+        "SELECT sample_unique_id FROM clinical_data_derived "
+        "WHERE cancer_study_identifier = 'study_beta'",
     )
     assert "study_beta" in denied_query["error_message"], denied_query
 
-    # Every table in the fixture must be classified, and every study-scoped
-    # one must have an expectation below.
+    # The fixture must hold every table and view the catalog knows about, and
+    # nothing the catalog doesn't.
     tables_result = await _call_with_token(proxy_url, admin_token, "clickhouse_list_tables")
     fixture_names = {row["name"] for row in tables_result["tables"]}
-    unclassified = sorted(fixture_names - classified_names())
-    assert not unclassified, f"fixture tables missing from row_policy_catalog: {unclassified}"
-    fixture_study_tables = fixture_names & set(STUDY_SCOPED_TABLES)
-    missing = sorted(fixture_study_tables - set(EXPECTED_STUDY_ROWS))
-    assert not missing, f"study-scoped fixture tables with no e2e expectation: {missing}"
+    assert fixture_names == classified_names(), (
+        f"missing from fixture: {sorted(classified_names() - fixture_names)}; "
+        f"unclassified: {sorted(fixture_names - classified_names())}"
+    )
+    assert set(EXPECTED_STUDY_ROWS) == set(STUDY_SCOPED_TABLES), sorted(
+        set(STUDY_SCOPED_TABLES) ^ set(EXPECTED_STUDY_ROWS)
+    )
+    assert set(VIEW_CASES) == set(STUDY_SCOPED_VIEWS), sorted(
+        set(STUDY_SCOPED_VIEWS) ^ set(VIEW_CASES)
+    )
 
     # Unfiltered SELECT * on every study-scoped table: the app-level guard
     # can't see a study filter here, so this is ClickHouse row policies alone.
-    for table in sorted(fixture_study_tables):
+    for table in sorted(STUDY_SCOPED_TABLES):
         key, alpha_keys, beta_keys = EXPECTED_STUDY_ROWS[table]
         query = f"SELECT * FROM {table}"
         seen = {
             "alice": {row[key] for row in await select(alice_token, query, f"alice {table}")},
             "bob": {row[key] for row in await select(bob_token, query, f"bob {table}")},
             "admin": {row[key] for row in await select(admin_token, query, f"admin {table}")},
+            "carol": {row[key] for row in await select(carol_token, query, f"carol {table}")},
         }
         assert seen["alice"] == alpha_keys, (table, "alice", seen)
         assert seen["bob"] == beta_keys, (table, "bob", seen)
         assert seen["admin"] == alpha_keys | beta_keys, (table, "admin", seen)
-    print(f"Row policies OK on {len(fixture_study_tables)} study-scoped tables.")
+        assert seen["carol"] == set(), (table, "carol (empty allowlist)", seen)
+    print(f"Row policies OK on {len(STUDY_SCOPED_TABLES)} study-scoped tables.")
 
     # Reference tables stay readable; cBioPortal's auth tables stay denied.
-    genes = await select(alice_token, "SELECT * FROM gene", "alice gene")
-    assert {row["hugo_gene_symbol"] for row in genes} == {"TP53", "KRAS", "EGFR"}, genes
-    for table in sorted(fixture_names & DENIED_TABLES):
+    for table in sorted(STUDY_AGNOSTIC_REFERENCE_TABLES):
+        rows = await select(carol_token, f"SELECT * FROM {table}", f"carol {table}")
+        assert rows, f"reference table {table} should be readable by every user"
+    for table in sorted(DENIED_TABLES):
         rows = await select(admin_token, f"SELECT * FROM {table}", f"admin {table}")
         assert rows == [], (table, rows)
 
     # A filter the guard can't read (concat) is still enforced by ClickHouse.
     sneaky = await select(
         alice_token,
-        "SELECT * FROM sample_derived WHERE cancer_study_identifier = concat('study_', 'beta')",
+        f"SELECT * FROM sample_derived WHERE cancer_study_identifier = {_HIDDEN_BETA}",
         "alice concat bypass",
     )
     assert sneaky == [], sneaky
 
-    # Views inherit the underlying tables' policies (sql/4 plain view).
-    coverage = await select(
-        alice_token, "SELECT * FROM mutation_panel_gene_coverage", "alice coverage view"
-    )
-    assert coverage and {row["cancer_study_identifier"] for row in coverage} == {_ALPHA}, coverage
+    # Every view: allowed data comes back, denied-study data never does.
+    for view in sorted(VIEW_CASES):
+        kind, args = VIEW_CASES[view]
+        if kind == "coverage":
+            alice = await select(alice_token, f"SELECT * FROM {view}", f"alice {view}")
+            admin = await select(admin_token, f"SELECT * FROM {view}", f"admin {view}")
+            assert alice and {r["cancer_study_identifier"] for r in alice} == {_ALPHA}, view
+            assert {r["cancer_study_identifier"] for r in admin} == {_ALPHA, _BETA}, view
+        elif kind == "study":
+            q = f"SELECT * FROM {view}{args}"
+            alice = await select(alice_token, q.format(study="'study_alpha'"), f"alice {view}")
+            bob = await select(bob_token, q.format(study="'study_beta'"), f"bob {view}")
+            hidden = await call(alice_token, q.format(study=_HIDDEN_BETA))
+            assert not _is_empty_aggregate(alice), (view, "alice", alice)
+            assert not _is_empty_aggregate(bob), (view, "bob", bob)
+            # Either the guard rejects it outright, or ClickHouse returns nothing.
+            assert "error_message" in hidden or _is_empty_aggregate(hidden["rows"]), (
+                view,
+                "alice -> hidden beta",
+                hidden,
+            )
+        else:
+            q = f"SELECT * FROM {view}{args}"
+            alice = await select(alice_token, q, f"alice {view}")
+            admin = await select(admin_token, q, f"admin {view}")
+            assert alice, (view, "alice", alice)
+            assert alice != admin, (view, "alice saw the whole cohort", alice)
+            assert _BETA_CANCER_TYPE not in str(alice), (view, alice)
+            if "cancer_type" in admin[0]:
+                assert _BETA_CANCER_TYPE in str(admin), (view, admin)
+    print(f"Row policies OK through all {len(VIEW_CASES)} views.")
 
-    # Parameterized views (sql/5, sql/7): allowed study returns data; a beta
-    # study argument hidden from the guard via concat returns nothing.
-    coexpression = (
-        "SELECT * FROM gene_pair_coexpression("
-        "study={study}, gene_a='TP53', gene_b='EGFR', profile_type='mrna')"
+    # A studies array the guard can't read, naming both studies: ClickHouse
+    # still returns only alpha's cancer type.
+    mixed = await select(
+        alice_token,
+        "SELECT * FROM gene_mutation_frequency_in_studies("
+        f"studies=arrayConcat(['study_alpha'], [{_HIDDEN_BETA}]), gene='TP53')",
+        "alice mixed studies",
     )
-    alpha_coexp = await select(
-        alice_token, coexpression.format(study="'study_alpha'"), "alice coexpression"
-    )
-    assert alpha_coexp[0]["num_samples"] in (2, "2"), alpha_coexp
-    beta_coexp = await select(
-        alice_token, coexpression.format(study="concat('study_', 'beta')"), "alice coexp bypass"
-    )
-    assert beta_coexp[0]["num_samples"] in (0, "0"), beta_coexp
+    assert [r["cancer_type"] for r in mixed] == ["Breast Cancer"], mixed
 
-    # treatment_counts_in_study reads raw clinical_event/clinical_event_data/
-    # patient/cancer_study - the multi-hop policies, through a view.
-    treatments = "SELECT agent FROM treatment_counts_in_study(study={study})"
-    bob_treatments = await select(bob_token, treatments.format(study="'study_beta'"), "bob tx")
-    assert [row["agent"] for row in bob_treatments] == ["Cisplatin"], bob_treatments
-    alice_sneaky_tx = await select(
-        alice_token, treatments.format(study="concat('study_', 'beta')"), "alice tx bypass"
+    # Allowlist override attempts: rejected by the guard...
+    for attack in (
+        "SELECT *, '--' AS marker FROM mutation SETTINGS SQL_cbiomcp_allowed_studies='*'",
+        "SELECT * FROM mutation SETTINGS `SQL\\x5fcbiomcp_allowed_studies` = '*'",
+        "SELECT getSetting('SQL_cbiomcp_allowed_studies')",
+    ):
+        result = await call(alice_token, attack)
+        assert "allowlist" in result.get("error_message", ""), (attack, result)
+
+    # ...and by ClickHouse itself: with readonly=1 on the request (what the
+    # MCP sends), a query can't change the setting the request carries.
+    import clickhouse_connect
+    from clickhouse_connect import common as clickhouse_connect_common
+
+    clickhouse_connect_common.set_setting("invalid_setting_action", "send")
+    url = httpx.URL(clickhouse_url)
+    direct = clickhouse_connect.get_client(
+        host=url.host,
+        port=url.port,
+        username="mcp_authz",
+        password="mcp_authz_pw",
+        database="cbioportal_authz_e2e",
     )
-    assert alice_sneaky_tx == [], alice_sneaky_tx
+    request_settings = {"SQL_cbiomcp_allowed_studies": "study_alpha", "readonly": "1"}
+    try:
+        direct.query(
+            "SELECT count() FROM mutation SETTINGS SQL_cbiomcp_allowed_studies = '*'",
+            settings=request_settings,
+        )
+    except Exception as e:
+        assert "164" in str(e) or "readonly" in str(e).lower(), e
+    else:
+        raise AssertionError("ClickHouse accepted an in-query allowlist override")
+    empty = direct.query(
+        "SELECT count() FROM sample",
+        settings={"SQL_cbiomcp_allowed_studies": "", "readonly": "1"},
+    )
+    assert empty.result_rows == [(0,)], empty.result_rows
+    try:
+        direct.query("SELECT count() FROM sample", settings={"readonly": "1"})
+    except Exception as e:
+        assert "SQL_cbiomcp_allowed_studies" in str(e), e  # absent setting fails closed
+    else:
+        raise AssertionError("a query without the allowlist setting returned rows")
+    direct.close()
+
+    # Concurrent callers with different allowlists never see each other's rows.
+    async def keys(token: str) -> set:
+        return {r["internal_id"] for r in await select(token, "SELECT * FROM sample", "conc")}
+
+    results = await asyncio.gather(*[keys(t) for t in [alice_token, bob_token] * 6])
+    for i, seen in enumerate(results):
+        assert seen == ({1, 2} if i % 2 == 0 else {3}), (i, seen)
+    print("Allowlist override, empty/absent allowlist and concurrency checks passed.")
 
     print("Local Keycloak authz e2e passed.")
     print("Alice access:", alice_access)
@@ -275,8 +424,9 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--keycloak-url", default="http://127.0.0.1:18080")
     parser.add_argument("--proxy-url", default="http://127.0.0.1:8001/mcp/")
+    parser.add_argument("--clickhouse-url", default="http://127.0.0.1:8123")
     args = parser.parse_args()
-    asyncio.run(run(args.keycloak_url.rstrip("/"), args.proxy_url))
+    asyncio.run(run(args.keycloak_url.rstrip("/"), args.proxy_url, args.clickhouse_url))
 
 
 if __name__ == "__main__":

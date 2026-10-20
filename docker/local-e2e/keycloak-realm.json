@@ -35,6 +35,16 @@
       "emailVerified": true,
       "groups": ["/cbioportal/admins"],
       "credentials": [{"type": "password", "value": "admin-user", "temporary": false}]
+    },
+    {
+      "username": "carol",
+      "enabled": true,
+      "firstName": "Carol",
+      "lastName": "NoGroups",
+      "email": "carol@example.org",
+      "emailVerified": true,
+      "groups": [],
+      "credentials": [{"type": "password", "value": "carol", "temporary": false}]
     }
   ],
   "clients": [

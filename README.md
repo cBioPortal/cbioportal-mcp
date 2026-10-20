@@ -75,6 +75,22 @@ x-forwarded-groups: /group/a,/group/b
 x-cbioportal-allowed-studies: study_a,study_b
 ```
 
+The server reads identity only from the configured header names (defaults
+above); if your proxy uses others, set them explicitly, e.g. for
+oauth2-proxy:
+
+```bash
+export CBIOPORTAL_MCP_AUTH_USER_ID_HEADERS=x-auth-request-user
+export CBIOPORTAL_MCP_AUTH_EMAIL_HEADERS=x-auth-request-email
+export CBIOPORTAL_MCP_AUTH_GROUPS_HEADERS=x-auth-request-groups
+```
+
+The proxy must drop every one of these headers - plus the allowed-studies
+header and the proxy-secret header - from inbound client requests before
+injecting its own values; otherwise a client can add its own groups header.
+`authz_header_names()` in `study_access.py` lists the full set, and the
+reference proxy (`local_keycloak_proxy.py`) strips exactly that.
+
 If your proxy can inject allowed studies directly, no ACL file is required. If
 you prefer to manage access in the MCP deployment, configure a JSON ACL:
 
@@ -158,8 +174,17 @@ because they run as the invoker; a `SQL SECURITY DEFINER` view, a
 materialized view or a dictionary would bypass that, and the coverage check
 below rejects them.
 This is the recommended defense-in-depth mode for restricted deployments; the
-app-level guard still rejects explicit requests for denied study IDs and blocks
-attempts to set the internal allowlist setting in user SQL. Running restricted
+app-level guard still rejects explicit requests for denied study IDs and
+rejects any query mentioning an internal `SQL_cbiomcp_*` setting (tokenized,
+so quoting, escapes and comments don't hide it). ClickHouse enforces the same
+thing independently: the server sends `readonly=1` with every row-policy
+query, which makes ClickHouse reject any `SETTINGS`/`SET` inside the query
+while still applying the allowlist sent with the request. This only holds if
+the runtime user's settings profile leaves `readonly` at its default (0) and
+does not mark the setting `CHANGEABLE_IN_READONLY`; at startup the server
+checks both directions (`verify_allowlist_lockdown`) and refuses to start
+otherwise. Profiles with `readonly=1` or `readonly=2` are therefore
+unsupported for row-policy mode. Running restricted
 mode without it logs a startup warning: the app-level guard is a heuristic
 pattern check on arbitrary SELECT queries, not a real SQL parser, so it's the
 weaker of the two supported modes.

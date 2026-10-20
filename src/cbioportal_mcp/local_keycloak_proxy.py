@@ -18,6 +18,9 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Route
 
+from cbioportal_mcp.authentication.study_access import authz_header_names
+from cbioportal_mcp.env import McpConfig
+
 UPSTREAM_MCP_URL = os.getenv("LOCAL_AUTH_PROXY_UPSTREAM_MCP_URL", "http://127.0.0.1:8000/mcp")
 KEYCLOAK_USERINFO_URL = os.getenv(
     "LOCAL_AUTH_PROXY_KEYCLOAK_USERINFO_URL",
@@ -33,22 +36,14 @@ PROXY_SECRET_HEADER = os.getenv(
     "x-cbioportal-mcp-proxy-secret",
 )
 
-STRIPPED_REQUEST_HEADERS = {
-    "host",
-    "authorization",
-    "content-length",
-    "x-user-id",
-    "x-user-email",
-    "x-user-groups",
-    "x-auth-request-user",
-    "x-auth-request-email",
-    "x-auth-request-groups",
-    "x-forwarded-user",
-    "x-forwarded-email",
-    "x-forwarded-groups",
-    "x-cbioportal-allowed-studies",
-    "x-cbioportal-mcp-proxy-secret",
-}
+# Hop-by-hop / credential headers plus every header study authorization could
+# consume (all known identity/group header names, the configured ones, the
+# allowlist header and the proxy-secret header). Anything a client sends under
+# these names is dropped before the verified values are injected.
+STRIPPED_REQUEST_HEADERS = frozenset(
+    {"host", "authorization", "content-length", PROXY_SECRET_HEADER.lower()}
+    | authz_header_names(McpConfig())
+)
 STRIPPED_RESPONSE_HEADERS = {
     "content-encoding",
     "content-length",

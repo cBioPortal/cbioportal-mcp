@@ -31,6 +31,12 @@ class StudyAccessMode(str, Enum):
         return [mode.value for mode in cls]
 
 
+def _parse_header_list(name: str, default: str) -> tuple[str, ...]:
+    """Comma-separated, lowercased header names from ``name`` (or ``default``)."""
+    raw = os.getenv(name) or default
+    return tuple(part.strip().lower() for part in raw.split(",") if part.strip())
+
+
 def _parse_bool_env(name: str, default: bool) -> bool:
     value = os.getenv(name)
     if value is None:
@@ -164,6 +170,26 @@ class McpConfig:
         """Path to a JSON ACL mapping users/groups to allowed study IDs."""
         value = os.getenv("CBIOPORTAL_MCP_STUDY_ACL_FILE")
         return value if value else None
+
+    @property
+    def auth_user_id_headers(self) -> tuple[str, ...]:
+        """Headers, in priority order, that carry the proxy-verified user id.
+
+        Only these are read: anything else a client sends is ignored. The
+        trusted proxy must strip all of them from inbound requests before
+        injecting its own (see local_keycloak_proxy.py).
+        """
+        return _parse_header_list("CBIOPORTAL_MCP_AUTH_USER_ID_HEADERS", "x-user-id")
+
+    @property
+    def auth_email_headers(self) -> tuple[str, ...]:
+        """Headers, in priority order, that carry the proxy-verified email."""
+        return _parse_header_list("CBIOPORTAL_MCP_AUTH_EMAIL_HEADERS", "x-user-email")
+
+    @property
+    def auth_groups_headers(self) -> tuple[str, ...]:
+        """Headers whose (unioned) values are the proxy-verified groups."""
+        return _parse_header_list("CBIOPORTAL_MCP_AUTH_GROUPS_HEADERS", "x-forwarded-groups")
 
     @property
     def allowed_studies_header(self) -> str:

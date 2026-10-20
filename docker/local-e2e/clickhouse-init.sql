@@ -410,6 +410,23 @@ CREATE TABLE IF NOT EXISTS cbioportal_authz_e2e.resource_study
 ENGINE = MergeTree
 ORDER BY internal_id;
 
+-- 3.1.0 replacement for resource_sample/_patient/_study (both shapes are
+-- covered by the row policies; real deployments have one or the other).
+CREATE TABLE IF NOT EXISTS cbioportal_authz_e2e.resource
+(
+    internal_id Int64,
+    resource_id String,
+    cancer_study_id Int64,
+    resource_scope String,
+    patient_id Nullable(String),
+    sample_id Nullable(String),
+    url String,
+    display_name Nullable(String),
+    metadata Nullable(String)
+)
+ENGINE = MergeTree
+ORDER BY (cancer_study_id, resource_id, internal_id);
+
 -- ---------------------------------------------------------------------------
 -- Derived tables (cBioPortal schema 3.1.0)
 -- ---------------------------------------------------------------------------
@@ -658,6 +675,72 @@ CREATE TABLE IF NOT EXISTS cbioportal_authz_e2e.info
 ENGINE = MergeTree
 ORDER BY tuple();
 
+CREATE TABLE IF NOT EXISTS cbioportal_authz_e2e.cosmic_mutation
+(
+    cosmic_mutation_id String,
+    entrez_gene_id Int32,
+    protein_change String,
+    count Int32
+)
+ENGINE = MergeTree
+ORDER BY cosmic_mutation_id;
+
+CREATE TABLE IF NOT EXISTS cbioportal_authz_e2e.geneset
+(
+    id Int32,
+    genetic_entity_id Int32,
+    external_id String,
+    name String,
+    description Nullable(String),
+    ref_link String
+)
+ENGINE = MergeTree
+ORDER BY id;
+
+CREATE TABLE IF NOT EXISTS cbioportal_authz_e2e.geneset_gene
+(
+    geneset_id Int32,
+    entrez_gene_id Int32
+)
+ENGINE = MergeTree
+ORDER BY (geneset_id, entrez_gene_id);
+
+CREATE TABLE IF NOT EXISTS cbioportal_authz_e2e.geneset_hierarchy_node
+(
+    node_id Int64,
+    node_name Nullable(String),
+    parent_id Nullable(Int64)
+)
+ENGINE = MergeTree
+ORDER BY node_id;
+
+CREATE TABLE IF NOT EXISTS cbioportal_authz_e2e.geneset_hierarchy_leaf
+(
+    node_id Int64,
+    geneset_id Nullable(Int32)
+)
+ENGINE = MergeTree
+ORDER BY node_id;
+
+CREATE TABLE IF NOT EXISTS cbioportal_authz_e2e.generic_entity_properties
+(
+    id Int32,
+    genetic_entity_id Int32,
+    name String,
+    value String
+)
+ENGINE = MergeTree
+ORDER BY id;
+
+CREATE TABLE IF NOT EXISTS cbioportal_authz_e2e.generic_assay_meta_derived
+(
+    entity_stable_id String,
+    entity_type LowCardinality(String),
+    properties Map(String, String)
+)
+ENGINE = MergeTree
+ORDER BY entity_stable_id;
+
 -- ---------------------------------------------------------------------------
 -- cBioPortal auth tables: deliberately denied to the restricted role
 -- ---------------------------------------------------------------------------
@@ -670,6 +753,16 @@ CREATE TABLE IF NOT EXISTS cbioportal_authz_e2e.users
 )
 ENGINE = MergeTree
 ORDER BY email;
+
+CREATE TABLE IF NOT EXISTS cbioportal_authz_e2e.data_access_tokens
+(
+    token String,
+    username String,
+    expiration DateTime,
+    creation DateTime
+)
+ENGINE = MergeTree
+ORDER BY token;
 
 CREATE TABLE IF NOT EXISTS cbioportal_authz_e2e.authorities
 (
@@ -761,13 +854,18 @@ INSERT INTO cbioportal_authz_e2e.sample_profile VALUES
     (2, 11, 1),
     (3, 21, 1);
 
+-- mutation_event 103 and cna_event 203 are observed in both studies, so
+-- either study's users can see them.
 INSERT INTO cbioportal_authz_e2e.mutation_event VALUES
     (101, 7157, '17', 7675088, 7675088, 'C', 'T', 'R175H', 'Missense_Mutation', 'SNP', 'TP53 R175 missense'),
-    (102, 3845, '12', 25245350, 25245350, 'C', 'T', 'G12D', 'Missense_Mutation', 'SNP', 'KRAS G12 missense');
+    (102, 3845, '12', 25245350, 25245350, 'C', 'T', 'G12D', 'Missense_Mutation', 'SNP', 'KRAS G12 missense'),
+    (103, 1956, '7', 55181378, 55181378, 'C', 'T', 'T790M', 'Missense_Mutation', 'SNP', 'EGFR T790 missense');
 
 INSERT INTO cbioportal_authz_e2e.mutation VALUES
     (101, 11, 1, 7157, 'SOMATIC', 'Unknown', 10, 20, 'R175H'),
-    (102, 21, 3, 3845, 'SOMATIC', 'Unknown', 11, 21, 'G12D');
+    (102, 21, 3, 3845, 'SOMATIC', 'Unknown', 11, 21, 'G12D'),
+    (103, 11, 2, 1956, 'SOMATIC', 'Unknown', 5, 30, 'T790M'),
+    (103, 21, 3, 1956, 'SOMATIC', 'Unknown', 6, 31, 'T790M');
 
 INSERT INTO cbioportal_authz_e2e.mutation_count_by_keyword VALUES
     (11, 'TP53 R175 missense', 7157, 1, 1),
@@ -783,11 +881,14 @@ INSERT INTO cbioportal_authz_e2e.allele_specific_copy_number VALUES
 
 INSERT INTO cbioportal_authz_e2e.cna_event VALUES
     (201, 1956, 2),
-    (202, 3845, -2);
+    (202, 3845, -2),
+    (203, 7157, -2);
 
 INSERT INTO cbioportal_authz_e2e.sample_cna_event VALUES
     (201, 1, 12, ''),
-    (202, 3, 22, '');
+    (202, 3, 22, ''),
+    (203, 2, 12, ''),
+    (203, 3, 22, '');
 
 INSERT INTO cbioportal_authz_e2e.structural_variant VALUES
     (301, 14, 1, 1956, 7157, 'EGFR-TP53 fusion', 'SOMATIC'),
@@ -852,7 +953,11 @@ INSERT INTO cbioportal_authz_e2e.genetic_alteration_derived VALUES
     ('study_alpha_S1', 'study_alpha', 'EGFR', 'mrna', '0.5'),
     ('study_alpha_S2', 'study_alpha', 'EGFR', 'mrna', '1.0'),
     ('study_beta_S3', 'study_beta', 'TP53', 'mrna', '-0.5'),
-    ('study_beta_S3', 'study_beta', 'EGFR', 'mrna', '-1.0');
+    ('study_beta_S3', 'study_beta', 'EGFR', 'mrna', '-1.0'),
+    ('study_beta_B1', 'study_beta', 'TP53', 'mrna', '0.5'),
+    ('study_beta_B1', 'study_beta', 'EGFR', 'mrna', '1.5'),
+    ('study_beta_B2', 'study_beta', 'TP53', 'mrna', '1.0'),
+    ('study_beta_B2', 'study_beta', 'EGFR', 'mrna', '-0.2');
 
 INSERT INTO cbioportal_authz_e2e.genomic_event_derived
     (sample_unique_id, hugo_gene_symbol, entrez_gene_id, gene_panel_stable_id, cancer_study_identifier,
@@ -934,6 +1039,95 @@ INSERT INTO cbioportal_authz_e2e.users VALUES
 
 INSERT INTO cbioportal_authz_e2e.authorities VALUES
     ('alice@example.org', 'cbioportal:study_alpha');
+
+INSERT INTO cbioportal_authz_e2e.resource VALUES
+    (1, 'STUDY_SITE', 1, 'STUDY', NULL, NULL, 'https://example.org/alpha', 'Study Site', NULL),
+    (2, 'STUDY_SITE', 2, 'STUDY', NULL, NULL, 'https://example.org/beta', 'Study Site', NULL);
+
+INSERT INTO cbioportal_authz_e2e.cosmic_mutation VALUES ('COSM10648', 7157, 'R175H', 1000);
+INSERT INTO cbioportal_authz_e2e.geneset VALUES (1, 1, 'HALLMARK_P53_PATHWAY', 'p53 pathway', NULL, '');
+INSERT INTO cbioportal_authz_e2e.geneset_gene VALUES (1, 7157);
+INSERT INTO cbioportal_authz_e2e.geneset_hierarchy_node VALUES (1, 'Hallmark', NULL);
+INSERT INTO cbioportal_authz_e2e.geneset_hierarchy_leaf VALUES (1, 1);
+INSERT INTO cbioportal_authz_e2e.generic_entity_properties VALUES (1, 9001, 'NAME', 'Tamoxifen');
+INSERT INTO cbioportal_authz_e2e.generic_assay_meta_derived VALUES ('Tamoxifen', 'GENERIC_ASSAY', map('NAME', 'Tamoxifen'));
+INSERT INTO cbioportal_authz_e2e.data_access_tokens VALUES ('secret-token', 'alice@example.org', now(), now());
+
+-- Bulk cohort: 60 synthetic samples per study in the derived tables, so the
+-- sql/4 frequency views clear their profiled_samples >= 50 threshold and
+-- co_altered_genes_in_study its >= 10. Half are on IMPACT468, half WES; TP53
+-- is mutated in 40, KRAS in 20 (10 with TP53, 10 without), EGFR amplified
+-- in 15 and in an SV in 12. Each study has its own CANCER_TYPE, so a leaked
+-- beta row is recognisable in aggregate view output.
+INSERT INTO cbioportal_authz_e2e.clinical_data_derived
+SELECT
+    toInt32(s.3 + number),
+    concat(s.1, '_B', toString(number + 1)),
+    concat(s.1, '_BP', toString(number + 1)),
+    'CANCER_TYPE',
+    s.2,
+    s.1,
+    'sample'
+FROM numbers(60) AS n
+CROSS JOIN (
+    SELECT arrayJoin([('study_alpha', 'Breast Cancer', 1000), ('study_beta', 'Non-Small Cell Lung Cancer', 2000)]) AS s
+) AS ss;
+
+INSERT INTO cbioportal_authz_e2e.sample_to_gene_panel_derived
+SELECT
+    concat(s, '_B', toString(number + 1)),
+    a.1,
+    if(number < 30, 'IMPACT468', 'WES'),
+    s,
+    concat(s, a.2)
+FROM numbers(60) AS n
+CROSS JOIN (SELECT arrayJoin(['study_alpha', 'study_beta']) AS s) AS ss
+CROSS JOIN (
+    SELECT arrayJoin([
+        ('MUTATION_EXTENDED', '_mutations'),
+        ('COPY_NUMBER_ALTERATION', '_gistic'),
+        ('STRUCTURAL_VARIANT', '_structural_variants')
+    ]) AS a
+) AS aa;
+
+INSERT INTO cbioportal_authz_e2e.genomic_event_derived
+    (sample_unique_id, hugo_gene_symbol, entrez_gene_id, gene_panel_stable_id, cancer_study_identifier,
+     genetic_profile_stable_id, variant_type, mutation_variant, mutation_type, mutation_status,
+     driver_filter, driver_filter_annotation, driver_tiers_filter, driver_tiers_filter_annotation,
+     cna_alteration, cna_cytoband, sv_event_info, patient_unique_id, off_panel)
+SELECT
+    concat(s, '_B', toString(number + 1)),
+    e.1,
+    e.2,
+    if(number < 30, 'IMPACT468', 'WES'),
+    s,
+    concat(s, e.4),
+    e.3,
+    e.5,
+    'Missense_Mutation',
+    'SOMATIC',
+    '', '', '', '',
+    e.6,
+    '',
+    '',
+    concat(s, '_BP', toString(number + 1)),
+    FALSE
+FROM numbers(60) AS n
+CROSS JOIN (SELECT arrayJoin(['study_alpha', 'study_beta']) AS s) AS ss
+CROSS JOIN (
+    SELECT arrayJoin([
+        ('TP53', 7157, 'mutation', '_mutations', 'R175H', CAST(NULL AS Nullable(Int8)), 40, 0),
+        ('KRAS', 3845, 'mutation', '_mutations', 'G12D', CAST(NULL AS Nullable(Int8)), 20, 30),
+        ('EGFR', 1956, 'cna', '_gistic', '', CAST(2 AS Nullable(Int8)), 15, 0),
+        ('EGFR', 1956, 'structural_variant', '_structural_variants', 'EGFR-TP53', CAST(NULL AS Nullable(Int8)), 12, 0)
+    ]) AS e
+) AS ee
+WHERE number >= e.8 AND number < e.8 + e.7;
+
+INSERT INTO cbioportal_authz_e2e.genetic_alteration_derived
+SELECT concat(s, '_B', toString(number + 1)), s, 'EGFR', 'gistic', if(number < 15, '2', '0')
+FROM numbers(60) AS n
+CROSS JOIN (SELECT arrayJoin(['study_alpha', 'study_beta']) AS s) AS ss;
 
 -- ---------------------------------------------------------------------------
 -- Identities

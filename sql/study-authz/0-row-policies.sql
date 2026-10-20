@@ -720,7 +720,6 @@ CREATE ROW POLICY OR REPLACE cbioportal_mcp_reference_geneset_hierarchy_leaf ON 
 CREATE ROW POLICY OR REPLACE cbioportal_mcp_reference_geneset_hierarchy_node ON __CLICKHOUSE_DATABASE__.geneset_hierarchy_node AS PERMISSIVE FOR SELECT USING 1 TO cbioportal_mcp_study_restricted;
 CREATE ROW POLICY OR REPLACE cbioportal_mcp_reference_genetic_entity ON __CLICKHOUSE_DATABASE__.genetic_entity AS PERMISSIVE FOR SELECT USING 1 TO cbioportal_mcp_study_restricted;
 CREATE ROW POLICY OR REPLACE cbioportal_mcp_reference_info ON __CLICKHOUSE_DATABASE__.info AS PERMISSIVE FOR SELECT USING 1 TO cbioportal_mcp_study_restricted;
-CREATE ROW POLICY OR REPLACE cbioportal_mcp_reference_oncotree ON __CLICKHOUSE_DATABASE__.oncotree AS PERMISSIVE FOR SELECT USING 1 TO cbioportal_mcp_study_restricted;
 CREATE ROW POLICY OR REPLACE cbioportal_mcp_reference_reference_genome ON __CLICKHOUSE_DATABASE__.reference_genome AS PERMISSIVE FOR SELECT USING 1 TO cbioportal_mcp_study_restricted;
 CREATE ROW POLICY OR REPLACE cbioportal_mcp_reference_reference_genome_gene ON __CLICKHOUSE_DATABASE__.reference_genome_gene AS PERMISSIVE FOR SELECT USING 1 TO cbioportal_mcp_study_restricted;
 CREATE ROW POLICY OR REPLACE cbioportal_mcp_reference_type_of_cancer ON __CLICKHOUSE_DATABASE__.type_of_cancer AS PERMISSIVE FOR SELECT USING 1 TO cbioportal_mcp_study_restricted;
@@ -730,7 +729,7 @@ CREATE ROW POLICY OR REPLACE cbioportal_mcp_reference_type_of_cancer ON __CLICKH
 -- ============================================================================
 -- The database-wide default-deny in section 1 also matches views - without
 -- these, every view returns zero rows for the restricted role (verified on
--- ClickHouse 24.12). USING 1 on the view itself is safe because the view's
+-- ClickHouse 24.12 and 25.8). USING 1 on the view itself is safe because the view's
 -- query runs as the invoker (default_normal_view_sql_security = INVOKER), so
 -- every underlying table's own policy above still filters the rows. This
 -- includes parameterized views such as gene_mutation_frequency_by_cancer_type.

@@ -232,14 +232,15 @@ def evaluate_coverage(
                     f"{name}: view uses SQL SECURITY DEFINER, so it reads as its definer and "
                     "bypasses the underlying tables' row policies; recreate it as INVOKER"
                 )
-            if not own:
-                if name in STUDY_SCOPED_VIEWS:
-                    report.errors.append(
-                        f"{name}: view has no pass-through policy - fully denied by the "
-                        "default-deny (returns no rows for restricted users)"
-                    )
-                else:
-                    report.unclassified.append(name)
+            # Classification first: an unknown view is reported even if someone
+            # gave it a policy, since nobody has checked what it reads.
+            if name not in STUDY_SCOPED_VIEWS:
+                report.unclassified.append(name)
+            elif not own:
+                report.errors.append(
+                    f"{name}: view has no pass-through policy - fully denied by the "
+                    "default-deny (returns no rows for restricted users)"
+                )
             continue
 
         if name in DENIED_TABLES:
