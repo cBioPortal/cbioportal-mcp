@@ -358,19 +358,27 @@ def _clickhouse_study_setting_name(config: McpConfig) -> str:
     return setting_name
 
 
-def clickhouse_study_access_settings(config: McpConfig | None = None) -> dict[str, str]:
+def clickhouse_study_access_settings(
+    config: McpConfig | None = None, *, all_studies: bool = False
+) -> dict[str, str]:
     """Return ClickHouse query settings that carry the current study ACL.
 
     ClickHouse custom settings are strings, so the allowlist is encoded as a
     comma-separated list of already-validated study IDs. Row policies should
     treat ``*`` as unrestricted and an empty string as no study access.
+
+    ``all_studies=True`` skips request resolution and sends ``*``. It is only
+    for server-internal queries whose results are filtered per request in
+    Python afterwards (e.g. the shared list_studies snapshot).
     """
     config = config or get_mcp_config()
     if not config.clickhouse_row_policy_enabled:
         return {}
 
-    access = get_current_study_access(config)
     setting_name = _clickhouse_study_setting_name(config)
+    if all_studies:
+        return {setting_name: "*"}
+    access = get_current_study_access(config)
     value = "*" if access.all_studies else ",".join(sorted(access.studies))
     return {setting_name: value}
 

@@ -35,6 +35,20 @@ Also cite the specific study publication(s) whose data you used.
 
 Note: Synonymous mutations are not included in cBioPortal.
 
+## What Cancer Types Are in the Database?
+
+Answer from the studies actually loaded, not from the OncoTree ontology (OncoTree lists hundreds of codes, most with no study here). One query:
+
+```sql
+SELECT tc.type_of_cancer_id, tc.name, tc.tissue, count() AS studies
+FROM cancer_study cs
+JOIN type_of_cancer tc ON cs.type_of_cancer_id = tc.type_of_cancer_id
+GROUP BY tc.type_of_cancer_id, tc.name, tc.tissue
+ORDER BY studies DESC;
+```
+
+Report how many distinct cancer types there are across how many studies, grouped by `tissue`. `mixed` ("Mixed Cancer Types") marks multi-cancer studies such as MSK-IMPACT and MSK-CHORD; their per-sample cancer types are in `clinical_data_derived` (`CANCER_TYPE`).
+
 ## Data Types Usually Not Stored Directly
 
 cBioPortal generally does not store:
@@ -75,7 +89,7 @@ Answer actionability questions only if actionability/driver annotation data is a
 
 ## Germline Variant Studies
 
-cBioPortal can represent germline variant studies when germline variants and associated clinical data are loaded as a study. Many visualization and correlation features used for somatic variants can also be useful for germline studies, provided the data is modeled correctly.
+cBioPortal supports germline variants: mutations are loaded with `mutation_status` `GERMLINE`, either alongside somatic calls or as germline-only studies. Most features — study view, clinical correlation, plots, group comparison, OncoPrint, mutation diagrams — work the same as for somatic data. Do not describe cBioPortal as somatic-only. For querying germline data, see the germline-guide.
 
 For germline-study setup questions, explain:
 
@@ -128,11 +142,11 @@ Study identifiers typically combine disease, institution, and year, but the orde
 | `_genie_` | AACR Project GENIE | `genie_public` |
 | `_pan_can_` | Pan-Cancer Atlas | `brca_tcga_pan_can_atlas_2018` |
 
-When searching for studies on a specific topic, use `list_studies(search=...)` with the disease name or abbreviation. For example, `list_studies(search="clonal hematopoiesis")` finds CH studies.
+When searching for studies on a specific topic, call `list_studies(search=...)` yourself with the disease name or abbreviation — for example, `list_studies(search="clonal hematopoiesis")` finds CH studies — and give the user the resulting studies as links. Tools are for you, not the user: never tell the user to call `list_studies` or any other tool. If they want to browse on their own, point them to https://www.cbioportal.org (the study list and its search box) or offer to search for them.
 
 ### Study Links
 
-- **View a study:** `https://www.cbioportal.org/study?id={study_id}` (e.g., `https://www.cbioportal.org/study?id=msk_ch_2020`)
+- **View a study:** `https://www.cbioportal.org/study/summary?id={study_id}` (e.g., `https://www.cbioportal.org/study/summary?id=msk_ch_2020`)
 - **Download study data:** `https://datahub.assets.cbioportal.org/{study_id}.tar.gz`
 
 ## Copy Number (GISTIC) Thresholds
@@ -145,6 +159,8 @@ When searching for studies on a specific topic, use `list_studies(search=...)` w
 | +1 | Gain | Low-level gain (few extra copies) |
 | +2 | Amplification (AMP) | High-level amplification |
 
+`genomic_event_derived.cna_alteration` holds only -2 and +2. All five values are in `genetic_alteration_derived` with `profile_type = 'gistic'`.
+
 ## cBioPortal vs. GDC (Genomic Data Commons)
 
 - **cBioPortal** is an exploratory analysis tool for interactive visualization and querying of processed cancer genomics data.
@@ -155,6 +171,8 @@ cBioPortal imports some GDC data and presents it in a user-friendly interface fo
 ## API Access
 
 cBioPortal provides a REST API (Swagger-documented), as well as R and MATLAB interfaces for programmatic access. The public API is available at https://www.cbioportal.org/api.
+
+When writing code for regular cBioPortal users, default to the REST API. Do not provide ClickHouse connection code, backend credentials, or direct SQL driver setup unless the user explicitly says they have backend database access. If a workflow is not available through the REST API, explain the limitation and point to cBioPortal UI/download options or DataHub rather than assuming the user can query ClickHouse.
 
 ## Combined and Virtual Studies
 

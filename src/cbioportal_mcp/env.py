@@ -215,6 +215,61 @@ class McpConfig:
             "SQL_cbiomcp_allowed_studies",
         )
 
+    @property
+    def google_client_id(self) -> Optional[str]:
+        """Google OAuth client ID (from Google Cloud Console).
+
+        Example: "123-abc.apps.googleusercontent.com".
+
+        One of the three Google OAuth settings gating whether OAuth is enabled
+        at all — see `cbioportal_mcp.auth._build_auth_provider`. Any Google
+        account can authenticate; there is no Workspace-domain restriction.
+        """
+        value = os.getenv("CBIOPORTAL_MCP_GOOGLE_CLIENT_ID")
+        return value if value else None
+
+    @property
+    def google_client_secret(self) -> Optional[str]:
+        """Google OAuth client secret (from Google Cloud Console)."""
+        value = os.getenv("CBIOPORTAL_MCP_GOOGLE_CLIENT_SECRET")
+        return value if value else None
+
+    @property
+    def google_base_url(self) -> Optional[str]:
+        """This server's own public URL, used to construct its OAuth redirect/callback URIs.
+
+        Example: "https://mcp.cbioportal.org". Must match a redirect URI
+        registered on the Google OAuth client (base_url + "/auth/callback").
+        """
+        value = os.getenv("CBIOPORTAL_MCP_GOOGLE_BASE_URL")
+        return value if value else None
+
+    @property
+    def redis_url(self) -> Optional[str]:
+        """Redis connection URL for OAuth client/token storage.
+
+        Example: "redis://:password@host:6379/1". When unset, OAuth client
+        registrations and tokens (see `cbioportal_mcp.auth`) fall back to
+        FastMCP's default local-disk store — fine for local dev, but that
+        disk is the pod's own ephemeral filesystem in Kubernetes, so every
+        pod restart silently invalidates every session.
+
+        In production (see `knowledgesystems-k8s-deployment`'s
+        `cbioagent-clickhouse-mcp-auth.yaml`) this reuses the cBioPortal
+        webapp's own session-Redis instance (`cbioportal-redis-public-master`,
+        credentials from the `cbioportal-public-blue` secret), on database 1
+        rather than a dedicated instance — database 0 there is Spring's own
+        HTTP session store (`spring.data.redis.*`), and 1-15 are otherwise
+        unclaimed. Deliberately not the separate persistence-cache Redis
+        instance (`redis.database=8` in the cBioPortal webapp Deployment):
+        that one runs with `--redis.clear_on_startup=true`, which would wipe
+        this storage on every webapp rollout and reproduce the exact bug
+        this env var exists to fix. Only takes effect when OAuth itself is
+        enabled (all three CBIOPORTAL_MCP_GOOGLE_* variables set).
+        """
+        value = os.getenv("REDIS_URL")
+        return value if value else None
+
 
 # Global instance placeholders for the singleton pattern
 _MCP_CONFIG_INSTANCE = None

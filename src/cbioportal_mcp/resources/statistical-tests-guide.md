@@ -10,7 +10,7 @@ HARD RULES — NEVER FABRICATE A STATISTIC
 ClickHouse cannot run statistical tests. The agent therefore must NEVER produce a derived statistic that is not a literal column value from a SQL result. Specifically:
 
 1. **Never invent a p-value.** Not "p < 0.001", not "p ≈ 0.05", not any p-value. If the user asks "what is the p-value?", the answer is *"I can't compute that — here is the 2x2 contingency table (or group statistics). Run it in cBioPortal's Group Comparison tab, in R with `fisher.test(...)` / `wilcox.test(...)`, or in Python with `scipy.stats.fisher_exact(...)` / `mannwhitneyu(...)`."*
-2. **Never claim mutual exclusivity (or co-occurrence) from a contingency table alone.** A 2x2 table is not a test. The shape "altered/not altered × group A/group B" needs Fisher's exact + a defined direction (odds ratio < 1 with significant p). Without that test, the agent presents the table and stops.
+2. **Never claim mutual exclusivity (or co-occurrence) from a contingency table alone.** A 2x2 table is not a test. The shape "altered/not altered × group A/group B" needs Fisher's exact + a defined direction (odds ratio < 1 with significant p). Without that test, the agent presents the table and stops. Descriptive phrasing is also a claim: "largely/mostly mutually exclusive", "rarely co-occur", "tend to co-occur" are forbidden without the test — point to cBioPortal's Mutual Exclusivity tab instead.
 3. **Never report a "median" that came from `AVG(...)` or any non-median aggregate.** "Median" and "mean" are different statistics; for skewed clinical distributions (especially survival) they differ substantially. Use ClickHouse's `quantile(0.5)(...)` for actual median, and label arithmetic averages as "mean", never "median".
 4. **Never report a hazard ratio, odds ratio, risk ratio, or relative risk** that wasn't computed by an external tool. These require regression / model fitting that ClickHouse does not do.
 5. **Never report median overall survival from `AVG(OS_MONTHS)` or even `quantile(0.5)(OS_MONTHS)`.** Median OS requires Kaplan-Meier estimation, which handles censoring (`OS_STATUS = 0:LIVING` means the event hasn't happened yet). Naive medians/means over `OS_MONTHS` ignore censoring and are systematically wrong. The correct handoff: return the raw `(OS_MONTHS, OS_STATUS)` pairs (or descriptive counts: N events, N censored, follow-up range) and tell the user to run KM in R (`survival::survfit`) or Python (`lifelines.KaplanMeierFitter`), or use cBioPortal's Survival comparison.
@@ -45,12 +45,20 @@ Decision Matrix
 | 2 | Fisher's exact test (two-tailed) | Standard for 2x2 contingency tables. Use altered vs. not-altered counts per group. |
 | 3+ | Chi-squared test | For larger contingency tables. Requires expected cell counts >= 5; note limitation if not met. |
 
-### Clinical Numeric Data (age, OS_MONTHS, tumor size, TMB, etc.)
+### Clinical Numeric Data (age, tumor size, TMB, etc. — NOT survival times)
 
 | Groups | Test | Notes |
 |--------|------|-------|
 | 2 | Wilcoxon rank-sum test (Mann-Whitney U) | Non-parametric. No normality assumption. Preferred for clinical data which often has skewed distributions. |
 | 3+ | Kruskal-Wallis test | Non-parametric extension of Wilcoxon for 3+ groups. |
+
+### Survival / Time-to-Event Data (OS, DFS, PFS, DSS: `*_MONTHS` + `*_STATUS`)
+
+| Groups | Test | Notes |
+|--------|------|-------|
+| Any | Kaplan-Meier + log-rank test | cBioPortal Group Comparison → Survival tab. Median survival comes from the KM curve (may be "not reached"). Hazard ratio requires Cox regression. |
+
+Never run Wilcoxon / t-test / Kruskal-Wallis on `*_MONTHS` and never compare raw medians/means of `*_MONTHS` — they ignore censoring. Survival times are a time-to-event pair, not a numeric attribute.
 
 ### Clinical Categorical Data (stage, grade, sample type, etc.)
 
@@ -147,9 +155,13 @@ Approved Response Templates
 > - Follow-up range: min ... – max ... months
 >
 > Run KM in R (`survival::survfit(Surv(OS_MONTHS, OS_STATUS==\"1:DECEASED\") ~ group, data=...)`), Python (`lifelines.KaplanMeierFitter`), or cBioPortal's Survival comparison."
+>
+> If fewer than half of a group's patients have an event, add: "the KM median is likely not reached in this group." Never substitute a raw median.
 
 ### When asked to compare "aggressiveness" / "outcome" between cohorts
-> "'Aggressive' could mean shorter OS, higher metastasis rate, higher grade/stage, higher TMB, or specific molecular features. Which would you like to compare? I'll pull the raw values and tell you which test applies."
+> "'Aggressive' could mean shorter OS, higher metastasis rate, higher grade/stage, higher TMB, or specific molecular features. Which would you like to compare? I'll pull the raw values and tell you which test applies. If you mean survival (OS/PFS/DFS), that comparison needs Kaplan-Meier + log-rank — cBioPortal Group Comparison → Survival, or R `survival::survfit` / Python `lifelines` — and I'll give you the per-group N / events / censored summary."
+
+Never answer a survival or outcome comparison from background knowledge: query the cohort's `*_MONTHS`/`*_STATUS` summary and give the KM handoff.
 
 ### Forbidden Shapes (do not produce these outputs)
 
@@ -158,6 +170,9 @@ Approved Response Templates
 - ❌ "KRAS G12C is more aggressive than G12D (median OS 18 vs 25 months)." (KM not run, "aggressive" not clarified)
 - ❌ "Hazard ratio for EGFR-mutant vs wild-type LUAD is 0.67."  (regression not run)
 - ❌ "The p-value is approximately 0.03." (no test was run)
+- ❌ "BRCA-mutant patients had median OS 41.0 vs 33.0 months." (raw `median()` of `OS_MONTHS`, censoring ignored)
+- ❌ "Use a Wilcoxon test on OS_MONTHS." (survival needs KM + log-rank)
+- ❌ "TP53 and KRAS mutations are largely mutually exclusive." (descriptive claim, no test run)
 - ❌ "Based on the contingency table, there is significant enrichment." (no test was run)
 
 Common Pitfalls

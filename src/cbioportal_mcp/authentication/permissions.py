@@ -47,12 +47,13 @@ as a confusing error on whichever request happens to hit it first.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from typing import Any, Dict, List
 
 from cbioportal_mcp.env import McpConfig
-from mcp_clickhouse.mcp_server import execute_query
+from mcp_clickhouse.mcp_server import run_query
 from fastmcp.exceptions import ToolError
 
 logger = logging.getLogger(__name__)
@@ -89,7 +90,7 @@ def _check_grant(priv: str, scope: str) -> bool:
         scope = "*.*"
 
     try:
-        raw = execute_query(f"CHECK GRANT {priv} ON {scope}")
+        raw = json.loads(run_query(f"CHECK GRANT {priv} ON {scope}"))
     except ToolError as e:
         logger.warning(
             "CHECK GRANT %s ON %s failed (treating as not granted): %s",

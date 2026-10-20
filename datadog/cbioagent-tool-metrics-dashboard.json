@@ -1,0 +1,306 @@
+{
+  "title": "cBioAgent MCP Tool Metrics",
+  "description": "MCP tool call frequency, latency, and error metrics emitted by cbioportal-mcp DogStatsD telemetry.",
+  "layout_type": "ordered",
+  "template_variables": [
+    {
+      "name": "env",
+      "prefix": "env",
+      "default": "*"
+    },
+    {
+      "name": "service",
+      "prefix": "service",
+      "default": "cbioportal-mcp"
+    },
+    {
+      "name": "client_kind",
+      "prefix": "client_kind",
+      "default": "*"
+    }
+  ],
+  "widgets": [
+    {
+      "definition": {
+        "title": "MCP Tool Metrics",
+        "background_color": "vivid_green",
+        "show_title": true,
+        "type": "group",
+        "layout_type": "ordered",
+        "widgets": [
+          {
+            "definition": {
+              "type": "note",
+              "content": "Tool metrics come from DogStatsD counters/distributions: `cbioportal_mcp.tool.calls`, `cbioportal_mcp.tool.duration_ms`, and `cbioportal_mcp.tool.errors`. Tags: `tool`, `success`, `client_kind`, `client_name`, `service`, `env`.",
+              "background_color": "blue",
+              "font_size": "14",
+              "text_align": "left",
+              "vertical_align": "center",
+              "show_tick": false,
+              "tick_pos": "50%",
+              "tick_edge": "left"
+            },
+            "layout": {
+              "x": 0,
+              "y": 0,
+              "width": 12,
+              "height": 1
+            }
+          },
+          {
+            "definition": {
+              "type": "query_value",
+              "title": "Total Tool Calls",
+              "requests": [
+                {
+                  "q": "sum:cbioportal_mcp.tool.calls{$env,$service,$client_kind}.as_count()",
+                  "aggregator": "sum"
+                }
+              ],
+              "autoscale": true,
+              "precision": 0
+            },
+            "layout": {
+              "x": 0,
+              "y": 1,
+              "width": 3,
+              "height": 2
+            }
+          },
+          {
+            "definition": {
+              "type": "query_value",
+              "title": "Tool Error Rate",
+              "requests": [
+                {
+                  "formulas": [
+                    {
+                      "formula": "100 * errors / calls"
+                    }
+                  ],
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "errors",
+                      "query": "sum:cbioportal_mcp.tool.errors{$env,$service,$client_kind}.as_count()"
+                    },
+                    {
+                      "data_source": "metrics",
+                      "name": "calls",
+                      "query": "sum:cbioportal_mcp.tool.calls{$env,$service,$client_kind}.as_count()"
+                    }
+                  ],
+                  "response_format": "scalar"
+                }
+              ],
+              "autoscale": true,
+              "precision": 2,
+              "custom_unit": "%"
+            },
+            "layout": {
+              "x": 3,
+              "y": 1,
+              "width": 3,
+              "height": 2
+            }
+          },
+          {
+            "definition": {
+              "type": "timeseries",
+              "title": "Tool Calls by Tool",
+              "requests": [
+                {
+                  "q": "sum:cbioportal_mcp.tool.calls{$env,$service,$client_kind} by {tool}.as_count()",
+                  "display_type": "bars"
+                }
+              ],
+              "show_legend": true
+            },
+            "layout": {
+              "x": 6,
+              "y": 1,
+              "width": 6,
+              "height": 2
+            }
+          },
+          {
+            "definition": {
+              "type": "toplist",
+              "title": "Most Frequently Called Tools",
+              "requests": [
+                {
+                  "q": "top(sum:cbioportal_mcp.tool.calls{$env,$service,$client_kind} by {tool}.as_count(), 10, 'sum', 'desc')"
+                }
+              ]
+            },
+            "layout": {
+              "x": 0,
+              "y": 3,
+              "width": 4,
+              "height": 3
+            }
+          },
+          {
+            "definition": {
+              "type": "toplist",
+              "title": "Slowest Tools by p95 Latency",
+              "requests": [
+                {
+                  "q": "top(p95:cbioportal_mcp.tool.duration_ms{$env,$service,$client_kind} by {tool}, 10, 'last', 'desc')"
+                }
+              ]
+            },
+            "layout": {
+              "x": 4,
+              "y": 3,
+              "width": 4,
+              "height": 3
+            }
+          },
+          {
+            "definition": {
+              "type": "toplist",
+              "title": "Slowest Tools by p99 Latency",
+              "requests": [
+                {
+                  "q": "top(p99:cbioportal_mcp.tool.duration_ms{$env,$service,$client_kind} by {tool}, 10, 'last', 'desc')"
+                }
+              ]
+            },
+            "layout": {
+              "x": 8,
+              "y": 3,
+              "width": 4,
+              "height": 3
+            }
+          },
+          {
+            "definition": {
+              "type": "query_table",
+              "title": "Tool Cost Ranking: Volume and Latency",
+              "requests": [
+                {
+                  "response_format": "scalar",
+                  "queries": [
+                    {
+                      "name": "calls",
+                      "data_source": "metrics",
+                      "query": "sum:cbioportal_mcp.tool.calls{$env,$service,$client_kind} by {tool}.as_count()"
+                    },
+                    {
+                      "name": "avg_latency",
+                      "data_source": "metrics",
+                      "query": "avg:cbioportal_mcp.tool.duration_ms{$env,$service,$client_kind} by {tool}"
+                    },
+                    {
+                      "name": "p95_latency",
+                      "data_source": "metrics",
+                      "query": "p95:cbioportal_mcp.tool.duration_ms{$env,$service,$client_kind} by {tool}"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "calls",
+                      "alias": "calls"
+                    },
+                    {
+                      "formula": "avg_latency",
+                      "alias": "avg latency ms"
+                    },
+                    {
+                      "formula": "p95_latency",
+                      "alias": "p95 latency ms"
+                    },
+                    {
+                      "formula": "calls * avg_latency",
+                      "alias": "total tool time ms"
+                    }
+                  ],
+                  "sort": {
+                    "count": 10,
+                    "order_by": [
+                      {
+                        "type": "formula",
+                        "index": 3,
+                        "order": "desc"
+                      }
+                    ]
+                  }
+                }
+              ]
+            },
+            "layout": {
+              "x": 0,
+              "y": 6,
+              "width": 12,
+              "height": 4
+            }
+          },
+          {
+            "definition": {
+              "type": "timeseries",
+              "title": "p95 Latency by Tool",
+              "requests": [
+                {
+                  "q": "p95:cbioportal_mcp.tool.duration_ms{$env,$service,$client_kind} by {tool}",
+                  "display_type": "line"
+                }
+              ],
+              "show_legend": true
+            },
+            "layout": {
+              "x": 0,
+              "y": 10,
+              "width": 6,
+              "height": 3
+            }
+          },
+          {
+            "definition": {
+              "type": "timeseries",
+              "title": "Tool Calls by Client Kind",
+              "requests": [
+                {
+                  "q": "sum:cbioportal_mcp.tool.calls{$env,$service,$client_kind} by {client_kind}.as_count()",
+                  "display_type": "bars"
+                }
+              ],
+              "show_legend": true
+            },
+            "layout": {
+              "x": 6,
+              "y": 10,
+              "width": 3,
+              "height": 3
+            }
+          },
+          {
+            "definition": {
+              "type": "timeseries",
+              "title": "Tool Errors by Tool",
+              "requests": [
+                {
+                  "q": "sum:cbioportal_mcp.tool.errors{$env,$service,$client_kind} by {tool}.as_count()",
+                  "display_type": "bars"
+                }
+              ],
+              "show_legend": true
+            },
+            "layout": {
+              "x": 9,
+              "y": 10,
+              "width": 3,
+              "height": 3
+            }
+          }
+        ]
+      },
+      "layout": {
+        "x": 0,
+        "y": 0,
+        "width": 12,
+        "height": 14
+      }
+    }
+  ]
+}

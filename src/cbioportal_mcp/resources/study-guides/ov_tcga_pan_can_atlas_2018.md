@@ -7,21 +7,15 @@ See `_tcga_pancan_template.md` for common TCGA clinical attributes.
 ## Study-Specific Attributes
 
 ### Histology
-| Attribute | Description | Notes |
-|-----------|-------------|-------|
-| `HISTOLOGICAL_GRADE` | Tumor grade | High-grade serous predominant |
+| Attribute | Description | Values (samples) |
+|-----------|-------------|--------|
+| `GRADE` | Histologic grade | G3 400, G2 65, GX 7, G1 5, GB 2, G4 1, blank 105 |
+| `CANCER_TYPE_DETAILED` | Histology | Serous Ovarian Cancer (all 585) |
 
-### Treatment Response
-| Attribute | Description |
-|-----------|-------------|
-| `PLATINUM_STATUS` | Platinum sensitivity | Sensitive, Resistant, Refractory |
-| `RESIDUAL_DISEASE` | Post-surgical residual | Optimal (<1cm), Suboptimal |
-
-### Molecular Features
-| Attribute | Description |
-|-----------|-------------|
-| `BRCA_STATUS` | BRCA1/2 mutation status |
-| `HRD_STATUS` | Homologous recombination deficiency |
+### Not available in this study
+- **Platinum sensitivity and residual disease**: no treatment-response or surgical-outcome attributes. Survival (`OS_*`, `PFS_*`, `DFS_*`, `DSS_*`) is the only outcome data.
+- **BRCA / HRD status**: no clinical status attributes. Derive BRCA1/BRCA2 status from mutation (somatic calls only) and CNA data; there is no HRD score.
+- `AJCC_PATHOLOGIC_TUMOR_STAGE` is blank for all samples. `SUBTYPE` is `OV` (177) or blank (408) and carries no molecular subtype.
 
 ## Key Genes
 | Gene | Frequency | Notes |

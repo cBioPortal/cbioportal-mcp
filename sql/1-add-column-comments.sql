@@ -49,10 +49,10 @@ ALTER TABLE clinical_data_derived MODIFY COLUMN patient_unique_id
   COMMENT 'Globally unique patient ID: cancer_study_identifier + "_" + patient.stable_id. Present for both sample and patient-level attributes.';
 
 ALTER TABLE clinical_data_derived MODIFY COLUMN attribute_name
-  COMMENT 'Clinical attribute name (e.g., SAMPLE_TYPE, CANCER_TYPE, AGE, OS_MONTHS). Use with attribute_value for filtering.';
+  COMMENT 'Clinical attribute name (e.g., SAMPLE_TYPE, CANCER_TYPE, AGE, OS_MONTHS). Use with attribute_value for filtering. AGE may be floored or capped for de-identification (e.g. all children recorded as 18, or everyone 89+ recorded as 89 or 90): before age statistics check for a pile-up at the min/max, and if present compute age from DAYS_TO_BIRTH (-days / 365.25).';
 
 ALTER TABLE clinical_data_derived MODIFY COLUMN attribute_value
-  COMMENT 'Value of the clinical attribute. For SAMPLE_TYPE: Primary, Metastasis, Local Recurrence, Unknown. Cast to Float64 for numeric comparisons.';
+  COMMENT 'Value of the clinical attribute (String). For SAMPLE_TYPE: Primary, Metastasis, Local Recurrence, Unknown. Missing values are empty strings, so use toFloat64OrNull(attribute_value) for numeric comparisons — CAST fails on them.';
 
 ALTER TABLE clinical_data_derived MODIFY COLUMN type
   COMMENT 'Data level: "sample" for sample-level attributes (e.g., SAMPLE_TYPE), "patient" for patient-level attributes (e.g., AGE, OS_MONTHS).';
@@ -74,7 +74,7 @@ ALTER TABLE genomic_event_derived MODIFY COLUMN off_panel
   COMMENT 'Boolean: 1 = mutation outside gene panel coverage (off-panel), 0 = within panel (on-panel). Filter off_panel = 0 for reliable frequency calculations.';
 
 ALTER TABLE genomic_event_derived MODIFY COLUMN cna_alteration
-  COMMENT 'Copy number alteration: -2 = deep deletion (HOMDEL), -1 = shallow deletion, 0 = diploid, 1 = gain, 2 = amplification (AMP). NULL for non-CNA events.';
+  COMMENT 'Copy number alteration: only 2 = amplification (AMP) and -2 = deep deletion (HOMDEL) are stored. Shallow deletion (-1), diploid (0) and gain (1) are not in this table; query genetic_alteration_derived WHERE profile_type = ''gistic'' (alteration_value is a String, e.g. ''-1''). NULL for non-CNA events.';
 
 ALTER TABLE genomic_event_derived MODIFY COLUMN mutation_variant
   COMMENT 'Protein change notation (e.g., p.V600E, p.R175H). Use for specific variant queries. "NA" for non-mutation events.';
