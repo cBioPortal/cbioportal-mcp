@@ -733,9 +733,17 @@ CREATE ROW POLICY OR REPLACE cbioportal_mcp_reference_type_of_cancer ON __CLICKH
 -- query runs as the invoker (default_normal_view_sql_security = INVOKER), so
 -- every underlying table's own policy above still filters the rows. This
 -- includes parameterized views such as gene_mutation_frequency_by_cancer_type.
--- A view created with SQL SECURITY DEFINER would read as its definer and
--- bypass the underlying policies; scripts/verify_row_policy_coverage.py
--- fails on any such view (and on materialized views / dictionaries).
+-- That only holds for SQL SECURITY INVOKER: a DEFINER view reads as its
+-- definer, and a NONE view runs without the caller's row-policy context, so
+-- either would leak every study through its USING 1 policy (NONE verified on
+-- 25.8). A view with no SQL SECURITY clause depends on the server default at
+-- creation time, so every view is set to INVOKER explicitly below. These
+-- ALTERs need the views to exist (ClickHouse has no ALTER ... IF EXISTS):
+-- apply this file after sql/4, sql/5 and sql/7, and again whenever they are
+-- re-applied, since they DROP and re-CREATE the views.
+-- scripts/verify_row_policy_coverage.py and the server's startup check
+-- (CBIOPORTAL_MCP_CLICKHOUSE_ROW_POLICY_ENABLED=true) refuse any view that is
+-- not explicitly INVOKER.
 
 CREATE ROW POLICY OR REPLACE cbioportal_mcp_view_clinical_attribute_counts ON __CLICKHOUSE_DATABASE__.clinical_attribute_counts AS PERMISSIVE FOR SELECT USING 1 TO cbioportal_mcp_study_restricted;
 CREATE ROW POLICY OR REPLACE cbioportal_mcp_view_cna_panel_gene_coverage ON __CLICKHOUSE_DATABASE__.cna_panel_gene_coverage AS PERMISSIVE FOR SELECT USING 1 TO cbioportal_mcp_study_restricted;
@@ -758,6 +766,28 @@ CREATE ROW POLICY OR REPLACE cbioportal_mcp_view_top_mutated_genes_in_study ON _
 CREATE ROW POLICY OR REPLACE cbioportal_mcp_view_top_sv_genes_in_study ON __CLICKHOUSE_DATABASE__.top_sv_genes_in_study AS PERMISSIVE FOR SELECT USING 1 TO cbioportal_mcp_study_restricted;
 CREATE ROW POLICY OR REPLACE cbioportal_mcp_view_treatment_counts_in_study ON __CLICKHOUSE_DATABASE__.treatment_counts_in_study AS PERMISSIVE FOR SELECT USING 1 TO cbioportal_mcp_study_restricted;
 CREATE ROW POLICY OR REPLACE cbioportal_mcp_view_treatment_regimens_in_study ON __CLICKHOUSE_DATABASE__.treatment_regimens_in_study AS PERMISSIVE FOR SELECT USING 1 TO cbioportal_mcp_study_restricted;
+
+ALTER TABLE __CLICKHOUSE_DATABASE__.clinical_attribute_counts MODIFY SQL SECURITY INVOKER;
+ALTER TABLE __CLICKHOUSE_DATABASE__.cna_panel_gene_coverage MODIFY SQL SECURITY INVOKER;
+ALTER TABLE __CLICKHOUSE_DATABASE__.cna_wes_coverage MODIFY SQL SECURITY INVOKER;
+ALTER TABLE __CLICKHOUSE_DATABASE__.co_altered_genes_in_study MODIFY SQL SECURITY INVOKER;
+ALTER TABLE __CLICKHOUSE_DATABASE__.gene_alteration_frequency_by_cancer_type MODIFY SQL SECURITY INVOKER;
+ALTER TABLE __CLICKHOUSE_DATABASE__.gene_cna_distribution_in_study MODIFY SQL SECURITY INVOKER;
+ALTER TABLE __CLICKHOUSE_DATABASE__.gene_mutation_frequency_by_cancer_type MODIFY SQL SECURITY INVOKER;
+ALTER TABLE __CLICKHOUSE_DATABASE__.gene_mutation_frequency_in_studies MODIFY SQL SECURITY INVOKER;
+ALTER TABLE __CLICKHOUSE_DATABASE__.gene_mutation_frequency_in_study MODIFY SQL SECURITY INVOKER;
+ALTER TABLE __CLICKHOUSE_DATABASE__.gene_mutation_variants_in_study MODIFY SQL SECURITY INVOKER;
+ALTER TABLE __CLICKHOUSE_DATABASE__.gene_pair_coexpression MODIFY SQL SECURITY INVOKER;
+ALTER TABLE __CLICKHOUSE_DATABASE__.mutation_panel_gene_coverage MODIFY SQL SECURITY INVOKER;
+ALTER TABLE __CLICKHOUSE_DATABASE__.mutation_wes_coverage MODIFY SQL SECURITY INVOKER;
+ALTER TABLE __CLICKHOUSE_DATABASE__.sv_panel_gene_coverage MODIFY SQL SECURITY INVOKER;
+ALTER TABLE __CLICKHOUSE_DATABASE__.sv_wes_coverage MODIFY SQL SECURITY INVOKER;
+ALTER TABLE __CLICKHOUSE_DATABASE__.top_cna_genes_in_study MODIFY SQL SECURITY INVOKER;
+ALTER TABLE __CLICKHOUSE_DATABASE__.top_mutated_genes_in_cohort MODIFY SQL SECURITY INVOKER;
+ALTER TABLE __CLICKHOUSE_DATABASE__.top_mutated_genes_in_study MODIFY SQL SECURITY INVOKER;
+ALTER TABLE __CLICKHOUSE_DATABASE__.top_sv_genes_in_study MODIFY SQL SECURITY INVOKER;
+ALTER TABLE __CLICKHOUSE_DATABASE__.treatment_counts_in_study MODIFY SQL SECURITY INVOKER;
+ALTER TABLE __CLICKHOUSE_DATABASE__.treatment_regimens_in_study MODIFY SQL SECURITY INVOKER;
 
 -- ============================================================================
 -- 5. Deliberately denied: authorities, users, data_access_tokens.

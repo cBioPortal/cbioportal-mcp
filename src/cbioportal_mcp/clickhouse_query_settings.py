@@ -148,3 +148,73 @@ def verify_allowlist_lockdown(setting_name: str) -> None:
         "runtime user must not have readonly=2 or a CHANGEABLE_IN_READONLY constraint on "
         "this setting; row policies would otherwise be bypassable."
     )
+
+
+def non_invoker_views(setting_name: str) -> list[tuple[str, str]]:
+    """(view, declared SQL SECURITY or 'unset') for views not explicitly INVOKER.
+
+    A DEFINER view reads as its definer and a NONE view runs without the
+    caller's row-policy context, so either leaks every study through its
+    USING 1 pass-through policy; a view with no clause depends on the server
+    default when it was created.
+    """
+    result = run_query_with_settings(
+        "SELECT name, extract(create_table_query, '(?i)SQL\\\\s+SECURITY\\\\s+(\\\\w+)') "
+        "FROM system.tables WHERE database = currentDatabase() AND engine = 'View' "
+        "ORDER BY name",
+        {setting_name: ""},
+    )
+    return [
+        (name, security.upper() or "unset")
+        for name, security in result.get("rows", [])
+        if security.upper() != "INVOKER"
+    ]
+
+
+# Things the restricted role must not be able to do: table functions that read
+# outside the row-policy boundary, and system tables that expose other
+# requests' SQL (and with it their allowlists). Verified denied on 25.8 for a
+# role holding only SELECT ON <db>.*.
+RESTRICTED_ROLE_PROBES = {
+    "url()": "SELECT * FROM url('http://127.0.0.1:1/', 'TSV', 'x String') LIMIT 0",
+    "remote()": "SELECT 1 FROM remote('127.0.0.1', system.one) LIMIT 0",
+    "clusterAllReplicas()": "SELECT 1 FROM clusterAllReplicas('default', system.one) LIMIT 0",
+    "file()": "SELECT * FROM file('cbiomcp_probe.csv', 'CSV', 'x String') LIMIT 0",
+    "dictionary()": "SELECT * FROM dictionary('cbiomcp_probe') LIMIT 0",
+    "system.dictionaries": "SELECT 1 FROM system.dictionaries LIMIT 0",
+    "system.query_log": "SELECT 1 FROM system.query_log LIMIT 0",
+    "system.processes": "SELECT 1 FROM system.processes LIMIT 0",
+    "system.row_policies": "SELECT 1 FROM system.row_policies LIMIT 0",
+}
+
+
+def overprivileged_probes(setting_name: str) -> list[str]:
+    """Names of RESTRICTED_ROLE_PROBES the runtime user can actually run."""
+    allowed = []
+    for name, query in RESTRICTED_ROLE_PROBES.items():
+        try:
+            run_query_with_settings(query, {setting_name: ""})
+        except Exception:
+            continue  # denied (or absent): what we want
+        allowed.append(name)
+    return allowed
+
+
+def verify_restricted_surface(setting_name: str) -> None:
+    """Fail on non-INVOKER views or a runtime role broader than SELECT ON <db>.*."""
+    problems = []
+    views = non_invoker_views(setting_name)
+    if views:
+        problems.append(
+            "views not explicitly SQL SECURITY INVOKER (re-apply "
+            "sql/study-authz/0-row-policies.sql): "
+            + ", ".join(f"{name} ({security})" for name, security in views)
+        )
+    allowed = overprivileged_probes(setting_name)
+    if allowed:
+        problems.append(
+            "the runtime role can use " + ", ".join(allowed) + " - grant it only "
+            "SELECT ON <db>.* (and keep select_from_system_db_requires_grant enabled)"
+        )
+    if problems:
+        raise AllowlistLockdownError("; ".join(problems))

@@ -1,5 +1,6 @@
 """Per-request settings ride on mcp-clickhouse's own run_query path."""
 
+import re
 import threading
 import time
 from types import SimpleNamespace
@@ -140,3 +141,38 @@ def test_verify_allowlist_lockdown(probe_rows, override_error, ok):
         else:
             with pytest.raises(cqs.AllowlistLockdownError):
                 cqs.verify_allowlist_lockdown(SETTING)
+
+
+def _fake_surface(view_rows, allowed_probes=()):
+    def fake_run(query, settings):
+        if "FROM system.tables" in query:
+            return {"columns": ["name", "security"], "rows": view_rows}
+        for name, probe in cqs.RESTRICTED_ROLE_PROBES.items():
+            if query == probe:
+                if name in allowed_probes:
+                    return {"columns": [], "rows": []}
+                raise RuntimeError("Code: 497. Not enough privileges")
+        raise AssertionError(query)
+
+    return fake_run
+
+
+def test_restricted_surface_ok_for_invoker_views_and_select_only_role():
+    with patch.object(cqs, "run_query_with_settings", _fake_surface([["v", "INVOKER"]])):
+        cqs.verify_restricted_surface(SETTING)
+
+
+@pytest.mark.parametrize("security", ["NONE", "DEFINER", ""])
+def test_restricted_surface_refuses_non_invoker_views(security):
+    rows = [["good", "INVOKER"], ["bad", security]]
+    with patch.object(cqs, "run_query_with_settings", _fake_surface(rows)):
+        with pytest.raises(cqs.AllowlistLockdownError, match="bad"):
+            cqs.verify_restricted_surface(SETTING)
+
+
+@pytest.mark.parametrize("probe", ["system.query_log", "remote()", "url()"])
+def test_restricted_surface_refuses_overprivileged_role(probe):
+    fake = _fake_surface([], allowed_probes={probe})
+    with patch.object(cqs, "run_query_with_settings", fake):
+        with pytest.raises(cqs.AllowlistLockdownError, match=re.escape(probe)):
+            cqs.verify_restricted_surface(SETTING)

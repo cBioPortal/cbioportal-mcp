@@ -29,7 +29,9 @@ def _good():
         "sample": _table(),
         "gene": _table(),
         "users": _table(),
-        "mutation_panel_gene_coverage": _table("View", "CREATE VIEW cbio.x AS SELECT 1"),
+        "mutation_panel_gene_coverage": _table(
+            "View", "CREATE VIEW cbio.x SQL SECURITY INVOKER AS SELECT 1"
+        ),
     }
     policies = [
         Policy("cbioportal_mcp_default_deny", "", "0"),
@@ -158,3 +160,28 @@ def test_unknown_table_with_a_policy_is_still_unclassified():
     objects["surprise_table"] = _table()
     policies.append(Policy("p", "surprise_table", "1"))
     assert _evaluate(objects, policies).unclassified == ["surprise_table"]
+
+
+@pytest.mark.parametrize("security", ["NONE", "DEFINER", "none"])
+def test_none_and_definer_views_are_errors(security):
+    objects, policies = _good()
+    objects["mutation_panel_gene_coverage"] = _table(
+        "View", f"CREATE VIEW cbio.x SQL SECURITY {security} AS SELECT 1"
+    )
+    errors = _evaluate(objects, policies).errors
+    assert any(f"SQL SECURITY {security.upper()}" in e for e in errors), errors
+
+
+def test_cataloged_view_without_explicit_invoker_is_an_error():
+    objects, policies = _good()
+    objects["mutation_panel_gene_coverage"] = _table("View", "CREATE VIEW cbio.x AS SELECT 1")
+    errors = _evaluate(objects, policies).errors
+    assert any("not explicitly SQL SECURITY INVOKER" in e for e in errors), errors
+
+
+def test_unclassified_none_view_is_an_error_too():
+    objects, policies = _good()
+    objects["sneaky"] = _table("View", "CREATE VIEW cbio.s SQL SECURITY NONE AS SELECT 1")
+    report = _evaluate(objects, policies)
+    assert any("sneaky" in e and "NONE" in e for e in report.errors)
+    assert "sneaky" in report.unclassified

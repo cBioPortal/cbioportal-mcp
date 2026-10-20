@@ -48,6 +48,11 @@ SETTING_OVERRIDES = [
     "SELECT 1 # comment\nSETTINGS SQL_cbiomcp_allowed_studies = '*'",
     "SELECT $$--$$ AS x FROM mutation SETTINGS SQL_cbiomcp_allowed_studies = '*'",
     "SELECT * FROM mutation /* SQL_cbiomcp_allowed_studies */",
+    # Computed names: no text check can see them, so the function is refused.
+    "SELECT getSetting(concat('SQL_', 'cbiomcp_allowed_studies'))",
+    "SELECT GETSETTING (concat('SQL_', 'cbio', 'mcp_allowed_studies'))",
+    "SELECT `getSetting`(reverse('seiduts_dewolla_pmcoibc_LQS'))",
+    "SELECT getSettingOrDefault(concat('SQL_', 'cbiomcp_x'), '')",
 ]
 
 
@@ -138,3 +143,11 @@ def test_lexer_follows_clickhouse_rules():
     # `#x` is not a comment in ClickHouse (it is a syntax error), so it stays code.
     assert [t.kind for t in _lex_sql("SELECT 1 #x")] == ["code"]
     assert _normalize_sql(r"SELECT 'a\'b', `x\x41`") == "SELECT 'a''b', xA"
+
+
+def test_getsetting_inside_a_string_literal_is_not_a_call(restricted):
+    guard_query_study_access(
+        "SELECT 'getSetting(' AS note, * FROM genomic_event_derived "
+        "WHERE cancer_study_identifier = 'study_alpha'",
+        restricted,
+    )

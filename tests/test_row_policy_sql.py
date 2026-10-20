@@ -229,3 +229,12 @@ def test_guard_markers_cover_catalog():
 )
 def test_guard_treats_downstream_tables_and_views_as_protected(query):
     assert references_protected_study_data(query)
+
+
+def test_every_cataloged_view_is_set_to_sql_security_invoker():
+    sql = _strip_comments(POLICY_SQL.read_text(encoding="utf-8"))
+    altered = re.findall(rf"ALTER TABLE {re.escape(DB)}\.(\w+) MODIFY SQL SECURITY (\w+);", sql)
+    assert sorted(altered) == sorted((v, "INVOKER") for v in STUDY_SCOPED_VIEWS)
+    # The ALTERs need the views, so they come after the policies (applied
+    # after sql/4, sql/5, sql/7) and nothing else is altered.
+    assert len(re.findall(r"\bALTER\b", sql)) == len(STUDY_SCOPED_VIEWS)

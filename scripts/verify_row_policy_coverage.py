@@ -15,8 +15,9 @@ against the classification in
 - every reference table and every view has a policy (``USING 1`` is expected:
   the default-deny matches views too, and a view's rows are filtered by its
   underlying tables' policies);
-- no view uses ``SQL SECURITY DEFINER`` (it would read as its definer and
-  bypass the underlying tables' policies);
+- no view uses ``SQL SECURITY DEFINER`` or ``NONE`` (both run without the
+  caller's row-policy context and so leak every study), and every cataloged
+  view is explicitly ``SQL SECURITY INVOKER``;
 - no materialized view or dictionary exists in the database: dictGet() reads
   a dictionary's source with the dictionary's own credentials, bypassing row
   policies, and a materialized view's target table needs its own decision;
@@ -168,6 +169,12 @@ def _policies_for_role(client, database: str, role: str) -> list[Policy]:
     ]
 
 
+def view_sql_security(create_query: str) -> str | None:
+    """The SQL SECURITY a view's stored definition declares, or None if absent."""
+    match = re.search(r"\bSQL\s+SECURITY\s+(\w+)", create_query, flags=re.I)
+    return match.group(1).upper() if match else None
+
+
 def _is_constant(select_filter: str, value: str) -> bool:
     return select_filter.strip().strip("()").strip() == value
 
@@ -227,10 +234,18 @@ def evaluate_coverage(
             continue
 
         if engine in VIEW_ENGINES:
-            if re.search(r"\bSQL\s+SECURITY\s+DEFINER\b", create_query, flags=re.I):
+            security = view_sql_security(create_query)
+            if security in {"DEFINER", "NONE"}:
                 report.errors.append(
-                    f"{name}: view uses SQL SECURITY DEFINER, so it reads as its definer and "
-                    "bypasses the underlying tables' row policies; recreate it as INVOKER"
+                    f"{name}: view uses SQL SECURITY {security}, so it runs without the "
+                    "caller's row policies and leaks every study; ALTER TABLE ... MODIFY "
+                    "SQL SECURITY INVOKER"
+                )
+            elif security != "INVOKER" and name in STUDY_SCOPED_VIEWS:
+                report.errors.append(
+                    f"{name}: view is not explicitly SQL SECURITY INVOKER (it then depends "
+                    "on the server default when it was created); re-apply "
+                    "sql/study-authz/0-row-policies.sql"
                 )
             # Classification first: an unknown view is reported even if someone
             # gave it a policy, since nobody has checked what it reads.
@@ -369,8 +384,8 @@ def main() -> None:
 
     print(
         "OK: default-deny present; every study-scoped table filters on the allowed-studies "
-        "setting; reference tables and views are explicitly readable; no DEFINER views, "
-        "materialized views or dictionaries."
+        "setting; reference tables and views are explicitly readable; every view is SQL "
+        "SECURITY INVOKER; no materialized views or dictionaries."
     )
 
 

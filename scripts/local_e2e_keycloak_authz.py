@@ -5,7 +5,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import importlib.util
 import json
+import subprocess
+import sys
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -19,6 +23,7 @@ from cbioportal_mcp.authentication.row_policy_catalog import (
     STUDY_SCOPED_VIEWS,
     classified_names,
 )
+from cbioportal_mcp.clickhouse_query_settings import RESTRICTED_ROLE_PROBES
 
 
 def _jsonish(value: Any) -> Any:
@@ -98,7 +103,7 @@ async def _call_with_token(
 # vice versa for bob; admin-user (all studies) must see both. Every table and
 # view in row_policy_catalog must exist in the fixture (checked below).
 _ALPHA, _BETA = "study_alpha", "study_beta"
-EXPECTED_STUDY_ROWS: dict[str, tuple[str, set, set]] = {
+EXPECTED_STUDY_ROWS: dict[str, tuple[str | tuple[str, ...], set, set]] = {
     "cancer_study": ("cancer_study_id", {1}, {2}),
     "cancer_study_tags": ("cancer_study_id", {1}, {2}),
     "cancer_study_query_preferences": ("cancer_study_identifier", {_ALPHA}, {_BETA}),
@@ -116,14 +121,24 @@ EXPECTED_STUDY_ROWS: dict[str, tuple[str, set, set]] = {
     "genetic_profile_samples": ("genetic_profile_id", {13}, {23}),
     "genetic_alteration": ("genetic_profile_id", {13}, {23}),
     "sample_profile": ("sample_id", {1, 2}, {3}),
-    # 103 / 203 are observed in both studies, so both users see them.
+    # Events 103 / 203 are observed in both studies: both users see the shared
+    # event row, but each sees only its own study's observation of it, so the
+    # observation tables are keyed by (event, genetic_profile_id, sample_id).
     "mutation_event": ("mutation_event_id", {101, 103}, {102, 103}),
-    "mutation": ("mutation_event_id", {101, 103}, {102, 103}),
+    "mutation": (
+        ("mutation_event_id", "genetic_profile_id", "sample_id"),
+        {(101, 11, 1), (103, 11, 2)},
+        {(102, 21, 3), (103, 21, 3)},
+    ),
     "mutation_count_by_keyword": ("genetic_profile_id", {11}, {21}),
     "alteration_driver_annotation": ("alteration_event_id", {101}, {102}),
     "allele_specific_copy_number": ("mutation_event_id", {101}, {102}),
     "cna_event": ("cna_event_id", {201, 203}, {202, 203}),
-    "sample_cna_event": ("cna_event_id", {201, 203}, {202, 203}),
+    "sample_cna_event": (
+        ("cna_event_id", "genetic_profile_id", "sample_id"),
+        {(201, 12, 1), (203, 12, 2)},
+        {(202, 22, 3), (203, 22, 3)},
+    ),
     "structural_variant": ("internal_id", {301}, {302}),
     "copy_number_seg": ("seg_id", {401}, {402}),
     "copy_number_seg_file": ("seg_file_id", {501}, {502}),
@@ -199,6 +214,44 @@ VIEW_CASES: dict[str, tuple[str, str]] = {
     "clinical_attribute_counts": ("study", "(study={study}, attribute='CANCER_TYPE')"),
 }
 _HIDDEN_BETA = "concat('study_', 'beta')"
+
+
+_COMPOSE_FILE = (
+    Path(__file__).resolve().parent.parent / "docker" / "local-e2e" / "docker-compose.yml"
+)
+
+
+def _clickhouse_admin(statement: str) -> None:
+    """Run DDL as the container's local default user (no network access)."""
+    subprocess.run(
+        ["docker", "compose", "-f", str(_COMPOSE_FILE), "exec", "-T", "clickhouse"]
+        + ["clickhouse-client", "-q", statement],
+        check=True,
+    )
+
+
+def _coverage_report(clickhouse_url: str):
+    """Run scripts/verify_row_policy_coverage.py's check as local_e2e_admin."""
+    import clickhouse_connect
+
+    script = Path(__file__).resolve().parent / "verify_row_policy_coverage.py"
+    spec = importlib.util.spec_from_file_location("verify_row_policy_coverage", script)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    url = httpx.URL(clickhouse_url)
+    client = clickhouse_connect.get_client(
+        host=url.host, port=url.port, username="local_e2e_admin", password="local_e2e_admin_pw"
+    )
+    try:
+        return module.check_coverage(
+            client,
+            "cbioportal_authz_e2e",
+            "cbioportal_mcp_study_restricted",
+            "SQL_cbiomcp_allowed_studies",
+        )
+    finally:
+        client.close()
 
 
 def _rows(result: Any, label: str) -> list[dict]:
@@ -290,11 +343,18 @@ async def run(keycloak_url: str, proxy_url: str, clickhouse_url: str) -> None:
     for table in sorted(STUDY_SCOPED_TABLES):
         key, alpha_keys, beta_keys = EXPECTED_STUDY_ROWS[table]
         query = f"SELECT * FROM {table}"
+
+        def row_key(row: dict, key=key) -> Any:
+            return tuple(row[k] for k in key) if isinstance(key, tuple) else row[key]
+
         seen = {
-            "alice": {row[key] for row in await select(alice_token, query, f"alice {table}")},
-            "bob": {row[key] for row in await select(bob_token, query, f"bob {table}")},
-            "admin": {row[key] for row in await select(admin_token, query, f"admin {table}")},
-            "carol": {row[key] for row in await select(carol_token, query, f"carol {table}")},
+            user: {row_key(row) for row in await select(token, query, f"{user} {table}")}
+            for user, token in (
+                ("alice", alice_token),
+                ("bob", bob_token),
+                ("admin", admin_token),
+                ("carol", carol_token),
+            )
         }
         assert seen["alice"] == alpha_keys, (table, "alice", seen)
         assert seen["bob"] == beta_keys, (table, "bob", seen)
@@ -404,7 +464,34 @@ async def run(keycloak_url: str, proxy_url: str, clickhouse_url: str) -> None:
         assert "SQL_cbiomcp_allowed_studies" in str(e), e  # absent setting fails closed
     else:
         raise AssertionError("a query without the allowlist setting returned rows")
+
+    # The minimal restricted role (SELECT ON <db>.* only) can't reach outside
+    # the row-policy boundary or read other requests' SQL / allowlists.
+    for name, probe in RESTRICTED_ROLE_PROBES.items():
+        try:
+            direct.query(probe, settings=request_settings)
+        except Exception:
+            continue
+        raise AssertionError(f"restricted role could run {name}: {probe}")
+
+    # A view switched to SQL SECURITY NONE runs without the caller's row
+    # policies and leaks every study through its USING 1 policy. Show the
+    # leak, check the coverage verifier flags it, then restore INVOKER.
+    view = "mutation_panel_gene_coverage"
+    leak_query = f"SELECT DISTINCT cancer_study_identifier AS s FROM {view} ORDER BY s"
+    _clickhouse_admin(f"ALTER TABLE cbioportal_authz_e2e.{view} MODIFY SQL SECURITY NONE")
+    try:
+        leaked = direct.query(leak_query, settings=request_settings).result_rows
+        assert leaked == [("study_alpha",), ("study_beta",)], leaked  # the leak is real
+        report = _coverage_report(clickhouse_url)
+        assert any(view in e and "SQL SECURITY NONE" in e for e in report.errors), report
+    finally:
+        _clickhouse_admin(f"ALTER TABLE cbioportal_authz_e2e.{view} MODIFY SQL SECURITY INVOKER")
+    restored = direct.query(leak_query, settings=request_settings).result_rows
+    assert restored == [("study_alpha",)], restored
+    assert _coverage_report(clickhouse_url).ok
     direct.close()
+    print("Restricted-role surface and SQL SECURITY NONE view checks passed.")
 
     # Concurrent callers with different allowlists never see each other's rows.
     async def keys(token: str) -> set:

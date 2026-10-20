@@ -450,6 +450,7 @@ _PLAIN_IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _HEREDOC_DELIMITER = re.compile(r"\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$")
 # Every internal setting the MCP sends to ClickHouse uses this prefix.
 INTERNAL_SETTING_PREFIX = "sql_cbiomcp_"
+_SETTING_FUNCTION_CALL = re.compile(r"\bgetsetting(?:ordefault)?\s*\(", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -653,21 +654,30 @@ def has_restricted_sql_bypass_shape(query: str) -> bool:
 
 
 def references_internal_setting(query: str, config: McpConfig) -> bool:
-    r"""True if the query mentions any internal SQL_cbiomcp_* setting, anywhere.
+    r"""True if the query names an internal SQL_cbiomcp_* setting or reads settings.
 
-    Deliberately blunt: checked against the raw text, the raw text with every
-    backslash escape decoded, and every decoded string literal and quoted
-    identifier - so a SETTINGS clause, a SET, getSetting('...') or an escaped
-    `\x53QL_cbiomcp_...` identifier are all caught regardless of comments or
-    quoting. Legitimate SQL never needs these names.
+    Deliberately blunt: the setting names are checked against the raw text,
+    the raw text with every backslash escape decoded, and every decoded string
+    literal and quoted identifier - so a SETTINGS clause, a SET or an escaped
+    `\x53QL_cbiomcp_...` identifier are caught regardless of comments or
+    quoting. A name computed at runtime can't be seen as text, so any
+    getSetting()/getSettingOrDefault() call is refused as well. Legitimate SQL
+    needs neither. (ClickHouse itself also rejects in-query SETTINGS changes:
+    the server sends readonly=1, see clickhouse_query_settings.)
     """
     names = {INTERNAL_SETTING_PREFIX, _clickhouse_study_setting_name(config).lower()}
     candidates = [query, _unescape_everywhere(query)]
     try:
         candidates.extend(token.value for token in _lex_sql(query) if token.value)
+        normalized = _normalize_sql(query)
     except AuthorizationError:
-        pass  # unterminated input is rejected separately by the guard
-    return any(name in candidate.lower() for candidate in candidates for name in names)
+        normalized = query  # unterminated input is rejected separately by the guard
+    if any(name in candidate.lower() for candidate in candidates for name in names):
+        return True
+    # getSetting() can build the name at runtime (concat('SQL_', ...)), which
+    # no text check can see, so the function itself is refused. It could only
+    # read the caller's own allowlist, but legitimate SQL never needs it.
+    return _SETTING_FUNCTION_CALL.search(_strip_sql_literals(normalized)) is not None
 
 
 def guard_query_study_access(query: str, config: McpConfig | None = None) -> None:

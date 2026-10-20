@@ -77,9 +77,11 @@ When you add a table or view to any file in this directory, classify it in
 `src/cbioportal_mcp/authentication/row_policy_catalog.py` and give it a policy
 in `study-authz/0-row-policies.sql` (`tests/test_row_policy_sql.py` fails
 otherwise) - with the database-wide default-deny, a table or view without one
-returns no rows to restricted users. Create views without
-`SQL SECURITY DEFINER`, so they keep running as the invoker and the underlying
-tables' policies still apply.
+returns no rows to restricted users. Add every new view to the
+`ALTER TABLE ... MODIFY SQL SECURITY INVOKER` list in that file too: a
+`DEFINER` or `NONE` view runs without the caller's row policies. Because the
+files here drop and re-create their views, re-apply
+`study-authz/0-row-policies.sql` after them every time (apply_sql.sh does).
 
 After applying schema changes on a row-policy deployment, also run
 `scripts/verify_row_policy_coverage.py` - it checks the live database for

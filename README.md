@@ -169,10 +169,12 @@ through `genetic_profile` (`mutation`, `genetic_alteration`,
 allowed study). The classification is in
 [`row_policy_catalog.py`](src/cbioportal_mcp/authentication/row_policy_catalog.py).
 Views (`sql/4`-`sql/7`, including parameterized views) get a `USING 1`
-pass-through policy and inherit filtering from their underlying tables,
-because they run as the invoker; a `SQL SECURITY DEFINER` view, a
-materialized view or a dictionary would bypass that, and the coverage check
-below rejects them.
+pass-through policy and inherit filtering from their underlying tables
+because the policy file sets each to `SQL SECURITY INVOKER` explicitly. A
+`DEFINER` or `NONE` view, a materialized view or a dictionary would bypass
+the caller's row policies; the coverage check below and the server's startup
+check reject them. Since `sql/4`-`sql/7` drop and re-create their views, apply
+the policy file after them every time they run.
 This is the recommended defense-in-depth mode for restricted deployments; the
 app-level guard still rejects explicit requests for denied study IDs and
 rejects any query mentioning an internal `SQL_cbiomcp_*` setting (tokenized,
@@ -184,7 +186,14 @@ the runtime user's settings profile leaves `readonly` at its default (0) and
 does not mark the setting `CHANGEABLE_IN_READONLY`; at startup the server
 checks both directions (`verify_allowlist_lockdown`) and refuses to start
 otherwise. Profiles with `readonly=1` or `readonly=2` are therefore
-unsupported for row-policy mode. Running restricted
+unsupported for row-policy mode. The same startup check refuses to run if
+any view in the database is not explicitly `SQL SECURITY INVOKER`, or if the
+runtime role can use `url()`, `remote()`, `clusterAllReplicas()`, `file()`,
+`dictionary()` or read `system.query_log` / `system.processes` /
+`system.dictionaries` / `system.row_policies` (other requests' SQL carries
+their allowlists): grant the runtime role only `SELECT ON <db>.*` and keep the
+server's `select_from_system_db_requires_grant` enabled (verified denied with
+that grant on ClickHouse 25.8). Running restricted
 mode without it logs a startup warning: the app-level guard is a heuristic
 pattern check on arbitrary SELECT queries, not a real SQL parser, so it's the
 weaker of the two supported modes.

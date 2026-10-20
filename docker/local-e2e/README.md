@@ -90,7 +90,13 @@ It fails unless the fixture contains every table and view in
   the guard, and - connecting to ClickHouse directly as `mcp_authz` with
   `readonly=1` - by ClickHouse itself; an empty allowlist returns no rows and
   an absent one fails;
-- concurrent alice/bob requests never see each other's rows.
+- concurrent alice/bob requests never see each other's rows;
+- the restricted role can't use `url()` / `remote()` / `clusterAllReplicas()`
+  / `file()` / `dictionary()` or read `system.query_log` / `system.processes`
+  / `system.dictionaries` / `system.row_policies`;
+- switching a view to `SQL SECURITY NONE` really leaks beta rows to alice, and
+  `verify_row_policy_coverage.py` flags it (the view is restored to INVOKER
+  afterwards).
 
 Expected output:
 

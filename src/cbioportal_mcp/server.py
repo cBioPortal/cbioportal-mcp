@@ -48,6 +48,7 @@ from cbioportal_mcp.clickhouse_query_settings import (  # noqa: E402 - imported 
     AllowlistLockdownError,
     run_query_with_settings,
     verify_allowlist_lockdown,
+    verify_restricted_surface,
 )
 from cbioportal_mcp.telemetry import (
     TelemetryMiddleware,
@@ -269,8 +270,10 @@ def main():
     if config.clickhouse_row_policy_enabled:
         try:
             verify_allowlist_lockdown(config.clickhouse_allowed_studies_setting)
+            verify_restricted_surface(config.clickhouse_allowed_studies_setting)
             logger.info(
-                "✅ ClickHouse accepts the per-request %s and rejects in-query overrides",
+                "✅ ClickHouse accepts the per-request %s, rejects in-query overrides, all "
+                "views are SQL SECURITY INVOKER and the runtime role is SELECT-only",
                 config.clickhouse_allowed_studies_setting,
             )
         except AllowlistLockdownError as e:
