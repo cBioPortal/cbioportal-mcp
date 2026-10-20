@@ -18,7 +18,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Route
 
-UPSTREAM_MCP_URL = os.getenv("LOCAL_AUTH_PROXY_UPSTREAM_MCP_URL", "http://127.0.0.1:8000/mcp/")
+UPSTREAM_MCP_URL = os.getenv("LOCAL_AUTH_PROXY_UPSTREAM_MCP_URL", "http://127.0.0.1:8000/mcp")
 KEYCLOAK_USERINFO_URL = os.getenv(
     "LOCAL_AUTH_PROXY_KEYCLOAK_USERINFO_URL",
     "http://127.0.0.1:8080/realms/cbioportal-mcp-local/protocol/openid-connect/userinfo",

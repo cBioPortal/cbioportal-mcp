@@ -6,12 +6,19 @@ services:
       - "9000:9000"
     volumes:
       - ./clickhouse-init.sql:/docker-entrypoint-initdb.d/00-init.sql:ro
+      # Applies the repo's real sql/*.sql and sql/study-authz/*.sql on top of
+      # the fixture (see the script).
+      - ./init-apply-repo-sql.sh:/docker-entrypoint-initdb.d/10-apply-repo-sql.sh:ro
+      - ../../sql:/cbioportal-sql:ro
       - ./clickhouse-config.xml:/etc/clickhouse-server/config.d/cbioportal-mcp-custom-settings.xml:ro
     healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:8123/ping"]
+      # During init the entrypoint's temporary server listens on 127.0.0.1
+      # only; pinging the container's own address passes once init (incl.
+      # sql/2's ~900 mutations) is done and the real server is up.
+      test: ["CMD-SHELL", "wget --spider -q http://$$(hostname -i | cut -d' ' -f1):8123/ping"]
       interval: 5s
       timeout: 3s
-      retries: 30
+      retries: 60
 
   keycloak:
     image: quay.io/keycloak/keycloak:26.0
@@ -74,7 +81,7 @@ services:
     environment:
       LOCAL_AUTH_PROXY_BIND_HOST: 0.0.0.0
       LOCAL_AUTH_PROXY_BIND_PORT: "8001"
-      LOCAL_AUTH_PROXY_UPSTREAM_MCP_URL: http://mcp:8000/mcp/
+      LOCAL_AUTH_PROXY_UPSTREAM_MCP_URL: http://mcp:8000/mcp
       LOCAL_AUTH_PROXY_KEYCLOAK_INTROSPECTION_URL: http://host.docker.internal:18080/realms/cbioportal-mcp-local/protocol/openid-connect/token/introspect
       LOCAL_AUTH_PROXY_KEYCLOAK_HOST_HEADER: 127.0.0.1:18080
       LOCAL_AUTH_PROXY_KEYCLOAK_CLIENT_ID: mcp-local-proxy

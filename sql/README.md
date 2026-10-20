@@ -45,11 +45,45 @@ Requires the `clickhouse-client` binary on `PATH`. The script uses dedicated
 MCP server's `CLICKHOUSE_USER` / `CLICKHOUSE_PASSWORD`, so the SELECT-only
 runtime user never sees DDL credentials.
 
-If this deployment has row-level study authorization enabled
-(`CBIOPORTAL_MCP_CLICKHOUSE_ROW_POLICY_ENABLED=true`, see the root
-[README](../README.md#study-level-access-control)), also run
-`scripts/verify_row_policy_coverage.py` after applying schema changes - it
-checks the live database for tables with no row policy, using the same
+## Study-level row policies (opt-in)
+
+`sql/study-authz/0-row-policies.sql` holds the ClickHouse row policies for
+restricted deployments (`CBIOPORTAL_MCP_STUDY_ACCESS_MODE=restricted` with
+`CBIOPORTAL_MCP_CLICKHOUSE_ROW_POLICY_ENABLED=true`, see the root
+[README](../README.md#study-level-access-control)). It is **not** part of the
+default run: public deployments don't need it, and it needs an admin allowed
+to `CREATE ROLE` / `CREATE ROW POLICY`. Apply it with:
+
+```bash
+APPLY_STUDY_AUTHZ_SQL=true ./scripts/apply_sql.sh
+```
+
+or, from a clone job, render and run it after the portable files:
+
+```bash
+sed "s/__CLICKHOUSE_DATABASE__/$CLICKHOUSE_DATABASE/g" sql/study-authz/0-row-policies.sql \
+  | clickhouse-client --database "$CLICKHOUSE_DATABASE" --multiquery
+```
+
+Every table in it is qualified with `__CLICKHOUSE_DATABASE__` because an
+unqualified table name inside a row policy's subquery is resolved against the
+*querying session's* current database, not the policy's. The file creates the
+`cbioportal_mcp_study_restricted` role, grants it `SELECT ON <db>.*`, and
+installs a database-wide default-deny plus one policy per table. Policies are
+keyed by table name, so they survive the `DROP`/`CREATE` and `EXCHANGE TABLES`
+the files above do; re-applying is idempotent (`CREATE ROW POLICY OR REPLACE`).
+
+When you add a table or view to any file in this directory, classify it in
+`src/cbioportal_mcp/authentication/row_policy_catalog.py` and give it a policy
+in `study-authz/0-row-policies.sql` (`tests/test_row_policy_sql.py` fails
+otherwise) - with the database-wide default-deny, a table or view without one
+returns no rows to restricted users. Create views without
+`SQL SECURITY DEFINER`, so they keep running as the invoker and the underlying
+tables' policies still apply.
+
+After applying schema changes on a row-policy deployment, also run
+`scripts/verify_row_policy_coverage.py` - it checks the live database for
+missing, unfiltered or fully-denied coverage, using the same
 `CLICKHOUSE_ADMIN_USER` split (the runtime SELECT-only user deliberately
 can't read `system.row_policies`, since that table isn't scoped to the
 querying user's own access and would leak other databases' policy metadata

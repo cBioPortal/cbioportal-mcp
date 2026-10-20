@@ -19,6 +19,14 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterable
 
+from cbioportal_mcp.authentication.row_policy_catalog import (
+    DENIED_TABLES,
+    STUDY_SCOPED_TABLES,
+    STUDY_SCOPED_VIEWS,
+)
+from cbioportal_mcp.authentication.row_policy_catalog import (
+    STUDY_AGNOSTIC_REFERENCE_TABLES as _CATALOG_REFERENCE_TABLES,
+)
 from cbioportal_mcp.env import McpConfig, StudyAccessMode, get_mcp_config
 
 logger = logging.getLogger(__name__)
@@ -46,49 +54,35 @@ GROUP_HEADER_CANDIDATES = (
     "x-keycloak-groups",
 )
 
-PROTECTED_QUERY_MARKERS = (
-    "cancer_study",
-    "cancer_study_query_preferences",
-    "clinical_attribute_meta",
+# Names whose presence makes a query "study-scoped" for the app-level guard.
+# Matched as whole words (``\bname\b``), so every table and view is listed by
+# its full name - a prefix such as "gene_mutation_frequency" would not match
+# "gene_mutation_frequency_in_study". The explicit tuple keeps the original
+# hand-written entries; the catalog adds every study-scoped table, view and denied table that
+# sql/study-authz/0-row-policies.sql knows about (structural_variant,
+# sample_cna_event, clinical_event_derived, ...).
+_LEGACY_PROTECTED_QUERY_MARKERS = (
     "clinical_data",
-    "clinical_data_derived",
-    "clinical_event",
-    "clinical_event_data",
-    "clinical_patient",
-    "clinical_sample",
-    "genetic_alteration",
-    "genetic_alteration_derived",
-    "genetic_profile",
-    "genomic_event_derived",
     "gene_mutation_frequency",
     "gene_panel",
     "gene_panel_list",
     "top_mutated_genes",
-    "sample",
-    "sample_to_gene_panel_derived",
-    "patient",
-    "mutation",
-    "resource_definition",
-    "resource_sample",
-    "resource_patient",
-    "resource_study",
+)
+PROTECTED_QUERY_MARKERS = tuple(
+    sorted(
+        set(_LEGACY_PROTECTED_QUERY_MARKERS)
+        | set(STUDY_SCOPED_TABLES)
+        | STUDY_SCOPED_VIEWS
+        | DENIED_TABLES
+    )
 )
 
 # Tables known to carry no study-scoped data - reference/lookup data that is
-# the same across every study (genes, OncoTree, etc). Anything NOT in this
-# allowlist and NOT in PROTECTED_QUERY_MARKERS is neither known-safe nor
-# known-restricted; see test_clickhouse_init_sql_coverage.py, which fails CI
-# if the local e2e mock schema ever drifts from this pair of lists.
-STUDY_AGNOSTIC_REFERENCE_TABLES = frozenset(
-    {
-        "gene",
-        "gene_alias",
-        "oncotree",
-        "type_of_cancer",
-        "reference_genome",
-        "reference_genome_gene",
-    }
-)
+# the same across every study (genes, OncoTree, etc). Defined in
+# row_policy_catalog; re-exported here because tests and scripts import it
+# from this module. Anything in neither list is unclassified; see
+# tests/test_row_policy_sql.py, which fails CI on drift.
+STUDY_AGNOSTIC_REFERENCE_TABLES = _CATALOG_REFERENCE_TABLES
 
 
 class AuthorizationError(PermissionError):

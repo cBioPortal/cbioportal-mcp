@@ -1284,7 +1284,7 @@ def _filter_studies(search: str | None, limit: int, verbose: bool) -> list[dict]
     access = resolve_current_study_access()
     rows = [dict(row) for row in _all_studies_query()]
     if not access.all_studies:
-        rows = [row for row in rows if access.allows(row.get("cancer_study_identifier", ""))]
+        rows = [row for row in rows if access.allows(str(row.get("cancer_study_identifier", "")))]
 
     if search:
         # Every word must appear somewhere ("TARGET neuroblastoma" matches "Pediatric
