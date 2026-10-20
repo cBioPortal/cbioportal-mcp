@@ -251,8 +251,10 @@ def probe_outcomes(setting_name: str) -> dict[str, str]:
         try:
             run_query_with_settings(query, {setting_name: ""})
         except Exception as e:
+            # Classify the exception itself (a structured .code wins over its
+            # text); the message is only for the diagnostic below.
             message = str(e)
-            if is_access_denied(message):
+            if is_access_denied(e):
                 outcomes[name] = "denied"
             else:
                 first_line = next((line for line in message.splitlines() if line.strip()), "")

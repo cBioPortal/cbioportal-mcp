@@ -459,3 +459,77 @@ def test_extra_grants_with_quoted_principal_are_still_rejected(grant):
     with _surface([], grants=("GRANT SELECT ON cbio.* TO `mcp reader`", grant)):
         with pytest.raises(cqs.AllowlistLockdownError, match="grants beyond"):
             cqs.verify_restricted_surface(SETTING)
+
+
+class _CodedError(Exception):
+    """An exception carrying a structured ClickHouse error code."""
+
+    def __init__(self, message, code):
+        super().__init__(message)
+        self.code = code
+
+
+def _probe_outcomes_with(error):
+    """Run the real probe_outcomes() with every probe raising ``error``."""
+
+    def fake_run(query, settings):
+        raise error
+
+    with patch.object(cqs, "run_query_with_settings", fake_run):
+        return cqs.probe_outcomes(SETTING)
+
+
+@pytest.mark.parametrize(
+    ("error", "denied"),
+    [
+        # Structured code 62 wins over a description that looks like a 497.
+        (_CodedError("Code: 497. nested-looking description", 62), False),
+        (_CodedError("whatever the text says", 497), True),
+        (RuntimeError(DENIED), True),
+        (RuntimeError("Code: 62. Syntax error, ACCESS_DENIED"), False),
+        (RuntimeError("Connection refused"), False),
+    ],
+)
+def test_probe_outcomes_classify_the_exception_not_its_text(error, denied):
+    outcomes = _probe_outcomes_with(error)
+    assert set(outcomes) == set(cqs.RESTRICTED_ROLE_PROBES)
+    for outcome in outcomes.values():
+        if denied:
+            assert outcome == "denied"
+        else:
+            assert outcome.startswith("inconclusive: ")
+
+
+def test_structured_non_497_probe_error_fails_the_surface_check():
+    error = _CodedError("Code: 497. nested-looking description", 62)
+
+    def fake_run(query, settings):
+        if query in cqs.RESTRICTED_ROLE_PROBES.values():
+            raise error
+        return _fake_surface([])(query, settings)
+
+    with patch.object(cqs, "run_query_with_settings", fake_run):
+        with pytest.raises(cqs.AllowlistLockdownError, match="could not confirm"):
+            cqs.verify_restricted_surface(SETTING)
+
+
+@pytest.mark.parametrize(
+    ("error", "locked_down"),
+    [
+        (_CodedError("Code: 164. Cannot modify setting in readonly mode", 62), False),
+        (_CodedError("anything", 164), True),
+        (RuntimeError("Code: 164. DB::Exception: Cannot modify setting in readonly mode"), True),
+    ],
+)
+def test_readonly_lockdown_probe_classifies_the_exception(error, locked_down):
+    def fake_run(query, settings):
+        if "getSetting" in query:
+            return {"columns": ["v"], "rows": [["__cbiomcp_lockdown_probe__"]]}
+        raise error
+
+    with patch.object(cqs, "run_query_with_settings", fake_run):
+        if locked_down:
+            cqs.verify_allowlist_lockdown(SETTING)
+        else:
+            with pytest.raises(cqs.AllowlistLockdownError):
+                cqs.verify_allowlist_lockdown(SETTING)
