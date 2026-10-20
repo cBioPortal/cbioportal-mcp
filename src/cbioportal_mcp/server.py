@@ -46,7 +46,9 @@ from cbioportal_mcp.authentication.study_access import (  # noqa: E402 - importe
 from cbioportal_mcp.auth import _build_auth_provider
 from cbioportal_mcp.clickhouse_query_settings import (  # noqa: E402 - imported after LLMObs setup, like the rest
     AllowlistLockdownError,
+    current_surface_problem,
     run_query_with_settings,
+    start_surface_monitor,
     verify_allowlist_lockdown,
     verify_restricted_surface,
 )
@@ -279,6 +281,9 @@ def main():
         except AllowlistLockdownError as e:
             logger.critical("❌ ClickHouse study allowlist is not locked down: %s", e)
             sys.exit(2)
+        start_surface_monitor(
+            config.clickhouse_allowed_studies_setting, config.row_policy_recheck_seconds
+        )
 
     # Warm the list_studies cache immediately, without blocking server
     # startup on the ClickHouse round trip, then keep it proactively
@@ -614,12 +619,20 @@ def _run_select_query_with_clickhouse_settings(query: str, *, all_studies: bool 
 
     Goes through mcp-clickhouse's pooled, timeout-cancelling run_query (see
     clickhouse_query_settings), with readonly=1 forced so the query itself
-    can't change the setting. ``all_studies`` sends the unrestricted ``*``
+    can't change the setting. Refused while the periodic safety re-check is
+    failing (a non-INVOKER view or an extra grant appeared after startup).
+    ``all_studies`` sends the unrestricted ``*``
     allowlist instead of the current request's. Only for server-internal
     queries whose results are filtered per request in Python afterwards (the
     shared list_studies snapshot), which run on a background thread with no
     request identity.
     """
+    problem = current_surface_problem()
+    if problem:
+        raise RuntimeError(
+            "Study-data queries are disabled until the ClickHouse row-policy safety check "
+            f"passes again: {problem}"
+        )
     return run_query_with_settings(query, clickhouse_study_access_settings(all_studies=all_studies))
 
 

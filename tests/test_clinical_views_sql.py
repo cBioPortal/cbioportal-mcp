@@ -7,7 +7,7 @@ RESOURCES = ROOT / "src" / "cbioportal_mcp" / "resources"
 
 
 def _created_views():
-    return re.findall(r"^CREATE VIEW (\w+) AS", SQL, flags=re.MULTILINE)
+    return re.findall(r"^CREATE VIEW (\w+) (?:SQL SECURITY INVOKER )?AS", SQL, flags=re.MULTILINE)
 
 
 def test_every_view_is_dropped_before_create():

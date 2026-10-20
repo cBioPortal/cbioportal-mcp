@@ -86,6 +86,7 @@ from cbioportal_mcp.authentication.row_policy_catalog import (
     STUDY_SCOPED_TABLES,
     STUDY_SCOPED_VIEWS,
 )
+from cbioportal_mcp.authentication.study_access import view_sql_security
 
 VIEW_ENGINES = {"View"}
 BYPASS_ENGINES = {"MaterializedView", "Dictionary", "LiveView", "WindowView"}
@@ -167,12 +168,6 @@ def _policies_for_role(client, database: str, role: str) -> list[Policy]:
         Policy(name=row[0], table=row[1], select_filter=row[2] or "", is_restrictive=bool(row[3]))
         for row in result.result_rows
     ]
-
-
-def view_sql_security(create_query: str) -> str | None:
-    """The SQL SECURITY a view's stored definition declares, or None if absent."""
-    match = re.search(r"\bSQL\s+SECURITY\s+(\w+)", create_query, flags=re.I)
-    return match.group(1).upper() if match else None
 
 
 def _is_constant(select_filter: str, value: str) -> bool:

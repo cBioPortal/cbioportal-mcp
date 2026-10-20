@@ -143,36 +143,152 @@ def test_verify_allowlist_lockdown(probe_rows, override_error, ok):
                 cqs.verify_allowlist_lockdown(SETTING)
 
 
-def _fake_surface(view_rows, allowed_probes=()):
+DENIED = "Query execution failed: HTTPDriver received ClickHouse error code 497"
+
+
+def _fake_surface(objects, grants=("GRANT SELECT ON cbio.* TO mcp",), probe_errors=None):
+    """objects: [(name, engine, create_query)]; probe_errors: {probe: error or None}."""
+    probe_errors = probe_errors or {}
+
     def fake_run(query, settings):
         if "FROM system.tables" in query:
-            return {"columns": ["name", "security"], "rows": view_rows}
+            return {"columns": ["name", "engine", "q"], "rows": [list(o) for o in objects]}
+        if query == "SELECT currentDatabase()":
+            return {"columns": ["db"], "rows": [["cbio"]]}
+        if query == "SHOW GRANTS FINAL":
+            return {"columns": ["g"], "rows": [[g] for g in grants]}
         for name, probe in cqs.RESTRICTED_ROLE_PROBES.items():
             if query == probe:
-                if name in allowed_probes:
+                error = probe_errors.get(name, DENIED)
+                if error is None:
                     return {"columns": [], "rows": []}
-                raise RuntimeError("Code: 497. Not enough privileges")
+                raise RuntimeError(error)
         raise AssertionError(query)
 
     return fake_run
 
 
+def _surface(*args, **kwargs):
+    return patch.object(cqs, "run_query_with_settings", _fake_surface(*args, **kwargs))
+
+
+INVOKER_VIEW = ("v", "View", "CREATE VIEW cbio.v SQL SECURITY INVOKER AS SELECT 1")
+
+
 def test_restricted_surface_ok_for_invoker_views_and_select_only_role():
-    with patch.object(cqs, "run_query_with_settings", _fake_surface([["v", "INVOKER"]])):
+    with _surface([INVOKER_VIEW]):
         cqs.verify_restricted_surface(SETTING)
 
 
-@pytest.mark.parametrize("security", ["NONE", "DEFINER", ""])
-def test_restricted_surface_refuses_non_invoker_views(security):
-    rows = [["good", "INVOKER"], ["bad", security]]
-    with patch.object(cqs, "run_query_with_settings", _fake_surface(rows)):
+@pytest.mark.parametrize(
+    "create_query",
+    [
+        "CREATE VIEW cbio.bad SQL SECURITY NONE AS SELECT 1",
+        "CREATE VIEW cbio.bad DEFINER = admin SQL SECURITY DEFINER AS SELECT 1",
+        "CREATE VIEW cbio.bad AS SELECT 1",
+        # The reviewer's repro: a quoted column named like the clause.
+        "CREATE VIEW cbio.bad (`SQL SECURITY INVOKER` String) SQL SECURITY NONE AS SELECT 1",
+        "CREATE VIEW cbio.bad (x String COMMENT 'SQL SECURITY INVOKER') SQL SECURITY NONE "
+        "AS SELECT 'SQL SECURITY INVOKER'",
+        "CREATE VIEW cbio.bad (`SQL SECURITY INVOKER` String) AS SELECT 1",
+    ],
+)
+def test_restricted_surface_refuses_non_invoker_views(create_query):
+    with _surface([INVOKER_VIEW, ("bad", "View", create_query)]):
         with pytest.raises(cqs.AllowlistLockdownError, match="bad"):
             cqs.verify_restricted_surface(SETTING)
 
 
-@pytest.mark.parametrize("probe", ["system.query_log", "remote()", "url()"])
-def test_restricted_surface_refuses_overprivileged_role(probe):
-    fake = _fake_surface([], allowed_probes={probe})
-    with patch.object(cqs, "run_query_with_settings", fake):
-        with pytest.raises(cqs.AllowlistLockdownError, match=re.escape(probe)):
+@pytest.mark.parametrize("engine", ["MaterializedView", "Dictionary"])
+def test_restricted_surface_refuses_materialized_views_and_dictionaries(engine):
+    with _surface([("thing", engine, "")]):
+        with pytest.raises(cqs.AllowlistLockdownError, match=f"thing \\({engine}\\)"):
             cqs.verify_restricted_surface(SETTING)
+
+
+@pytest.mark.parametrize(
+    "grant",
+    [
+        "GRANT REMOTE ON *.* TO mcp",
+        "GRANT SELECT ON system.query_log TO mcp",
+        "GRANT SELECT ON other_db.* TO mcp",
+        "GRANT SELECT ON cbio.* TO mcp WITH GRANT OPTION",
+        "GRANT dictGet ON *.* TO mcp",
+    ],
+)
+def test_restricted_surface_refuses_extra_grants(grant):
+    with _surface([], grants=("GRANT SELECT ON cbio.* TO mcp", grant)):
+        with pytest.raises(cqs.AllowlistLockdownError, match=re.escape(grant)):
+            cqs.verify_restricted_surface(SETTING)
+
+
+@pytest.mark.parametrize("probe", ["system.processes", "remote()", "url()"])
+def test_restricted_surface_refuses_allowed_probe(probe):
+    with _surface([], probe_errors={probe: None}):
+        with pytest.raises(cqs.AllowlistLockdownError, match=re.escape(f"can use {probe}")):
+            cqs.verify_restricted_surface(SETTING)
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        "Code: 701. DB::Exception: Requested cluster 'default' not found",
+        "Code: 210. Connection refused",
+        "Code: 62. Syntax error",
+        "Code: 60. Unknown table expression identifier 'system.processes'",
+    ],
+)
+def test_any_error_other_than_497_is_inconclusive(error):
+    with _surface([], probe_errors={"system.processes": error}):
+        with pytest.raises(cqs.AllowlistLockdownError, match="could not confirm system.processes"):
+            cqs.verify_restricted_surface(SETTING)
+
+
+def test_unreadable_grants_are_inconclusive():
+    def fake(query, settings):
+        if query == "SHOW GRANTS FINAL":
+            raise RuntimeError("Code: 62. Syntax error")
+        return _fake_surface([])(query, settings)
+
+    with patch.object(cqs, "run_query_with_settings", fake):
+        with pytest.raises(cqs.AllowlistLockdownError, match="effective grants"):
+            cqs.verify_restricted_surface(SETTING)
+
+
+def test_failed_recheck_disables_row_policy_queries_until_fixed(monkeypatch):
+    from cbioportal_mcp import server
+
+    monkeypatch.setenv("CBIOPORTAL_MCP_CLICKHOUSE_ROW_POLICY_ENABLED", "true")
+    monkeypatch.setattr(server, "run_query_with_settings", lambda q, s: {"columns": [], "rows": []})
+    monkeypatch.setattr(server, "clickhouse_study_access_settings", lambda **kw: {SETTING: "*"})
+
+    bad = [("v", "View", "CREATE VIEW cbio.v SQL SECURITY NONE AS SELECT 1")]
+    with _surface(bad):
+        cqs.recheck_surface(SETTING)
+    assert "v (SQL SECURITY NONE)" in cqs.current_surface_problem()
+    with pytest.raises(RuntimeError, match="disabled until"):
+        server._run_select_query_with_clickhouse_settings("SELECT 1")
+
+    with _surface([INVOKER_VIEW]):
+        cqs.recheck_surface(SETTING)
+    assert cqs.current_surface_problem() is None
+    assert server._run_select_query_with_clickhouse_settings("SELECT 1") == {
+        "columns": [],
+        "rows": [],
+    }
+
+
+def test_recheck_that_cannot_run_fails_closed():
+    def boom(query, settings):
+        raise RuntimeError("Code: 210. Connection refused")
+
+    with patch.object(cqs, "run_query_with_settings", boom):
+        cqs.recheck_surface(SETTING)
+    assert "re-check could not run" in cqs.current_surface_problem()
+    with _surface([INVOKER_VIEW]):
+        cqs.recheck_surface(SETTING)
+    assert cqs.current_surface_problem() is None
+
+
+def test_surface_monitor_disabled_with_zero_interval():
+    assert cqs.start_surface_monitor(SETTING, 0) is None

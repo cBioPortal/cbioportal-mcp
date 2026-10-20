@@ -15,6 +15,7 @@ from cbioportal_mcp.authentication.study_access import (
     _normalize_sql,
     guard_query_study_access,
     references_protected_study_data,
+    view_sql_security,
 )
 from cbioportal_mcp.env import McpConfig
 
@@ -151,3 +152,31 @@ def test_getsetting_inside_a_string_literal_is_not_a_call(restricted):
         "WHERE cancer_study_identifier = 'study_alpha'",
         restricted,
     )
+
+
+@pytest.mark.parametrize(
+    ("create_query", "expected"),
+    [
+        ("CREATE VIEW db.v SQL SECURITY INVOKER AS SELECT 1", "INVOKER"),
+        (
+            "CREATE VIEW db.v (`SQL SECURITY INVOKER` String) SQL SECURITY NONE AS SELECT 1",
+            "NONE",
+        ),
+        (
+            "CREATE VIEW db.v (x String COMMENT 'SQL SECURITY INVOKER') SQL SECURITY NONE "
+            "AS SELECT 'SQL SECURITY INVOKER'",
+            "NONE",
+        ),
+        ("CREATE VIEW db.v (`SQL SECURITY INVOKER` String) AS SELECT 1", None),
+        (
+            "CREATE VIEW db.v (x Nullable(String)) DEFINER = `a b` "
+            "SQL SECURITY DEFINER AS SELECT 1",
+            "DEFINER",
+        ),
+        ("CREATE VIEW db.v SQL SECURITY INVOKER AS SELECT 1 AS `SQL SECURITY NONE`", "INVOKER"),
+        ("CREATE VIEW db.v AS SELECT x FROM t WHERE y = 'SQL SECURITY INVOKER'", None),
+        ("CREATE VIEW db.v AS SELECT 'unterminated", "UNPARSEABLE"),
+    ],
+)
+def test_view_sql_security_reads_only_the_header(create_query, expected):
+    assert view_sql_security(create_query) == expected

@@ -63,6 +63,8 @@ services:
       CBIOPORTAL_MCP_STUDY_ACL_FILE: /app/docker/local-e2e/study-acl.json
       CBIOPORTAL_MCP_AUTH_PROXY_SECRET: local-proxy-secret
       CBIOPORTAL_MCP_CLICKHOUSE_ROW_POLICY_ENABLED: "true"
+      # Short so the e2e can watch the periodic safety re-check react.
+      CBIOPORTAL_MCP_ROW_POLICY_RECHECK_SECONDS: "3"
     ports:
       - "8000:8000"
 

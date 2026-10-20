@@ -737,10 +737,12 @@ CREATE ROW POLICY OR REPLACE cbioportal_mcp_reference_type_of_cancer ON __CLICKH
 -- definer, and a NONE view runs without the caller's row-policy context, so
 -- either would leak every study through its USING 1 policy (NONE verified on
 -- 25.8). A view with no SQL SECURITY clause depends on the server default at
--- creation time, so every view is set to INVOKER explicitly below. These
--- ALTERs need the views to exist (ClickHouse has no ALTER ... IF EXISTS):
--- apply this file after sql/4, sql/5 and sql/7, and again whenever they are
--- re-applied, since they DROP and re-CREATE the views.
+-- creation time, so sql/4, sql/5 and sql/7 declare SQL SECURITY INVOKER in
+-- every CREATE VIEW (the daily job's DROP + CREATE keeps them INVOKER even
+-- before this file is re-applied, whatever the profile's
+-- default_normal_view_sql_security), and the ALTERs below migrate views
+-- created before that. The ALTERs need the views to exist (ClickHouse has no
+-- ALTER ... IF EXISTS): apply this file after sql/4, sql/5 and sql/7.
 -- scripts/verify_row_policy_coverage.py and the server's startup check
 -- (CBIOPORTAL_MCP_CLICKHOUSE_ROW_POLICY_ENABLED=true) refuse any view that is
 -- not explicitly INVOKER.

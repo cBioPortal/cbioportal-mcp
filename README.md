@@ -170,11 +170,15 @@ allowed study). The classification is in
 [`row_policy_catalog.py`](src/cbioportal_mcp/authentication/row_policy_catalog.py).
 Views (`sql/4`-`sql/7`, including parameterized views) get a `USING 1`
 pass-through policy and inherit filtering from their underlying tables
-because the policy file sets each to `SQL SECURITY INVOKER` explicitly. A
-`DEFINER` or `NONE` view, a materialized view or a dictionary would bypass
-the caller's row policies; the coverage check below and the server's startup
-check reject them. Since `sql/4`-`sql/7` drop and re-create their views, apply
-the policy file after them every time they run.
+because every view is `SQL SECURITY INVOKER`: declared in each `CREATE VIEW`
+in `sql/4`, `sql/5`, `sql/7` (so the daily DROP + CREATE stays INVOKER) and
+set again by the policy file for older views. A `DEFINER` or `NONE` view, a
+materialized view or a dictionary would bypass the caller's row policies; the
+coverage check below and the server's startup check reject them, and in
+row-policy mode the server re-runs that check every
+`CBIOPORTAL_MCP_ROW_POLICY_RECHECK_SECONDS` (default 300, `0` disables) and
+refuses study-data queries while it fails. Apply the policy file after the
+portable `sql/*.sql` files on every run.
 This is the recommended defense-in-depth mode for restricted deployments; the
 app-level guard still rejects explicit requests for denied study IDs and
 rejects any query mentioning an internal `SQL_cbiomcp_*` setting (tokenized,
@@ -187,13 +191,15 @@ does not mark the setting `CHANGEABLE_IN_READONLY`; at startup the server
 checks both directions (`verify_allowlist_lockdown`) and refuses to start
 otherwise. Profiles with `readonly=1` or `readonly=2` are therefore
 unsupported for row-policy mode. The same startup check refuses to run if
-any view in the database is not explicitly `SQL SECURITY INVOKER`, or if the
-runtime role can use `url()`, `remote()`, `clusterAllReplicas()`, `file()`,
-`dictionary()` or read `system.query_log` / `system.processes` /
-`system.dictionaries` / `system.row_policies` (other requests' SQL carries
-their allowlists): grant the runtime role only `SELECT ON <db>.*` and keep the
-server's `select_from_system_db_requires_grant` enabled (verified denied with
-that grant on ClickHouse 25.8). Running restricted
+any view in the database is not explicitly `SQL SECURITY INVOKER`, if the
+database holds a materialized view or dictionary, if the runtime user's
+effective grants (`SHOW GRANTS FINAL`) are anything beyond
+`SELECT ON <db>.*`, or if it can use `url()` / `remote()` / `file()` or read
+`system.processes` / `system.dictionaries` / `system.row_policies` (other
+requests' SQL carries their allowlists). Only ClickHouse error 497
+(`ACCESS_DENIED`) counts as denied; any other error fails the check as
+inconclusive. Keep the server's `select_from_system_db_requires_grant`
+enabled (verified on ClickHouse 25.8). Running restricted
 mode without it logs a startup warning: the app-level guard is a heuristic
 pattern check on arbitrary SELECT queries, not a real SQL parser, so it's the
 weaker of the two supported modes.

@@ -238,3 +238,12 @@ def test_every_cataloged_view_is_set_to_sql_security_invoker():
     # The ALTERs need the views, so they come after the policies (applied
     # after sql/4, sql/5, sql/7) and nothing else is altered.
     assert len(re.findall(r"\bALTER\b", sql)) == len(STUDY_SCOPED_VIEWS)
+
+
+def test_repo_sql_views_declare_sql_security_invoker():
+    # Re-running sql/4, sql/5, sql/7 must not depend on the server's
+    # default_normal_view_sql_security (NONE/DEFINER would leak studies).
+    for path in sorted((REPO / "sql").glob("*.sql")):
+        sql = _strip_comments(path.read_text(encoding="utf-8"))
+        for view, rest in re.findall(r"CREATE (?:OR REPLACE )?VIEW (\w+)(.*?)\bAS\b", sql, re.S):
+            assert "SQL SECURITY INVOKER" in rest, f"{path.name}: {view}"

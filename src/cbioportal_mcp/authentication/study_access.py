@@ -578,6 +578,41 @@ def _normalize_sql(query: str) -> str:
     return "".join(parts)
 
 
+def view_sql_security(create_query: str) -> str | None:
+    """The SQL SECURITY a stored ``CREATE VIEW`` declares (upper-case), or None.
+
+    Only the view *header* counts - the text before the top-level ``AS`` that
+    starts the query - and only real code tokens in it: quoted identifiers,
+    string literals (e.g. column COMMENTs), comments and anything inside the
+    column list's parentheses are ignored. So a column named
+    `SQL SECURITY INVOKER` can't mask a real ``SQL SECURITY NONE``.
+    Returns ``"UNPARSEABLE"`` if the definition can't be tokenized, which
+    callers must treat as not INVOKER.
+    """
+    try:
+        tokens = _lex_sql(create_query)
+    except AuthorizationError:
+        return "UNPARSEABLE"
+    skeleton: list[str] = []
+    depth = 0
+    for token in tokens:
+        if token.kind != "code":
+            skeleton.append(" ")
+            continue
+        for char in token.text:
+            if char == "(":
+                depth += 1
+                skeleton.append(" ")
+            elif char == ")":
+                depth = max(depth - 1, 0)
+                skeleton.append(" ")
+            else:
+                skeleton.append(char if depth == 0 else " ")
+    header = re.split(r"\bAS\b", "".join(skeleton), maxsplit=1, flags=re.IGNORECASE)[0]
+    match = re.search(r"\bSQL\s+SECURITY\s+(\w+)", header, flags=re.IGNORECASE)
+    return match.group(1).upper() if match else None
+
+
 def _strip_sql_literals(query: str) -> str:
     """Blank out '...' literals in already-normalized SQL."""
     return SQL_STRING_PATTERN.sub("''", query)

@@ -234,6 +234,11 @@ class McpConfig:
         return _parse_bool_env("CBIOPORTAL_MCP_CLICKHOUSE_ROW_POLICY_ENABLED", False)
 
     @property
+    def row_policy_recheck_seconds(self) -> float:
+        """How often row-policy mode re-checks views/grants after startup (0 = off)."""
+        return float(os.getenv("CBIOPORTAL_MCP_ROW_POLICY_RECHECK_SECONDS", "300"))
+
+    @property
     def clickhouse_allowed_studies_setting(self) -> str:
         """ClickHouse custom setting name containing the request study allowlist."""
         return os.getenv(

@@ -23,7 +23,7 @@ from cbioportal_mcp.authentication.row_policy_catalog import (
     STUDY_SCOPED_VIEWS,
     classified_names,
 )
-from cbioportal_mcp.clickhouse_query_settings import RESTRICTED_ROLE_PROBES
+from cbioportal_mcp.clickhouse_query_settings import RESTRICTED_ROLE_PROBES, is_access_denied
 
 
 def _jsonish(value: Any) -> Any:
@@ -228,6 +228,34 @@ def _clickhouse_admin(statement: str) -> None:
         + ["clickhouse-client", "-q", statement],
         check=True,
     )
+
+
+def _reapply_repo_views(*client_args: str) -> None:
+    """Re-run sql/4, sql/5, sql/7 in the container, as the daily job would."""
+    for name in (
+        "4-mutation-frequency-views.sql",
+        "5-gene-expression-views.sql",
+        "7-clinical-views.sql",
+    ):
+        subprocess.run(
+            ["docker", "compose", "-f", str(_COMPOSE_FILE), "exec", "-T", "clickhouse"]
+            + ["clickhouse-client", "--database", "cbioportal_authz_e2e", "--multiquery"]
+            + list(client_args)
+            + ["--queries-file", f"/cbioportal-sql/{name}"],
+            check=True,
+        )
+
+
+# Probes that only make sense where the resource is known to exist (the e2e
+# server has a 'default' cluster and query logging); the server's own startup
+# check sticks to probes that exist everywhere plus SHOW GRANTS FINAL.
+_RECHECK_WAIT_SECONDS = 8  # > CBIOPORTAL_MCP_ROW_POLICY_RECHECK_SECONDS + one check
+
+_E2E_EXTRA_PROBES = {
+    "clusterAllReplicas()": "SELECT 1 FROM clusterAllReplicas('default', system.one) LIMIT 0",
+    "dictionary()": "SELECT * FROM dictionary('cbiomcp_probe') LIMIT 0",
+    "system.query_log": "SELECT 1 FROM system.query_log LIMIT 0",
+}
 
 
 def _coverage_report(clickhouse_url: str):
@@ -467,10 +495,13 @@ async def run(keycloak_url: str, proxy_url: str, clickhouse_url: str) -> None:
 
     # The minimal restricted role (SELECT ON <db>.* only) can't reach outside
     # the row-policy boundary or read other requests' SQL / allowlists.
-    for name, probe in RESTRICTED_ROLE_PROBES.items():
+    # Only ACCESS_DENIED (497) counts: a missing cluster/dictionary or a
+    # syntax error would prove nothing about privileges.
+    for name, probe in {**RESTRICTED_ROLE_PROBES, **_E2E_EXTRA_PROBES}.items():
         try:
             direct.query(probe, settings=request_settings)
-        except Exception:
+        except Exception as e:
+            assert is_access_denied(e), (name, str(e)[:300])
             continue
         raise AssertionError(f"restricted role could run {name}: {probe}")
 
@@ -485,13 +516,32 @@ async def run(keycloak_url: str, proxy_url: str, clickhouse_url: str) -> None:
         assert leaked == [("study_alpha",), ("study_beta",)], leaked  # the leak is real
         report = _coverage_report(clickhouse_url)
         assert any(view in e and "SQL SECURITY NONE" in e for e in report.errors), report
+        # The running MCP's periodic re-check (3s in this stack) notices and
+        # refuses study-data queries instead of serving the leak.
+        await asyncio.sleep(_RECHECK_WAIT_SECONDS)
+        refused = await call(alice_token, "SELECT * FROM sample")
+        assert "disabled until" in refused.get("error_message", ""), refused
     finally:
         _clickhouse_admin(f"ALTER TABLE cbioportal_authz_e2e.{view} MODIFY SQL SECURITY INVOKER")
     restored = direct.query(leak_query, settings=request_settings).result_rows
     assert restored == [("study_alpha",)], restored
+    await asyncio.sleep(_RECHECK_WAIT_SECONDS)
+    assert await select(alice_token, "SELECT * FROM sample", "after re-check recovers")
     assert _coverage_report(clickhouse_url).ok
     direct.close()
     print("Restricted-role surface and SQL SECURITY NONE view checks passed.")
+
+    # The daily job re-runs sql/4, sql/5, sql/7 (DROP + CREATE VIEW) without
+    # re-applying the authz SQL, possibly under a profile whose default view
+    # security isn't INVOKER. The CREATE VIEWs declare SQL SECURITY INVOKER
+    # themselves, so the views stay INVOKER and filtered while the MCP keeps
+    # running.
+    _reapply_repo_views("--default_normal_view_sql_security=DEFINER")
+    report = _coverage_report(clickhouse_url)
+    assert report.ok, report
+    coverage = await select(alice_token, "SELECT * FROM mutation_panel_gene_coverage", "after")
+    assert coverage and {r["cancer_study_identifier"] for r in coverage} == {_ALPHA}, coverage
+    print("Views stay SQL SECURITY INVOKER and filtered after re-running sql/4, 5, 7.")
 
     # Concurrent callers with different allowlists never see each other's rows.
     async def keys(token: str) -> set:

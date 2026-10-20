@@ -77,11 +77,16 @@ When you add a table or view to any file in this directory, classify it in
 `src/cbioportal_mcp/authentication/row_policy_catalog.py` and give it a policy
 in `study-authz/0-row-policies.sql` (`tests/test_row_policy_sql.py` fails
 otherwise) - with the database-wide default-deny, a table or view without one
-returns no rows to restricted users. Add every new view to the
-`ALTER TABLE ... MODIFY SQL SECURITY INVOKER` list in that file too: a
-`DEFINER` or `NONE` view runs without the caller's row policies. Because the
-files here drop and re-create their views, re-apply
-`study-authz/0-row-policies.sql` after them every time (apply_sql.sh does).
+returns no rows to restricted users. Every `CREATE VIEW` here must declare
+`SQL SECURITY INVOKER` (`tests/test_row_policy_sql.py` enforces it): a
+`DEFINER` or `NONE` view runs without the caller's row policies, and a view
+without the clause takes whatever `default_normal_view_sql_security` the
+applying profile has. Declaring it in the `CREATE VIEW` keeps the daily DROP +
+CREATE safe even before the authz file is re-applied; also add the view to the
+`ALTER TABLE ... MODIFY SQL SECURITY INVOKER` list in that file (it migrates
+older views). The clause needs ClickHouse 24.2+ (the public portal runs
+26.6). Order on every run: the portable files, then
+`study-authz/0-row-policies.sql` (apply_sql.sh does this).
 
 After applying schema changes on a row-policy deployment, also run
 `scripts/verify_row_policy_coverage.py` - it checks the live database for

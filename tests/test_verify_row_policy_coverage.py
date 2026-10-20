@@ -185,3 +185,14 @@ def test_unclassified_none_view_is_an_error_too():
     report = _evaluate(objects, policies)
     assert any("sneaky" in e and "NONE" in e for e in report.errors)
     assert "sneaky" in report.unclassified
+
+
+def test_quoted_column_named_like_the_clause_does_not_mask_none():
+    objects, policies = _good()
+    objects["mutation_panel_gene_coverage"] = _table(
+        "View",
+        "CREATE VIEW cbio.x (`SQL SECURITY INVOKER` String, y String COMMENT "
+        "'SQL SECURITY INVOKER') SQL SECURITY NONE AS SELECT 'SQL SECURITY INVOKER', 1",
+    )
+    errors = _evaluate(objects, policies).errors
+    assert any("SQL SECURITY NONE" in e for e in errors), errors
