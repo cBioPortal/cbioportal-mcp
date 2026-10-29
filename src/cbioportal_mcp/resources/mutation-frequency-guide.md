@@ -91,7 +91,12 @@ you were conservative; it means the denominator was wrong too.
 ### Reconciliation procedure
 
 When a user reports a mismatch, do not defend the number and do not attribute it to
-"data inconsistencies" — there are none. Work through this in order:
+"data inconsistencies" — there are none. First re-run the question through the
+single-study view that matches the portal chart (`gene_mutation_frequency_in_study`,
+`top_mutated_genes_in_study`, `gene_mutation_variants_in_study`, see
+[Single-study views](#single-study-views-matching-the-portals-study-view-charts)); they
+already use the portal's per-gene denominator. If you hand-wrote the query, work through
+this in order:
 
 1. Numerator is `COUNT(DISTINCT sample_unique_id)`, never `COUNT(*)` and never `SUM`.
 2. Denominator comes from `sample_to_gene_panel_derived` **for that gene**, unioned with
