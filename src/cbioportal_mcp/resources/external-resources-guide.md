@@ -21,6 +21,24 @@ Do not say cBioPortal has no imaging or external-resource data until you have ch
 
 cBioPortal may store links to external viewers or portals even when it does not store raw images.
 
+## Which Studies Have Imaging Data
+
+For "which studies have imaging / pathology slides / CT" or "how many samples have images", read `cancer_study.resource_sample_counts` — per-study sample counts keyed by resource display name, the same numbers as the portal's "Data type" filter. One query, no joins:
+
+```sql
+SELECT
+    cancer_study_identifier,
+    name,
+    resource_sample_counts['Slide Microscopy'] AS slide_microscopy_samples
+FROM cancer_study
+WHERE resource_sample_counts['Slide Microscopy'] > 0
+ORDER BY slide_microscopy_samples DESC;
+```
+
+List the resource names that exist with `SELECT DISTINCT arrayJoin(mapKeys(resource_sample_counts)) FROM cancer_study` (e.g. `'Slide Microscopy'`, `'Computed Tomography'`, `'Magnetic Resonance'`, `'H&E Slide'`, `'MxIF Image'`).
+
+The map counts sample- and patient-level resources only. For study-level links (`resource_study`) and for the URLs themselves, use the queries below.
+
 ## Discovery Query
 
 Start with table and column validation, then use this pattern:

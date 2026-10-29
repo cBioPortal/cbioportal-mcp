@@ -5,6 +5,22 @@
 ## Overview
 Targeted sequencing via MSK-IMPACT panels. Clinical annotations include some derived from natural language processing (denoted NLP).
 
+**Exactly five cancer types** (`CANCER_TYPE`, patients): Non-Small Cell Lung Cancer 7,809, Colorectal Cancer 5,543, Breast Cancer 5,368, Prostate Cancer 3,211, Pancreatic Cancer 3,109. There is **no melanoma** or any other cancer type; say so up front if asked, instead of substituting another type.
+
+**No therapy-response variable.** There is no RECIST, objective response, or best-response attribute or event. For treatment-outcome questions (e.g. immunotherapy response), say this first; the only proxies are `OS_MONTHS`/`OS_STATUS`, or NLP radiology progression events (`Diagnosis` events with `SUBTYPE = 'Progression'`, key `PROGRESSION` = Y/N/Indeterminate), in patients with `Treatment` events of the relevant `SUBTYPE` (e.g. `Immuno`: 3,341 patients). Hand off the comparison to cBioPortal group comparison / survival.
+
+**Nearly one sample per patient: 24,950 patients / 25,040 samples.** Only 90 patients have more than one sample, and all 90 have samples from two different cancer types (second primaries); only 26 have both a `Primary` and a `Metastasis` sample. There is no meaningful same-patient (paired) primary-vs-metastasis cohort. For "same patient" / paired questions, say this up front, then offer the **unpaired** comparison of all `Primary` vs `Metastasis` samples (`SAMPLE_TYPE`), labelled as unpaired.
+```sql
+SELECT countIf(n > 1) AS multi_sample_patients,         -- 90
+       countIf(has_p AND has_m) AS primary_and_met      -- 26
+FROM (SELECT patient_unique_id, count() AS n,
+             has(groupArray(attribute_value), 'Primary') AS has_p,
+             has(groupArray(attribute_value), 'Metastasis') AS has_m
+      FROM clinical_data_derived
+      WHERE cancer_study_identifier = 'msk_chord_2024' AND attribute_name = 'SAMPLE_TYPE'
+      GROUP BY patient_unique_id);
+```
+
 ## Gene Panels
 This study uses multiple MSK-IMPACT panel versions:
 - **IMPACT341**: Earlier version, 341 genes
@@ -27,7 +43,7 @@ This study uses multiple MSK-IMPACT panel versions:
 | Attribute | Description | Values |
 |-----------|-------------|--------|
 | `SAMPLE_TYPE` | Sample origin | Primary, Metastasis, Local Recurrence, Unknown |
-| `SAMPLE_CLASS` | Sample classification | Tumor, Normal |
+| `SAMPLE_CLASS` | Sample classification | Tumor (all samples) |
 | `PRIMARY_SITE` | Anatomical primary site | e.g., Lung, Breast, Colon |
 | `METASTATIC_SITE` | Site of metastasis (if applicable) | e.g., Liver, Bone, Brain |
 
@@ -59,7 +75,7 @@ WHERE cancer_study_identifier = 'msk_chord_2024'
 | `TMB_NONSYNONYMOUS` | Tumor mutational burden | Nonsynonymous mutations per Mb |
 | `MUTATION_COUNT` | Total mutation count | Raw count of mutations in sample |
 | `MSI_SCORE` | Microsatellite instability score | Numeric score |
-| `MSI_TYPE` | MSI classification | Stable, Instable, Indeterminate |
+| `MSI_TYPE` | MSI classification | Stable 21,096, Do not report 1,825, Indeterminate 865, Instable 699 |
 
 ### Clinical Groupings
 | Attribute | Description | Notes |
