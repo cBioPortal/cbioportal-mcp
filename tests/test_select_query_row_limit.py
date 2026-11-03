@@ -210,7 +210,28 @@ def test_run_select_query_with_max_rows_limits_rows_in_clickhouse(monkeypatch):
     result = server.run_select_query("SELECT 1;", query_label="test", max_rows=50)
 
     assert result == [{"i": i} for i in range(3)]
-    assert calls == ["SELECT * FROM (SELECT 1) LIMIT 51"]
+    assert calls == ["SELECT * FROM (\nSELECT 1\n) LIMIT 51"]
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "SELECT 1 LIMIT 10 -- top 10",
+        "SELECT 1 LIMIT 10 # top 10",
+        "SELECT 1\nLIMIT 10\n-- top 10\n",
+    ],
+)
+def test_run_select_query_with_max_rows_survives_a_trailing_line_comment(monkeypatch, query):
+    calls = []
+    monkeypatch.setattr(ch_mcp_server, "run_query", _fake_run_query(calls, rows=1))
+
+    server.run_select_query(query, query_label="test", max_rows=50)
+
+    # The comment must end before the closing parenthesis, or ClickHouse sees
+    # "Unmatched parentheses" and the agent's otherwise valid query fails.
+    (wrapped,) = calls
+    assert wrapped.splitlines()[-1] == ") LIMIT 51"
+    assert query.strip() in wrapped
 
 
 def test_run_select_query_without_max_rows_runs_query_unchanged(monkeypatch):

@@ -373,7 +373,21 @@ def test_agent_query_cache_settings_untouched_when_off(request_context, database
 
 def test_enabled_preserves_row_cap(enabled, request_context, database):
     server.run_select_query(VIEW_QUERIES[1] + ";", query_label=LLM, max_rows=10)
-    assert database.client.query.call_args.args == (f"SELECT * FROM ({VIEW_QUERIES[1]}) LIMIT 11",)
+    assert database.client.query.call_args.args == (
+        f"SELECT * FROM (\n{VIEW_QUERIES[1]}\n) LIMIT 11",
+    )
+    assert _client_settings(database) == CACHE_SETTINGS
+
+
+def test_enabled_caches_a_row_capped_view_query_ending_in_a_comment(
+    enabled, request_context, database
+):
+    # #177 puts the inner query on its own lines so a trailing comment can't
+    # swallow the row cap's closing parenthesis; the cache check runs on that
+    # wrapped SQL and must still see a single allowlisted view source.
+    query = VIEW_QUERIES[1] + " -- top 5"
+    server.run_select_query(query, query_label=LLM, max_rows=10)
+    assert database.client.query.call_args.args == (f"SELECT * FROM (\n{query}\n) LIMIT 11",)
     assert _client_settings(database) == CACHE_SETTINGS
 
 
