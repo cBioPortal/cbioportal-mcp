@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """cBioPortal MCP Server - FastMCP implementation."""
 
+import contextvars
 import functools
 import os
 import typing
@@ -314,10 +315,6 @@ def main():
 
     # Get config
     config = get_mcp_config()
-    # Validate the query cache pilot env once, before serving any query.
-    from cbioportal_mcp.query_cache import load_config as load_query_cache_config
-
-    load_query_cache_config()
 
     # Refuse to serve if mcp-clickhouse's query pool doesn't match the cap
     # (see query_concurrency); report the pool's actual size, not the env.
@@ -729,24 +726,15 @@ def run_select_query(query: str, *, query_label: str, max_rows: int | None = Non
     Returns:
         list: A list of rows, where each row is a dictionary with column names as keys and corresponding values.
     """
-    from cbioportal_mcp.query_cache import query_cache_settings, run_query
+    from mcp_clickhouse.mcp_server import run_query
 
     # DB-level read-only permissions (enforced on startup) prevent non-SELECT queries,
     # so we don't need application-level query filtering. This allows CTEs (WITH ... AS).
     if max_rows is not None:
         query = _with_row_cap(query, max_rows)
     logger.debug("run_select_query: delegate the query to run_query tool of ClickHouse MCP")
-    try:
-        settings = query_cache_settings(query_label, query)
-    except ValueError:
-        # Rejected before reaching ClickHouse; still record it as a failed query.
-        with traced_db_query(query_label):
-            raise
-    with traced_db_query(query_label, query_cache=settings is not None) as db_query:
-        raw_result, cached = run_query(query, settings=settings)
-        if settings is not None and not cached:
-            db_query.query_cache = "fallback"
-        ch_query_result = json.loads(raw_result)
+    with traced_db_query(query_label):
+        ch_query_result = json.loads(run_query(query))
         result = zip_select_query_result(ch_query_result)
     return result
 
@@ -1051,6 +1039,17 @@ def get_study_guide(study_id: str) -> str:
     return _study_guide_text(study_id)
 
 
+def _submit_in_context(executor: ThreadPoolExecutor, fn, /, *args, **kwargs):
+    """executor.submit(fn, ...) in a copy of the caller's contextvars.
+
+    Pool threads don't inherit contextvars, so without this the query's
+    db.query span loses its enclosing tool span (and the FastMCP request
+    context). Each submission gets its own copy: a Context can't be entered
+    by two threads at once.
+    """
+    return executor.submit(contextvars.copy_context().run, fn, *args, **kwargs)
+
+
 def _study_guide_text(study_id: str) -> str:
     """get_study_guide's result; read_guide serves study-guide URIs with it too."""
     # Validate study_id to prevent SQL injection
@@ -1118,10 +1117,9 @@ def _study_guide_text(study_id: str) -> str:
         # clock, while six concurrent ones cost roughly one. Results are
         # still consumed in the original section order below, so the guide's
         # output is unchanged regardless of which query finishes first.
-        from contextvars import copy_context
-
         with ThreadPoolExecutor(max_workers=6) as executor:
-            counts_future = executor.submit(
+            counts_future = _submit_in_context(
+                executor,
                 run_select_query,
                 f"""
                     SELECT
@@ -1132,7 +1130,8 @@ def _study_guide_text(study_id: str) -> str:
                 """,
                 query_label="study_guide.counts",
             )
-            profiles_future = executor.submit(
+            profiles_future = _submit_in_context(
+                executor,
                 run_select_query,
                 f"""
                     SELECT DISTINCT
@@ -1145,7 +1144,8 @@ def _study_guide_text(study_id: str) -> str:
                 """,
                 query_label="study_guide.profiles",
             )
-            panels_future = executor.submit(
+            panels_future = _submit_in_context(
+                executor,
                 run_select_query,
                 f"""
                     SELECT DISTINCT gene_panel_id, COUNT(DISTINCT sample_unique_id) as sample_count
@@ -1157,7 +1157,8 @@ def _study_guide_text(study_id: str) -> str:
                 """,
                 query_label="study_guide.panels",
             )
-            attrs_future = executor.submit(
+            attrs_future = _submit_in_context(
+                executor,
                 run_select_query,
                 f"""
                     SELECT DISTINCT attribute_name, COUNT(DISTINCT sample_unique_id) as coverage
@@ -1169,12 +1170,8 @@ def _study_guide_text(study_id: str) -> str:
                 """,
                 query_label="study_guide.attrs",
             )
-            # Only this section is query-cache eligible, and the cache settings
-            # ride on the FastMCP request context, which pool threads don't
-            # inherit. It's the only worker given the context, so no other
-            # section can observe its temporary cache overrides.
-            top_genes_future = executor.submit(
-                copy_context().run,
+            top_genes_future = _submit_in_context(
+                executor,
                 run_select_query,
                 f"""
                     SELECT
@@ -1190,7 +1187,8 @@ def _study_guide_text(study_id: str) -> str:
                 """,
                 query_label="study_guide.top_genes",
             )
-            sample_types_future = executor.submit(
+            sample_types_future = _submit_in_context(
+                executor,
                 run_select_query,
                 f"""
                     SELECT attribute_value as sample_type, COUNT(DISTINCT sample_unique_id) as count

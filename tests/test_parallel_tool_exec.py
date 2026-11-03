@@ -669,6 +669,48 @@ def test_db_spans_attach_to_their_own_tool_span(slow_clickhouse):
     assert all(s.context.trace_id in {select_tool.trace_id, counts_tool.trace_id} for s in db_spans)
 
 
+def test_study_guide_worker_queries_keep_the_tool_span(slow_clickhouse, monkeypatch):
+    """A dynamic (uncached, no static file) get_study_guide fans its section
+    queries out to a nested ThreadPoolExecutor. Each of those db.query spans
+    must still be a child of the get_study_guide tool span, in its trace."""
+    monkeypatch.setattr(server, "_load_study_guide", lambda _study_id: None)
+    server._clear_study_guide_cache()
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    tracer = provider.get_tracer(__name__)
+    with patch("cbioportal_mcp.telemetry.trace.get_tracer", return_value=tracer), patch(
+        "cbioportal_mcp.telemetry._llmobs_tool_span", return_value=None
+    ):
+        middleware = TelemetryMiddleware()
+        server.mcp.add_middleware(middleware)
+        try:
+            _, results = asyncio.run(
+                _timed_batch(server.mcp, [("get_study_guide", {"study_id": "no_static_guide"})])
+            )
+        finally:
+            server.mcp.middleware.remove(middleware)
+            server._clear_study_guide_cache()
+
+    assert not results[0].is_error
+    spans = exporter.get_finished_spans()
+    (tool_span,) = [s for s in spans if s.name == "mcp.tool/get_study_guide"]
+    worker_labels = {
+        "study_guide.counts",
+        "study_guide.profiles",
+        "study_guide.panels",
+        "study_guide.attrs",
+        "study_guide.top_genes",
+        "study_guide.sample_types",
+    }
+    worker_spans = [s for s in spans if s.name.removeprefix("db.query/") in worker_labels]
+    assert {s.name.removeprefix("db.query/") for s in worker_spans} == worker_labels
+    for span in worker_spans:
+        assert span.parent is not None, span.name
+        assert span.parent.span_id == tool_span.context.span_id, span.name
+        assert span.context.trace_id == tool_span.context.trace_id, span.name
+
+
 # --- real ClickHouse ------------------------------------------------------
 
 CLICKHOUSE_BIN = shutil.which("clickhouse") or (
