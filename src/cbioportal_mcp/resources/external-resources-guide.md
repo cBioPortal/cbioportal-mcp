@@ -1,6 +1,6 @@
 # External Resources Guide
 
-Use this guide when the user asks about data that may be linked from cBioPortal rather than stored directly in molecular or clinical tables.
+Use this guide for data linked from cBioPortal rather than stored in molecular or clinical tables.
 
 ## Routing Triggers
 
@@ -15,9 +15,7 @@ Read this guide before answering or refusing questions that mention:
 Do not say cBioPortal has no imaging or external-resource data until you have checked:
 
 - `resource_definition`
-- `resource_study`
-- `resource_sample`
-- `resource_patient`
+- `resource` (filter `resource_scope` for `STUDY`, `SAMPLE`, or `PATIENT`)
 
 cBioPortal may store links to external viewers or portals even when it does not store raw images.
 
@@ -37,11 +35,13 @@ ORDER BY slide_microscopy_samples DESC;
 
 List the resource names that exist with `SELECT DISTINCT arrayJoin(mapKeys(resource_sample_counts)) FROM cancer_study` (e.g. `'Slide Microscopy'`, `'Computed Tomography'`, `'Magnetic Resonance'`, `'H&E Slide'`, `'MxIF Image'`).
 
-The map counts sample- and patient-level resources only. For study-level links (`resource_study`) and for the URLs themselves, use the queries below.
+The map counts sample- and patient-level resources only. For study-level links (`resource` with `resource_scope = 'STUDY'`) and for the URLs themselves, use the queries below.
+
+`resource.sample_id` and `resource.patient_id` are nullable stable string IDs, scoped by `cancer_study_id`; they are not internal numeric IDs. Join patients on `patient.stable_id` plus study ID. To resolve a sample, join `sample.stable_id` and use its patient to constrain the study. Resource definitions also belong to a study.
 
 ## Discovery Query
 
-Start with table and column validation, then use this pattern:
+Validate table and column names, then search across all scopes:
 
 ```sql
 SELECT
@@ -49,11 +49,15 @@ SELECT
     rd.display_name,
     rd.description,
     rd.resource_type,
-    rs.cancer_study_identifier,
-    rs.url
-FROM resource_study rs
+    cs.cancer_study_identifier,
+    r.resource_scope,
+    r.sample_id,
+    r.patient_id,
+    r.url
+FROM resource r
 JOIN resource_definition rd
-    ON rs.resource_id = rd.resource_id
+    ON r.resource_id = rd.resource_id AND r.cancer_study_id = rd.cancer_study_id
+JOIN cancer_study cs ON cs.cancer_study_id = r.cancer_study_id
 WHERE lower(rd.display_name) LIKE '%minerva%'
    OR lower(rd.description) LIKE '%minerva%'
    OR lower(rd.display_name) LIKE '%image%'
@@ -62,34 +66,11 @@ WHERE lower(rd.display_name) LIKE '%minerva%'
    OR lower(rd.description) LIKE '%pathology%'
    OR lower(rd.display_name) LIKE '%histology%'
    OR lower(rd.description) LIKE '%histology%'
-ORDER BY rs.cancer_study_identifier, rd.display_name
+ORDER BY cs.cancer_study_identifier, rd.display_name
 LIMIT 100;
 ```
 
-If no study-level rows appear, check sample- and patient-level resource links:
-
-```sql
-SELECT
-    rd.resource_id,
-    rd.display_name,
-    rd.description,
-    rs.cancer_study_identifier,
-    rs.sample_unique_id,
-    rs.url
-FROM resource_sample rs
-JOIN resource_definition rd
-    ON rs.resource_id = rd.resource_id
-WHERE lower(rd.display_name) LIKE '%minerva%'
-   OR lower(rd.description) LIKE '%minerva%'
-   OR lower(rd.display_name) LIKE '%image%'
-   OR lower(rd.description) LIKE '%image%'
-   OR lower(rd.display_name) LIKE '%pathology%'
-   OR lower(rd.description) LIKE '%pathology%'
-   OR lower(rd.display_name) LIKE '%histology%'
-   OR lower(rd.description) LIKE '%histology%'
-ORDER BY rs.cancer_study_identifier, rd.display_name
-LIMIT 100;
-```
+To restrict scope, wrap the search predicates in parentheses and add `AND r.resource_scope = 'STUDY'`, or `AND r.resource_scope IN ('SAMPLE', 'PATIENT')`.
 
 ## Answer Pattern
 
@@ -99,7 +80,7 @@ If links exist:
 
 If links do not exist:
 
-> I checked the cBioPortal external-resource tables (`resource_definition`, `resource_study`, `resource_sample`, and `resource_patient`) and did not find matching imaging or viewer links in this deployment.
+> I checked the cBioPortal external-resource tables (`resource_definition` and `resource`) and did not find matching imaging or viewer links in this deployment.
 
 ## Do Not
 

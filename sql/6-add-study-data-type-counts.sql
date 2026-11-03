@@ -74,19 +74,27 @@ WITH
         WHERE variant_type = 'structural_variant'
         GROUP BY cancer_study_identifier
     ),
+    -- Resource entity IDs are stable strings scoped to a study. SAMPLE links
+    -- count distinct samples; PATIENT links expand to all of that patient's
+    -- samples. Keep the two counts additive and exclude STUDY links, as before.
     resource_rows AS (
-        SELECT p.cancer_study_id AS cancer_study_id, rd.display_name AS display_name, count(DISTINCT rs.internal_id) AS n
-        FROM resource_sample AS rs
-        INNER JOIN resource_definition AS rd ON rd.resource_id = rs.resource_id
-        INNER JOIN sample AS s ON s.internal_id = rs.internal_id
-        INNER JOIN patient AS p ON p.internal_id = s.patient_id
-        GROUP BY cancer_study_id, display_name
+        SELECT r.cancer_study_id AS cancer_study_id, rd.display_name AS display_name, count(DISTINCT s.internal_id) AS n
+        FROM resource AS r
+        INNER JOIN resource_definition AS rd ON rd.resource_id = r.resource_id
+        INNER JOIN (
+            SELECT s.internal_id, s.stable_id, p.cancer_study_id
+            FROM sample AS s
+            INNER JOIN patient AS p ON p.internal_id = s.patient_id
+        ) AS s ON s.stable_id = r.sample_id AND s.cancer_study_id = r.cancer_study_id
+        WHERE r.resource_scope = 'SAMPLE'
+        GROUP BY r.cancer_study_id, rd.display_name
         UNION ALL
         SELECT p.cancer_study_id, rd.display_name, count(DISTINCT s.internal_id)
-        FROM patient AS p
+        FROM resource AS r
+        INNER JOIN patient AS p ON p.stable_id = r.patient_id AND p.cancer_study_id = r.cancer_study_id
         INNER JOIN sample AS s ON p.internal_id = s.patient_id
-        INNER JOIN resource_patient AS rp ON rp.internal_id = s.patient_id
-        INNER JOIN resource_definition AS rd ON rd.resource_id = rp.resource_id
+        INNER JOIN resource_definition AS rd ON rd.resource_id = r.resource_id
+        WHERE r.resource_scope = 'PATIENT'
         GROUP BY p.cancer_study_id, rd.display_name
     ),
     mrna AS (
