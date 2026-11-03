@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """cBioPortal MCP Server - FastMCP implementation."""
 
+import contextvars
 import functools
 import os
 import typing
@@ -1038,6 +1039,17 @@ def get_study_guide(study_id: str) -> str:
     return _study_guide_text(study_id)
 
 
+def _submit_in_context(executor: ThreadPoolExecutor, fn, /, *args, **kwargs):
+    """executor.submit(fn, ...) in a copy of the caller's contextvars.
+
+    Pool threads don't inherit contextvars, so without this the query's
+    db.query span loses its enclosing tool span (and the FastMCP request
+    context). Each submission gets its own copy: a Context can't be entered
+    by two threads at once.
+    """
+    return executor.submit(contextvars.copy_context().run, fn, *args, **kwargs)
+
+
 def _study_guide_text(study_id: str) -> str:
     """get_study_guide's result; read_guide serves study-guide URIs with it too."""
     # Validate study_id to prevent SQL injection
@@ -1106,7 +1118,8 @@ def _study_guide_text(study_id: str) -> str:
         # still consumed in the original section order below, so the guide's
         # output is unchanged regardless of which query finishes first.
         with ThreadPoolExecutor(max_workers=6) as executor:
-            counts_future = executor.submit(
+            counts_future = _submit_in_context(
+                executor,
                 run_select_query,
                 f"""
                     SELECT
@@ -1117,7 +1130,8 @@ def _study_guide_text(study_id: str) -> str:
                 """,
                 query_label="study_guide.counts",
             )
-            profiles_future = executor.submit(
+            profiles_future = _submit_in_context(
+                executor,
                 run_select_query,
                 f"""
                     SELECT DISTINCT
@@ -1130,7 +1144,8 @@ def _study_guide_text(study_id: str) -> str:
                 """,
                 query_label="study_guide.profiles",
             )
-            panels_future = executor.submit(
+            panels_future = _submit_in_context(
+                executor,
                 run_select_query,
                 f"""
                     SELECT DISTINCT gene_panel_id, COUNT(DISTINCT sample_unique_id) as sample_count
@@ -1142,7 +1157,8 @@ def _study_guide_text(study_id: str) -> str:
                 """,
                 query_label="study_guide.panels",
             )
-            attrs_future = executor.submit(
+            attrs_future = _submit_in_context(
+                executor,
                 run_select_query,
                 f"""
                     SELECT DISTINCT attribute_name, COUNT(DISTINCT sample_unique_id) as coverage
@@ -1154,7 +1170,8 @@ def _study_guide_text(study_id: str) -> str:
                 """,
                 query_label="study_guide.attrs",
             )
-            top_genes_future = executor.submit(
+            top_genes_future = _submit_in_context(
+                executor,
                 run_select_query,
                 f"""
                     SELECT
@@ -1170,7 +1187,8 @@ def _study_guide_text(study_id: str) -> str:
                 """,
                 query_label="study_guide.top_genes",
             )
-            sample_types_future = executor.submit(
+            sample_types_future = _submit_in_context(
+                executor,
                 run_select_query,
                 f"""
                     SELECT attribute_value as sample_type, COUNT(DISTINCT sample_unique_id) as count
