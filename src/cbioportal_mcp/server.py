@@ -614,9 +614,12 @@ def _with_row_cap(query: str, max_rows: int) -> str:
     A LIMIT on an outer query works for any SELECT (CTEs, UNIONs, queries that already have their own
     LIMIT) and lets the engine stop early. Query-level settings such as max_result_rows can't be used
     here: mcp-clickhouse runs queries with readonly=1, which forbids changing settings.
+
+    The inner query goes on its own lines so a comment on its last line ("LIMIT 10 -- top 10")
+    ends at the newline instead of commenting out the closing parenthesis and outer LIMIT.
     """
     inner = query.strip().rstrip(";").strip()
-    return f"SELECT * FROM ({inner}) LIMIT {int(max_rows) + 1}"
+    return f"SELECT * FROM (\n{inner}\n) LIMIT {int(max_rows) + 1}"
 
 
 def zip_select_query_result(ch_query_result) -> list[dict]:
