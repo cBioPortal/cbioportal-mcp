@@ -7,5 +7,7 @@ accessible via:
 - `get_general_guide("<name>")` — returns the file contents.
 - `list_guides()` — lists every name found here under
   `cbioportal://general-guide/<name>` URIs.
+- `read_guide("cbioportal://general-guide/<name>")` — same contents, for
+  agents reading the URI that `list_guides()` returned.
 
 Files starting with `_` (like this README) are skipped by discovery.

@@ -632,6 +632,10 @@ def zip_select_query_result(ch_query_result) -> list[dict]:
 
 
 # Resource Access Tools for AI Agents
+GENERAL_GUIDE_URI_PREFIX = "cbioportal://general-guide/"
+STUDY_GUIDE_URI_PREFIX = "cbioportal://study-guide/"
+
+
 @mcp.tool()
 def list_guides() -> list[dict]:
     """List all available query guides with their URIs and descriptions.
@@ -648,7 +652,7 @@ def list_guides() -> list[dict]:
     """
     deployment_guides = [
         {
-            "uri": f"cbioportal://general-guide/{name}",
+            "uri": f"{GENERAL_GUIDE_URI_PREFIX}{name}",
             "description": f"Deployment-specific guide — call get_general_guide('{name}')"
         }
         for name in _list_available_general_guides()
@@ -720,11 +724,19 @@ def read_guide(uri: str) -> str:
             cbioportal://common-pitfalls, append "#<number>" (e.g.
             "cbioportal://common-pitfalls#16") to fetch a single pitfall
             instead of the full guide, when you already know which one applies.
+            The cbioportal://general-guide/<name> and
+            cbioportal://study-guide/<study_id> URIs from list_guides() work
+            too, the same as get_general_guide(name) and get_study_guide(study_id).
     """
     if uri.startswith("cbioportal://common-pitfalls#"):
         number = uri.split("#", 1)[1]
         fragment = _common_pitfall_fragment(number)
         return fragment if fragment is not None else _unknown_pitfall_message(number)
+
+    if uri.startswith(GENERAL_GUIDE_URI_PREFIX):
+        return _general_guide_text(uri.removeprefix(GENERAL_GUIDE_URI_PREFIX))
+    if uri.startswith(STUDY_GUIDE_URI_PREFIX):
+        return _study_guide_text(uri.removeprefix(STUDY_GUIDE_URI_PREFIX))
 
     # Resource content mapping
     resources = {
@@ -746,7 +758,9 @@ def read_guide(uri: str) -> str:
         available_list = "\n".join(f"  - {r}" for r in resources.keys())
         return (
             f"Resource not found: {uri}.\n"
-            f"Available resources:\n{available_list}\n\n"
+            f"Available resources:\n{available_list}\n"
+            f"  - {GENERAL_GUIDE_URI_PREFIX}<name> (deployment-specific guides)\n"
+            f"  - {STUDY_GUIDE_URI_PREFIX}<study_id>\n\n"
             "Use list_guides() for descriptions, or get_study_guide(study_id) for study-specific guides."
         )
 
@@ -768,6 +782,11 @@ def get_general_guide(name: str) -> str:
     Args:
         name: The guide name without the .md extension (e.g. "cdsi-info").
     """
+    return _general_guide_text(name)
+
+
+def _general_guide_text(name: str) -> str:
+    """get_general_guide's result; read_guide serves general-guide URIs with it too."""
     if not name or '/' in name or '\\' in name or name.startswith('.'):
         return f"Error: invalid guide name '{name}'"
     content = _load_general_guide(name)
@@ -856,6 +875,11 @@ def get_study_guide(study_id: str) -> str:
     Returns:
         A markdown-formatted guide specific to the requested study
     """
+    return _study_guide_text(study_id)
+
+
+def _study_guide_text(study_id: str) -> str:
+    """get_study_guide's result; read_guide serves study-guide URIs with it too."""
     # Validate study_id to prevent SQL injection
     try:
         study_id = _validate_study_id(study_id)
