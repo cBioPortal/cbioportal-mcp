@@ -696,3 +696,177 @@ def test_review_repro_placeholder_database_cannot_redirect_apply(server):
         "SELECT 1 FROM system.tables WHERE database IN ('review_victim', '__PUBLIC_GROUP__') "
         "AND name LIKE 'user_study%'"
     ).result_rows
+
+
+# --- P6: the server's startup check, run as the runtime user itself ----------
+
+
+def _runtime_client(server, user: str):
+    import clickhouse_connect
+
+    return clickhouse_connect.get_client(
+        host="127.0.0.1", port=server.port, username=user, password="pw"
+    )
+
+
+def _startup_check(server, user: str, database: str = DB):
+    from cbioportal_mcp.study_authz import startup_check
+
+    with startup_check._send_custom_settings():
+        return startup_check.check(_runtime_client(server, user), database)
+
+
+def _refused(server, user: str, needle: str, database: str = DB) -> str:
+    from cbioportal_mcp.study_authz.startup_check import PolicyCoverageError
+
+    with pytest.raises(PolicyCoverageError) as exc:
+        _startup_check(server, user, database)
+    message = str(exc.value)
+    assert needle in message, message
+    assert "\n" not in message and "@" not in message
+    return message
+
+
+def test_startup_check_role_target_passes(server):
+    result = _startup_check(server, "mcp_restricted")
+    assert (result.user, result.target, result.target_is_user) == (
+        "mcp_restricted",
+        ROW_POLICY_ROLE,
+        False,
+    )
+    assert result.public_studies == len(PUBLIC)
+
+
+def test_startup_check_role_target_with_direct_grant_refused(server):
+    _refused(server, "mcp_direct", f"direct SELECT grant ON {DB}.* bypasses role")
+
+
+def test_startup_check_other_role_with_select_refused(server):
+    """A second default role holding SELECT bypasses the policy role via ?role=."""
+    admin = server.admin
+    for statement in sqlgen.statements(sqlgen.restricted_user_sql("p6_two_roles", "pw", DB)):
+        admin.command(statement)
+    admin.command("CREATE ROLE IF NOT EXISTS p6_analyst")
+    admin.command(f"GRANT SELECT ON {DB}.* TO p6_analyst")
+    admin.command("GRANT p6_analyst TO p6_two_roles")
+    admin.command("SET DEFAULT ROLE ALL TO p6_two_roles")
+    try:
+        _refused(server, "p6_two_roles", f"role p6_analyst grants SELECT ON {DB}.* without")
+    finally:
+        admin.command("DROP USER IF EXISTS p6_two_roles")
+        admin.command("DROP ROLE IF EXISTS p6_analyst")
+
+
+def test_startup_check_missing_policy_on_one_table_refused(server):
+    admin = server.admin
+    admin.command(f"DROP ROW POLICY cbioportal_mcp_study_patient ON {DB}.patient")
+    try:
+        _refused(server, "mcp_restricted", "patient: study table has only the default-deny")
+    finally:
+        sqlgen.apply(admin, PARAMS, log=lambda *_: None)
+    _startup_check(server, "mcp_restricted")
+
+
+def test_startup_check_readable_user_study_manual_refused(server):
+    admin = server.admin
+    admin.command(
+        f"CREATE ROW POLICY p6_leak ON {DB}.user_study_manual FOR SELECT USING 1 "
+        f"TO {ROW_POLICY_ROLE}"
+    )
+    try:
+        assert server.http(f"SELECT count() FROM {DB}.user_study_manual", "mcp_restricted") != "0"
+        _refused(server, "mcp_restricted", "user_study_manual: denied object has policies")
+    finally:
+        admin.command(f"DROP ROW POLICY p6_leak ON {DB}.user_study_manual")
+    _startup_check(server, "mcp_restricted")
+
+
+def test_startup_check_foreign_policy_refused(server):
+    """P4's ownership rule at startup: a foreign PERMISSIVE policy TO the policy
+    role is OR-ed with ours and widens the MCP user; one TO another principal
+    is widened by our catch-all. Both refuse."""
+    admin = server.admin
+    sql = f"SELECT count() FROM {DB}.cancer_study"
+    admin.command(
+        f"CREATE ROW POLICY team_view ON {DB}.cancer_study USING cancer_study_id > 0 "
+        f"TO {ROW_POLICY_ROLE}"
+    )
+    try:
+        assert server.http(sql, "mcp_restricted") == str(len(STUDIES))  # widened
+        _refused(server, "mcp_restricted", f"team_view ON {DB}.cancer_study (not created")
+    finally:
+        admin.command(f"DROP ROW POLICY IF EXISTS team_view ON {DB}.cancer_study")
+    admin.command("CREATE USER IF NOT EXISTS p6_outsider IDENTIFIED BY 'pw'")
+    admin.command(f"CREATE ROW POLICY outsider_only ON {DB}.patient USING 0 TO p6_outsider")
+    try:
+        assert server.http(sql, "mcp_restricted") == str(len(PUBLIC))  # MCP unaffected...
+        _refused(server, "mcp_restricted", f"outsider_only ON {DB}.patient")  # ...still refused
+    finally:
+        admin.command(f"DROP ROW POLICY IF EXISTS outsider_only ON {DB}.patient")
+        admin.command("DROP USER IF EXISTS p6_outsider")
+    _startup_check(server, "mcp_restricted")
+
+
+def test_startup_check_admin_privilege_refused(server):
+    admin = server.admin
+    admin.command(f"GRANT INSERT ON {DB}.user_study_manual TO {ROW_POLICY_ROLE}")
+    try:
+        _refused(server, "mcp_restricted", f"user holds INSERT ON {DB}.user_study_manual")
+    finally:
+        admin.command(f"REVOKE INSERT ON {DB}.user_study_manual FROM {ROW_POLICY_ROLE}")
+
+
+def test_startup_check_user_target_passes(server):
+    """Policies TO the user itself (llm_user style): its direct grants are fine."""
+    admin = server.admin
+    admin.command("CREATE USER p6_llm_user IDENTIFIED BY 'pw'")
+    admin.command("CREATE DATABASE IF NOT EXISTS authz_p6_other")
+    admin.command("GRANT SELECT ON authz_p6_other.* TO p6_llm_user")
+    source = "authz_source_p6"
+    _load_fixture(admin, source)
+    target = sqlgen.Params(
+        database="authz_p6_user_target",
+        public_group="PUBLIC",
+        app_name="cbioportal",
+        policy_target="p6_llm_user",
+        target_is_user=True,
+    )
+    make_test_db(admin, source, target, {"priv_1": "TEAM_A"}, ["pub_a"], [], log=lambda *_: None)
+    result = _startup_check(server, "p6_llm_user", target.database)
+    assert (result.target, result.target_is_user, result.public_studies) == (
+        "p6_llm_user",
+        True,
+        1,
+    )
+    # Without the SHOW ROW POLICIES grant the check cannot see the policies: refuse.
+    admin.command(f"REVOKE SHOW ROW POLICIES ON {target.database}.* FROM p6_llm_user")
+    try:
+        _refused(server, "p6_llm_user", "grant SHOW ROW POLICIES", target.database)
+    finally:
+        admin.command(f"GRANT SHOW ROW POLICIES ON {target.database}.* TO p6_llm_user")
+
+
+def test_startup_check_through_the_mcp_connection(server, monkeypatch):
+    """run_startup_check with filtering on builds mcp-clickhouse's own client."""
+    from mcp_clickhouse import mcp_env
+
+    from cbioportal_mcp.study_authz import startup_check
+
+    for key, value in {
+        "CLICKHOUSE_HOST": "127.0.0.1",
+        "CLICKHOUSE_PORT": str(server.port),
+        "CLICKHOUSE_USER": "mcp_restricted",
+        "CLICKHOUSE_PASSWORD": "pw",
+        "CLICKHOUSE_SECURE": "false",
+        "CLICKHOUSE_VERIFY": "false",
+        "CLICKHOUSE_DATABASE": DB,
+    }.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setattr(mcp_env, "_CONFIG_INSTANCE", None)
+    on = {startup_check.FILTERING_ENV: "on"}
+    assert startup_check.run_startup_check(DB, env=on).target == ROW_POLICY_ROLE
+    assert startup_check.run_startup_check(DB, env={}) is None
+    monkeypatch.setenv("CLICKHOUSE_USER", "mcp_direct")
+    monkeypatch.setattr(mcp_env, "_CONFIG_INSTANCE", None)
+    with pytest.raises(startup_check.PolicyCoverageError, match="bypasses role"):
+        startup_check.run_startup_check(DB, env=on)

@@ -224,6 +224,9 @@ def row_policies_template() -> str:
         "-- 7. Only now let the target read the database. With a role target, give the",
         "-- MCP user the role via `python -m cbioportal_mcp.study_authz user-sql` (role",
         "-- only, no direct grants: a direct SELECT plus SET ROLE NONE bypasses policies).",
+        "-- SHOW ROW POLICIES lets the MCP's startup check (study filtering on) verify",
+        "-- that these policies apply to its own user; policy text holds no emails.",
+        f"GRANT SHOW ROW POLICIES ON {DB}.* TO {TARGET};",
         f"GRANT SELECT ON {DB}.* TO {TARGET};",
         "",
     ]

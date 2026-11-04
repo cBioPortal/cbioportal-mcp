@@ -89,8 +89,10 @@ def test_study_policies_read_user_study_with_the_agreed_predicate(table):
 
 def test_grant_comes_after_every_policy():
     sql = sqlgen.row_policies_template()
+    assert sql.rindex("CREATE ROW POLICY") < sql.index("GRANT SHOW ROW POLICIES ON")
     assert sql.rindex("CREATE ROW POLICY") < sql.index("GRANT SELECT ON")
-    assert sql.count("GRANT ") == 1
+    # SELECT plus SHOW ROW POLICIES (for the server's startup check), nothing else.
+    assert sql.count("GRANT ") == 2
 
 
 def test_render_fills_every_placeholder_and_statements_split():

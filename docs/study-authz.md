@@ -36,8 +36,9 @@ All policies are attached `TO` one **policy target**, chosen at apply time:
   `GRANT SELECT` on several public databases and no roles. `apply` refuses a
   user that does not exist.
 
-Either way, `apply` ends with `GRANT SELECT ON <db>.* TO <target>`, issued
-after every policy. Everyone except the target gets `USING 1`. The policies
+Either way, `apply` ends with `GRANT SHOW ROW POLICIES` (for the server's
+startup check) and `GRANT SELECT ON <db>.* TO <target>`, issued after every
+policy. Everyone except the target gets `USING 1`. The policies
 are scoped to this one database, so the target's access to its other
 databases is unchanged.
 
@@ -350,6 +351,49 @@ public studies. `--replace` rebuilds the database, but only if this tool
 created it (it checks the database comment). The emails in this repository
 are all example.org fakes; put real ones only in your local CSV.
 
+## Server startup check (study filtering on)
+
+With `CBIOPORTAL_MCP_STUDY_FILTERING=on` the server refuses to start (one
+`CRITICAL` line, exit code 2) unless its own ClickHouse user is covered. It
+runs `study_authz/startup_check.py` over a client built like mcp-clickhouse's,
+as `currentUser()`, and never logs an email:
+
+- `SQL_cbio_user` reaches `getSettingOrDefault` under `readonly=1` (ClickHouse
+  >= 24.10 and the `SQL_` custom settings prefix).
+- The database-wide default-deny targets the user itself or one of its
+  *default* roles. A policy role that is granted but not default is refused.
+- `coverage.evaluate` (the same rules as `check`) passes over exactly the
+  policies that apply to the user and its enabled roles: every study table,
+  reference table and view has its own policy, `user_study` has only the
+  identity predicate, and `user_study_manual` and the other denied tables have
+  none. Unclassified tables are refused too.
+- Policy ownership (the same `sqlgen.policy_conflicts` as `apply` / `check`):
+  any row policy on the database not named `cbioportal_mcp_*`, or one of ours
+  attached to a different target, refuses. A foreign permissive policy that
+  applies to the MCP user is OR-ed with ours and widens what it reads; one on
+  another principal is widened by the catch-all.
+- The database, and the user or role the policies target, must be plain
+  identifiers (`sqlgen.validate_identifier`, as `apply` requires).
+- Role target: no direct `SELECT` on the database (or `*.*`), and no other
+  granted role that gives `SELECT ON <db>.*` without the policy role.
+  User target: direct grants are expected; only non-read direct grants on the
+  database, `WITH GRANT OPTION` and `WITH ADMIN OPTION` are refused.
+- No access management (`CREATE/ALTER/DROP USER/ROLE/ROW POLICY`, `ROLE ADMIN`,
+  ...), `SYSTEM`, `CREATE TEMPORARY TABLE`, table functions, `dictGet`, or
+  write/DDL privileges on the database or on `user_study` /
+  `user_study_manual` / `cancer_study`. `CHECK GRANT` runs without
+  `readonly=1`, because readonly hides write privileges.
+- As a random `@startup-probe.invalid` caller: visible `cancer_study` rows
+  equal the public studies in `user_study` (`email = ''`), no other caller's
+  `user_study` rows, and zero `user_study_manual` rows.
+
+The check reads `system.row_policies`, so the policy template grants the
+target `SHOW ROW POLICIES ON <db>.*` (re-run `apply` on existing databases).
+ClickHouse then lists policies of every database to that user; policy text
+holds table names and predicates, never emails. The refresh status
+(`system.view_refreshes`) is admin-only and stays with `check`. With filtering
+off, none of this runs.
+
 ## Security notes and caveats
 
 - **Direct grant bypass (role targets only).** With role-targeted policies,
@@ -360,11 +404,10 @@ are all example.org fakes; put real ones only in your local CSV.
   `CREATE USER OR REPLACE`, which drops any old direct grant.
 - **User targets have no such bypass.** The policies name the user itself, so
   its direct grants, its roles, and `SET ROLE NONE` change nothing; the live
-  tests prove this too. That is why the planned server startup check should
-  verify that *every study table and view in the connected database has a
-  policy that applies to the current user* (via `system.row_policies`
-  `apply_to_list` / roles), not "role only, no direct grants". This is also
-  what `check --target` verifies.
+  tests prove this too. That is why the server's startup check (below)
+  verifies that *every study table and view in the connected database has a
+  policy that applies to the current user*, and refuses direct grants only
+  for role targets. `check --target` verifies the same policies as admin.
 - Do not grant the target `CREATE TEMPORARY TABLE`, `REMOTE` / table functions,
   `dictGet`, or create `DEFINER` views. All of these can read around row
   policies. `check` rejects DEFINER/NONE views, extra materialized views and
