@@ -1398,10 +1398,15 @@ def _public_only_note() -> str | None:
     if not study_request.enabled():
         return None
     # The row policy exposes only caller + public rows; exclude the public email.
-    rows = run_select_query(
-        "SELECT 1 FROM user_study WHERE email != '' AND valid_until > now() LIMIT 1",
-        query_label="study_scope.private_grants",
-    )
+    try:
+        rows = run_select_query(
+            "SELECT 1 FROM user_study WHERE email != '' AND valid_until > now() LIMIT 1",
+            query_label="study_scope.private_grants",
+        )
+    except Exception:
+        # Do not log database exception text: it may contain a caller's email.
+        logger.warning("Could not determine public-only study status")
+        return "Public-only study status could not be determined; interpret frequencies with care."
     return None if rows else study_request.PUBLIC_ONLY_NOTE
 
 

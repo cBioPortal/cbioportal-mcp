@@ -10,6 +10,7 @@ from contextlib import contextmanager
 
 from clickhouse_connect import common
 
+from cbioportal_mcp import rollout
 from cbioportal_mcp.identity import request_decision
 
 _USER_QUERY = contextvars.ContextVar("cbioportal_user_query", default=None)
@@ -17,6 +18,12 @@ PUBLIC_ONLY_NOTE = "Results cover public studies only; frequencies are computed 
 
 
 def enabled() -> bool:
+    # RolloutSettings returned by get() has no filtering field. Read the
+    # immutable pin itself without changing it; env is needed only before
+    # startup validation (notably to configure clients at import time).
+    pin = rollout._PIN
+    if pin is not None:
+        return pin.filtering == "on"
     return os.getenv("CBIOPORTAL_MCP_STUDY_FILTERING") == "on"
 
 
@@ -38,16 +45,67 @@ def email() -> str:
     return value
 
 
-def guard_sql(query: str) -> None:
-    # Fail closed even inside quoted identifiers/strings/comments. Decode CH's
-    # backslash and doubled-quote escapes before checking reserved spellings.
-    normalized = re.sub(
-        r"\\(?:x([0-9a-fA-F]{2})|(.))", lambda m: (chr(int(m[1], 16)) if m[1] else m[2]), query
+def _decode_sql(value: str) -> str:
+    return re.sub(
+        r"\\(?:x([0-9a-fA-F]{2})|(.))", lambda m: (chr(int(m[1], 16)) if m[1] else m[2]), value
     )
-    normalized = re.sub(r"['`\"\s]", "", normalized).lower()
-    if any(word in normalized for word in ("sql_cbio_user", "getsetting")) or (
-        "settings" in normalized and "sql_" in normalized
-    ):
+
+
+def _sql_tokens(query: str):
+    """Separate strings/identifiers from keywords and ignore SQL comments."""
+    pattern = re.compile(
+        r"\s+|--[^\r\n]*|\#[^\r\n]*|/\*|"
+        r"'(?:(?:\\.|'')|[^'\\])*'|"
+        r'"(?:(?:\\.|"")|[^"\\])*"|'
+        r"`(?:(?:\\.|``)|[^`\\])*`|[a-zA-Z_][a-zA-Z_0-9]*|.",
+        re.DOTALL,
+    )
+    position = 0
+    while position < len(query):
+        match = pattern.match(query, position)
+        token = match[0]
+        position = match.end()
+        if token == "/*":
+            depth = 1
+            while position < len(query) and depth:
+                if query.startswith("/*", position):
+                    depth += 1
+                    position += 2
+                elif query.startswith("*/", position):
+                    depth -= 1
+                    position += 2
+                else:
+                    position += 1
+            continue
+        if token.isspace() or token.startswith(("--", "#")):
+            continue
+        kind = "word"
+        if token[0] in "'\"`":
+            kind = "string" if token[0] == "'" else "identifier"
+            token = token[1:-1].replace(token[0] * 2, token[0])
+        yield kind, _decode_sql(token).lower()
+
+
+def guard_sql(query: str) -> None:
+    tokens = list(_sql_tokens(query))
+    # Reserved identity spellings remain forbidden even inside literals.
+    normalized = re.sub(r"['`\"\s]", "", _decode_sql(query)).lower()
+    forbidden = any(word in normalized for word in ("sql_cbio_user", "getsetting"))
+    for index, (kind, value) in enumerate(tokens):
+        # Quotes, whitespace and comments cannot hide qualified system tables.
+        if value in ("system.settings", "system.settings_changes") or (
+            value == "system"
+            and index + 2 < len(tokens)
+            and tokens[index + 1][1] == "."
+            and tokens[index + 2][1] in ("settings", "settings_changes")
+        ):
+            forbidden = True
+        if kind == "word" and value == "settings":
+            # Only an actual SETTINGS keyword can start a settings clause;
+            # strings such as 'mutation_settings' and 'sql_x' are harmless.
+            if any(v.startswith("sql_") for _, v in tokens[index + 1 :]):
+                forbidden = True
+    if forbidden:
         raise ValueError("User SQL cannot access or override identity settings")
 
 

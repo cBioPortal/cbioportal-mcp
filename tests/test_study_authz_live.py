@@ -576,6 +576,10 @@ def test_p7_user_tools_and_cache_isolation(server, monkeypatch):
         server.admin.command(f"ALTER TABLE {DB}.cancer_study ADD COLUMN IF NOT EXISTS {column}")
     previous = common.get_setting("invalid_setting_action")
     monkeypatch.setenv("CBIOPORTAL_MCP_STUDY_FILTERING", "on")
+    # Upstream client preparation also validates environment-based credentials.
+    monkeypatch.setenv("CLICKHOUSE_HOST", "127.0.0.1")
+    monkeypatch.setenv("CLICKHOUSE_USER", "mcp_restricted")
+    monkeypatch.setenv("CLICKHOUSE_PASSWORD", "pw")
     config = dict(
         host="127.0.0.1",
         port=server.port,

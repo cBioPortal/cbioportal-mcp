@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 from clickhouse_connect import common
 
-from cbioportal_mcp import identity, server
+from cbioportal_mcp import domain_tools, identity, rollout, server
 from cbioportal_mcp.study_authz import request
 
 
@@ -44,6 +44,21 @@ def filtering(monkeypatch):
         "SELECT 1 SETTINGS `SQL_other`='x'",
         "SELECT 1 SETTINGS SQL_other='x'",
         "SELECT 'SQL_''cbio_user'",
+        "SELECT name, value FROM system.settings WHERE name LIKE 'S%cbio%'",
+        "SELECT * FROM system.settings WHERE is_custom",
+        "SELECT * FROM system.settings_changes",
+        "SELECT * FROM `system`.`settings`",
+        'SELECT * FROM "system" . "settings_changes"',
+        "SELECT * FROM system /* comment */ . /* comment */ settings",
+        "SELECT * FROM system -- comment\n . settings_changes",
+        "SELECT * FROM system # comment\n . settings",
+        "SELECT * FROM system /* nested /* comment */ end */ . settings",
+        r"SELECT * FROM `system`.`s\x65ttings`",
+        'SELECT * FROM "system.settings"',
+        "SELECT 1 SETTINGS /* comment */ `SQL_custom` = 'x'",
+        "SELECT 1 SETTINGS max_threads = 1, SQL_custom = 'x'",
+        r"SELECT 1 SETTINGS `SQL_\x63ustom` = 'x'",
+        "SELECT 1 SETTINGS 'SQL_custom' = 'x'",
     ],
 )
 def test_guard(filtering, monkeypatch, sql):
@@ -203,3 +218,127 @@ def test_cached_guide_is_rechecked_on_revocation(filtering, monkeypatch):
             assert "unavailable" in server._study_guide_text("private_study")
     finally:
         server._clear_study_guide_cache()
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "WITH 'mutation_settings' AS a SELECT 'sql_x'",
+        "SELECT 'SETTINGS SQL_custom = 1'",
+        "SELECT '/* SETTINGS */', 'sql_x'",
+        "SELECT 'it\\'s SETTINGS', 'sql_x'",
+        "SELECT 'it''s SETTINGS', 'sql_x'",
+        "SELECT sql_x FROM mutation_settings",
+        "SELECT * FROM system.columns",
+        "SELECT 1 SETTINGS max_threads = 1",
+        "SELECT 1 /* SETTINGS SQL_custom = 1 */",
+    ],
+)
+def test_guard_allows_harmless_sql(sql):
+    request.guard_sql(sql)
+
+
+@pytest.mark.parametrize("filtering_mode", ["off", "on"])
+def test_filtering_follows_immutable_startup_pin(monkeypatch, filtering_mode):
+    monkeypatch.setenv("CBIOPORTAL_MCP_AUTH_ENFORCEMENT", "enforce")
+    monkeypatch.setenv("CBIOPORTAL_MCP_PUBLIC_DB_CHECK", "enforce")
+    monkeypatch.setenv("CBIOPORTAL_MCP_STUDY_FILTERING", filtering_mode)
+    settings = rollout.initialize(filtering_mode, local_dev=True)
+    pin = rollout._PIN
+    monkeypatch.setenv("CBIOPORTAL_MCP_STUDY_FILTERING", "off" if filtering_mode == "on" else "on")
+    assert request.enabled() == (filtering_mode == "on")
+    assert rollout.get() is settings and rollout._PIN is pin
+
+
+@pytest.mark.parametrize("format_name", ["compact", "rows"])
+@pytest.mark.parametrize("max_rows", [1, 3])
+def test_scope_check_failure_keeps_query_and_retries(
+    filtering, monkeypatch, caplog, format_name, max_rows
+):
+    monkeypatch.setenv("CBIOPORTAL_MCP_RESULT_FORMAT", format_name)
+    scope_checks = iter([RuntimeError("database exception alice@example.org"), [], [{"n": 1}]])
+
+    def query(sql, **kwargs):
+        if kwargs["query_label"] == "study_scope.private_grants":
+            outcome = next(scope_checks)
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
+        return [{"n": 1}, {"n": 2}]
+
+    monkeypatch.setattr(server, "run_select_query", query)
+    tool = server.clickhouse_run_select_query.fn.__wrapped__
+    with caller("alice@example.org"):
+        first = tool("SELECT 1", max_rows=max_rows)
+        expected = [[1], [2]] if format_name == "compact" else [{"n": 1}, {"n": 2}]
+        assert first["rows"] == expected[:max_rows]
+        assert "could not be determined" in first["study_scope_note"]
+        assert tool("SELECT 1")["study_scope_note"] == request.PUBLIC_ONLY_NOTE
+        assert "study_scope_note" not in tool("SELECT 1")
+    assert "Could not determine public-only study status" in caplog.text
+    assert "alice@example.org" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "tool_name,args",
+    [
+        ("get_alteration_frequency", ("TP53", "study_a")),
+        ("get_top_altered_genes", ("study_a",)),
+        ("get_gene_frequency_by_cancer_type", ("TP53",)),
+        ("get_profiled_counts", ("study_a",)),
+    ],
+)
+@pytest.mark.parametrize("format_name", ["compact", "rows"])
+@pytest.mark.parametrize("scope", ["public", "private", "failed", "off"])
+def test_domain_scope_metadata(monkeypatch, caplog, tool_name, args, format_name, scope):
+    monkeypatch.setenv("CBIOPORTAL_MCP_RESULT_FORMAT", format_name)
+    checks = []
+
+    def query(sql, **kwargs):
+        if kwargs["query_label"] == "study_scope.private_grants":
+            checks.append(True)
+            if scope == "failed":
+                raise RuntimeError("alice@example.org: scope lookup failed")
+            return [{"n": 1}] if scope == "private" else []
+        return [
+            {
+                "matched_studies": ["study_a"],
+                "matched_genes": ["TP53"],
+                "altered_any": 2,
+                "profiled_ANY": 10,
+                "hugo_gene_symbol": "TP53",
+                "altered_samples": 2,
+                "profiled_samples": 10,
+                "profile_type": "ALL_SAMPLES",
+                "samples": 10,
+                "patients": 10,
+            }
+        ]
+
+    monkeypatch.setattr(server, "run_select_query", query)
+    tool = getattr(domain_tools, tool_name).fn.__wrapped__
+    monkeypatch.setenv("CBIOPORTAL_MCP_STUDY_FILTERING", "off")
+    baseline = tool(*args)
+    assert not checks
+    monkeypatch.setenv("CBIOPORTAL_MCP_STUDY_FILTERING", "off" if scope == "off" else "on")
+    result = tool(*args)
+    if scope == "public":
+        assert result.pop("study_scope_note") == request.PUBLIC_ONLY_NOTE
+    elif scope == "failed":
+        assert "could not be determined" in result.pop("study_scope_note")
+        assert "alice@example.org" not in caplog.text
+    assert json.dumps(result) == json.dumps(baseline)
+    assert len(checks) == (0 if scope == "off" else 1)
+
+
+def test_scope_check_failure_keeps_study_list(filtering, monkeypatch):
+    def query(sql, **kwargs):
+        if kwargs["query_label"] == "study_scope.private_grants":
+            raise RuntimeError("scope lookup failed")
+        return [{"cancer_study_identifier": "study_a", "name": "Study A"}]
+
+    monkeypatch.setattr(server, "run_select_query", query)
+    with caller("alice@example.org"):
+        result = server.list_studies.fn.__wrapped__()
+    assert result[0]["cancer_study_identifier"] == "study_a"
+    assert "could not be determined" in result[-1]["note"]
