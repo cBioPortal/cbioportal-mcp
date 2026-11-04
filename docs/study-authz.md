@@ -374,25 +374,62 @@ as `currentUser()`, and never logs an email:
   another principal is widened by the catch-all.
 - The database, and the user or role the policies target, must be plain
   identifiers (`sqlgen.validate_identifier`, as `apply` requires).
-- Role target: no direct `SELECT` on the database (or `*.*`), and no other
-  granted role that gives `SELECT ON <db>.*` without the policy role.
-  User target: direct grants are expected; only non-read direct grants on the
-  database, `WITH GRANT OPTION` and `WITH ADMIN OPTION` are refused.
-- No access management (`CREATE/ALTER/DROP USER/ROLE/ROW POLICY`, `ROLE ADMIN`,
-  ...), `SYSTEM`, `CREATE TEMPORARY TABLE`, table functions, `dictGet`, or
-  write/DDL privileges on the database or on `user_study` /
-  `user_study_manual` / `cancer_study`. `CHECK GRANT` runs without
-  `readonly=1`, because readonly hides write privileges.
+- Every grant held directly or through **any** granted role is audited from
+  `system.grants` and `system.role_grants`, recursively, including non-default
+  roles. Unreadable metadata refuses startup. `SHOW GRANTS FINAL` additionally
+  detects wildcard names: both 25.8 and 26.6 omit wildcard suffixes from
+  `system.grants` (for example, `authz*` appears as `authz`). No `CHECK GRANT`
+  or per-role `SHOW GRANTS FOR` permission is needed.
+- User target: only database-wide `SELECT` and `SHOW ROW POLICIES` on the
+  connected database, plus `SELECT` on unrelated databases, are allowed.
+  Role target: only the default policy role may hold those grants; the user
+  must have no direct privileges. Other granted roles may be empty but may
+  not carry any grants, even on unrelated databases. Use a separate policy
+  role per policy database (including blue/green deployments).
+- Wildcard names, global privileges, column/table-scoped grants on the policy
+  database, partial revokes, grant/admin options, and every privilege outside
+  that short allow list refuse startup. This includes table functions,
+  specific `SYSTEM` rights, write/DDL and access management. Identifier
+  validation and policy ownership reuse P4's checks.
 - As a random `@startup-probe.invalid` caller: visible `cancer_study` rows
-  equal the public studies in `user_study` (`email = ''`), no other caller's
+  and identifiers equal the public studies in `user_study` (`email = ''`), no other caller's
   `user_study` rows, and zero `user_study_manual` rows.
 
-The check reads `system.row_policies`, so the policy template grants the
-target `SHOW ROW POLICIES ON <db>.*` (re-run `apply` on existing databases).
-ClickHouse then lists policies of every database to that user; policy text
-holds table names and predicates, never emails. The refresh status
-(`system.view_refreshes`) is admin-only and stays with `check`. With filtering
-off, none of this runs.
+The policy template grants `SHOW ROW POLICIES ON <db>.*` to the policy target
+(re-run `apply` on existing databases). The runbook must also grant these
+metadata reads, as an administrator, **to the same policy target** (user or
+role):
+
+```sql
+GRANT SELECT ON system.grants TO <policy_target>;
+GRANT SELECT ON system.role_grants TO <policy_target>;
+```
+
+These are `SELECT` grants on an unrelated database and are inside the allow
+list. They expose server-wide grant/role metadata to that credential; the
+startup queries themselves select only the connected user's reachable graph.
+Do not grant a separate metadata role: that would be another role carrying
+grants. Missing access is a startup refusal, never an empty grant set.
+
+ClickHouse lists policies of every database with `SHOW ROW POLICIES`; policy
+text holds predicates, never emails. Refresh status (`system.view_refreshes`)
+remains an admin `check`. With filtering off, none of this runs.
+
+Cloud compatibility: Docker 25.8 and 26.6 exercise SQL-created users with no
+roles, direct policies, and `SELECT` on five other databases. They do not
+replicate a Cloud service's built-in grant configuration. Cloud's documented
+[`default_role` and SQL Console roles](https://clickhouse.com/docs/products/cloud/guides/security/cloud-access-management/common-access-management-queries)
+can carry administrative or global read privileges; those are deliberately
+refused. Inspect the actual runtime user with `SHOW GRANTS FINAL` and its
+reachable rows in both system tables before rollout. Read-only inspection of a real Cloud **26.6.1.2455** runtime credential found
+one explicit database `SELECT` grant, no granted/enabled roles, and the same
+single grant in `SHOW GRANTS FINAL`; there were no extra implicit `SHOW`
+grants. Both structured system tables returned `ACCESS_DENIED`; an administrator
+must supply the two grants above. The credential could not inspect
+`llm_user` (`SHOW USERS` denied), so that user's actual grants, Cloud's built-in
+role contents, and an end-to-end policy-enabled startup on Cloud remain
+unverified. No Cloud grants or data were changed. Do not broaden the allow
+list to accommodate a console/admin role; use a dedicated SQL runtime user.
 
 ## Security notes and caveats
 

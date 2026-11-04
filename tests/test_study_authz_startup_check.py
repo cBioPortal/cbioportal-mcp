@@ -16,7 +16,6 @@ from cbioportal_mcp.study_authz import sqlgen, startup_check
 from cbioportal_mcp.study_authz.startup_check import (
     PolicyCoverageError,
     check,
-    parse_show_grants,
     redact,
     run_startup_check,
 )
@@ -36,12 +35,20 @@ class FakeClickHouse:
     grants: list = field(default_factory=lambda: [f"GRANT {ROLE} TO mcp"])
     tables: dict = field(default_factory=dict)
     policies: list = field(default_factory=list)
-    granted: set = field(default_factory=set)  # {(privilege, scope, role or None)}
+    role_grants: dict = field(
+        default_factory=lambda: {
+            ROLE: [
+                f"GRANT SELECT ON {DB}.* TO {ROLE}",
+                f"GRANT SHOW ROW POLICIES ON {DB}.* TO {ROLE}",
+            ]
+        }
+    )  # role -> its SHOW GRANTS lines
     counts: dict = field(
         default_factory=lambda: {"visible": 2, "public": 2, "others": 0, "manual": 0}
     )
     accept_custom_setting: bool = True
     can_read_policies: bool = True
+    can_read_grants: bool = True
     settings_seen: list = field(default_factory=list)
 
     def __post_init__(self):
@@ -60,12 +67,11 @@ class FakeClickHouse:
     def query(self, sql, parameters=None, settings=None):
         settings = settings or {}
         self.settings_seen.append(settings)
-        # readonly=1 would hide write privileges from CHECK GRANT; all else sends it.
-        assert settings.get("readonly") == (None if sql.startswith("CHECK GRANT") else 1)
-        rows = self._answer(sql, settings)
+        assert settings.get("readonly") == 1
+        rows = self._answer(sql, settings, parameters)
         return type("R", (), {"result_rows": rows})()
 
-    def _answer(self, sql, settings):
+    def _answer(self, sql, settings, parameters):
         if "getSettingOrDefault" in sql:
             if not self.accept_custom_setting:
                 raise RuntimeError(
@@ -77,8 +83,37 @@ class FakeClickHouse:
             return [[self.user]]
         if "system.enabled_roles" in sql:
             return [list(r) for r in self.enabled]
-        if sql == "SHOW GRANTS":
-            return [[g] for g in self.grants]
+        if "system.grants" in sql or "system.role_grants" in sql:
+            if not self.can_read_grants:
+                raise RuntimeError("ACCESS_DENIED: SELECT ON system.grants")
+            principal = parameters["principal"]
+            lines = self.grants if "user_name" in sql else self.role_grants.get(principal, [])
+            rows = []
+            # Fixture notation only; the production audit consumes structured rows.
+            for line in lines:
+                privilege = re.fullmatch(r"GRANT (.+) ON (.+) TO \S+( WITH GRANT OPTION)?", line)
+                if privilege and "system.grants" in sql:
+                    db, table = privilege[2].replace("`", "").split(".")
+                    for part in privilege[1].split(", "):
+                        column = "x" if "(" in part else None
+                        part = part.split("(")[0]
+                        rows.append(
+                            (
+                                part,
+                                None if db == "*" else db.rstrip("*"),
+                                None if table == "*" else table.rstrip("*"),
+                                column,
+                                0,
+                                bool(privilege[3]),
+                            )
+                        )
+                elif not privilege and "system.role_grants" in sql:
+                    match = re.fullmatch(r"GRANT (.+) TO \S+( WITH ADMIN OPTION)?", line)
+                    assert match, line
+                    rows.extend((r.strip("`"), bool(match[2])) for r in match[1].split(", "))
+            return rows
+        if sql == "SHOW GRANTS FINAL":
+            return [[g] for g in self.grants + sum(self.role_grants.values(), [])]
         if "system.row_policies" in sql:
             if not self.can_read_policies:
                 raise RuntimeError("Code: 497. mcp: Not enough privileges (ACCESS_DENIED)")
@@ -89,10 +124,9 @@ class FakeClickHouse:
         if "system.tables" in sql:
             create = "CREATE VIEW d.v SQL SECURITY INVOKER AS SELECT 1"
             return [[n, e, create if e == "View" else ""] for n, e in self.tables.items()]
-        if sql.startswith("CHECK GRANT"):
-            m = re.match(r"CHECK GRANT (.+) ON (\S+)$", sql)
-            scope = m.group(2).replace("`", "")
-            return [[int((m.group(1), scope, settings.get("role")) in self.granted)]]
+        if "groupUniqArray" in sql:
+            kind = "public" if "user_study" in sql else "visible"
+            return [[self.counts.get(kind + "_ids", list(range(self.counts[kind])))]]
         if "uniqExact" in sql:
             return [[self.counts["public"]]]
         if "email != ''" in sql:
@@ -168,7 +202,13 @@ def test_other_role_with_select_refused():
     fake = FakeClickHouse(
         enabled=[(ROLE, 1, 0), ("analyst", 1, 0)],
         grants=[f"GRANT {ROLE}, analyst TO mcp"],
-        granted={("SELECT", f"{DB}.*", "analyst")},
+        role_grants={
+            ROLE: [
+                f"GRANT SELECT ON {DB}.* TO {ROLE}",
+                f"GRANT SHOW ROW POLICIES ON {DB}.* TO {ROLE}",
+            ],
+            "analyst": [f"GRANT SELECT ON {DB}.* TO analyst"],
+        },
     )
     refused(fake, "role analyst grants SELECT ON d.* without")
 
@@ -185,7 +225,11 @@ def test_user_name_that_is_an_email_is_redacted():
 
 
 def test_no_policy_for_user_refused():
-    fake = FakeClickHouse(enabled=[("someone_else", 1, 0)], grants=["GRANT someone_else TO mcp"])
+    fake = FakeClickHouse(
+        enabled=[("someone_else", 1, 0)],
+        grants=["GRANT someone_else TO mcp"],
+        role_grants={"someone_else": []},
+    )
     refused(fake, "no study row policy applies to mcp")
 
 
@@ -201,7 +245,7 @@ def test_policy_for_another_principal_does_not_count():
         (p[0], p[1], p[2], p[3], p[4], ("other_role",), p[6]) if p[1] == "gene" else p
         for p in fake.policies
     ]
-    refused(fake, "gene: reference table has only the default-deny")
+    refused(fake, "attached to other_role")
 
 
 def test_extra_open_policy_through_another_enabled_role_refused():
@@ -280,7 +324,7 @@ def test_unclassified_table_refused():
     ],
 )
 def test_admin_privileges_refused(privilege, scope):
-    fake = FakeClickHouse(granted={(privilege, scope, None)})
+    fake = FakeClickHouse(role_grants={ROLE: [f"GRANT {privilege} ON {scope} TO {ROLE}"]})
     refused(fake, f"user holds {privilege} ON {scope}")
 
 
@@ -296,6 +340,30 @@ def test_direct_write_grant_refused_even_for_user_target():
 def test_role_with_admin_option_refused():
     fake = FakeClickHouse(grants=[f"GRANT {ROLE} TO mcp WITH ADMIN OPTION"])
     refused(fake, "WITH ADMIN OPTION")
+
+
+def test_unreadable_grant_metadata_refused():
+    refused(FakeClickHouse(can_read_grants=False), "needs SELECT ON system.grants")
+
+
+def test_target_role_grant_option_refused():
+    fake = FakeClickHouse(
+        role_grants={ROLE: [f"GRANT SELECT ON {DB}.* TO {ROLE} WITH GRANT OPTION"]}
+    )
+    refused(fake, "WITH GRANT OPTION")
+
+
+def test_user_target_role_carrying_grants_refused():
+    fake = user_target()
+    fake.grants.append("GRANT analyst TO llm_user")
+    fake.role_grants = {"analyst": [f"GRANT SELECT ON {DB}.* TO analyst"]}
+    refused(fake, "only the policy target may carry grants")
+
+
+def test_wildcard_database_grant_refused():
+    fake = user_target()
+    fake.grants.append("GRANT SELECT ON authz*.* TO llm_user")
+    refused(fake, "wildcard database")
 
 
 def test_custom_setting_rejected_refused_without_echoing_email():
@@ -314,9 +382,10 @@ def test_bad_database_name_refused():
 
 
 def test_many_failures_summarized_on_one_line():
-    fake = FakeClickHouse(granted={(p, "*.*", None) for p in startup_check.FORBIDDEN_GLOBAL})
+    privileges = ["INSERT", "ALTER", "DROP TABLE", "TRUNCATE", "dictGet", "SYSTEM"]
+    fake = FakeClickHouse(role_grants={ROLE: [f"GRANT {p} ON *.* TO {ROLE}" for p in privileges]})
     message = refused(fake, "more)")
-    assert message.count(";") == startup_check.MAX_REASONS - 1
+    assert message.count(";") < startup_check.MAX_REASONS
 
 
 def test_probe_email_is_reserved_and_random():
@@ -324,21 +393,27 @@ def test_probe_email_is_reserved_and_random():
     assert a != b and a.endswith("@startup-probe.invalid") and a == a.lower()
 
 
-def test_parse_show_grants():
-    grants, roles = parse_show_grants(
-        [
-            "GRANT SELECT, SHOW ROW POLICIES ON d.* TO u",
-            "GRANT SELECT(a, b), INSERT ON `d`.`t` TO u WITH GRANT OPTION",
-            "REVOKE SELECT ON d.x FROM u",
-            "GRANT r1, `r2` TO u",
-            "GRANT r3 TO u WITH ADMIN OPTION",
-        ]
-    )
-    assert [(g.privileges, g.database, g.table, g.grant_option) for g in grants] == [
-        (("SELECT", "SHOW ROW POLICIES"), "d", "*", False),
-        (("SELECT", "INSERT"), "d", "t", True),
-    ]
-    assert roles == {"r1": False, "r2": False, "r3": True}
+def test_structured_role_recursion_and_dormant_grants():
+    fake = FakeClickHouse()
+    fake.role_grants[ROLE].append("GRANT outer TO " + ROLE)
+    fake.role_grants["outer"] = ["GRANT inner TO outer"]
+    fake.role_grants["inner"] = ["GRANT SELECT ON d.sample TO inner WITH GRANT OPTION"]
+    refused(fake, "WITH GRANT OPTION")
+
+
+def test_empty_nested_role_graph_passes_with_cycle():
+    fake = FakeClickHouse()
+    fake.role_grants[ROLE].append("GRANT outer TO " + ROLE)
+    fake.role_grants["outer"] = ["GRANT inner TO outer"]
+    fake.role_grants["inner"] = ["GRANT outer TO inner"]
+    assert check(fake, DB, EMAIL).target == ROLE
+
+
+def test_role_on_unrelated_database_is_also_refused():
+    fake = user_target()
+    fake.grants.append("GRANT extra TO llm_user")
+    fake.role_grants = {"extra": ["GRANT SELECT ON other.* TO extra"]}
+    refused(fake, "role extra grants SELECT ON other.*")
 
 
 def test_redact_strips_emails_and_newlines():
@@ -392,3 +467,41 @@ def test_template_grants_show_row_policies_before_select():
 
 def _params():
     return sqlgen.Params(database=DB, public_group="PUBLIC", app_name="cbioportal")
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "GRANT SELECT ON authz*.* TO mcp",
+        "GRANT SELECT ON `authz`*.* TO mcp",
+        "GRANT SELECT ON d.sample* TO mcp",
+        "GRANT SELECT ON d.`sample`* TO mcp",
+    ],
+)
+def test_wildcard_flags_missing_from_structured_metadata_refused(line):
+    from cbioportal_mcp.study_authz.grants import Grant, HeldGrants, audit_grants
+
+    held = HeldGrants(
+        [("mcp", True, Grant("SELECT", "authz", None, None, False, False))], set(), [], [line]
+    )
+    assert any("wildcard" in r for r in audit_grants(held, "mcp", "mcp", True, DB))
+
+
+@pytest.mark.parametrize("partial,option", [(True, False), (False, True)])
+def test_structured_grant_flags_refused(partial, option):
+    from cbioportal_mcp.study_authz.grants import Grant, HeldGrants, audit_grants
+
+    held = HeldGrants(
+        [("mcp", True, Grant("SELECT", DB, None, None, partial, option))],
+        set(),
+        [],
+        ["GRANT SELECT ON d.* TO mcp"],
+    )
+    assert audit_grants(held, "mcp", "mcp", True, DB)
+
+
+def test_probe_same_count_wrong_study_identifiers_refused():
+    fake = FakeClickHouse()
+    fake.counts["visible_ids"] = ["public_a", "private_b"]
+    fake.counts["public_ids"] = ["public_a", "public_c"]
+    refused(fake, "study identifiers differ from public studies")

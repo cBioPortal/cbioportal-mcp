@@ -16,18 +16,19 @@ the study row policies of its database. Using that same connection:
    Every row policy on the database must be ours and attached to this target
    (``sqlgen.policy_conflicts``, P4's ownership rule): a foreign PERMISSIVE
    policy is OR-ed with ours.
-3. Role target: no direct grant on the database (a direct ``SELECT`` plus
-   ``SET ROLE NONE`` reads everything through ``ALL EXCEPT <role>``), and no
-   other granted role that gives ``SELECT`` without the policy role. User
-   target: direct grants are expected; only non-read privileges are refused.
-4. No admin-ish privileges: access management, write/DDL on the database,
-   temporary tables, table functions, ``dictGet``, ``SYSTEM``.
-5. A probe as a reserved, random, non-existent email sees exactly the public
-   studies, no other caller's ``user_study`` rows and no ``user_study_manual``.
+3. Audit system.grants and system.role_grants for the user and every
+   transitively granted role, default or not. Only SELECT and SHOW ROW POLICIES
+   on the policy database and SELECT on unrelated databases are allowed.
+   Only the default policy role may carry grants for a role target; for a user
+   target no role may carry grants. Grant/admin options always refuse.
+   SHOW GRANTS FINAL additionally detects wildcard names: system.grants loses
+   the trailing wildcard on both ClickHouse 25.8 and 26.6.
+4. A reserved, random, non-existent caller sees exactly the public studies,
+   no other caller's user_study rows, and no user_study_manual rows.
 
-Needs ``SHOW ROW POLICIES ON <db>.*`` for the user (the policy template grants
-it to the target). Failures are one line that names the table or condition and
-never an email. With filtering off none of this runs.
+Needs SHOW ROW POLICIES ON <db>.* and SELECT on system.grants and
+system.role_grants. Unreadable metadata refuses startup. With filtering off
+none of this runs. Failures are one line and never contain emails.
 """
 
 from __future__ import annotations
@@ -50,77 +51,17 @@ from cbioportal_mcp.study_authz.coverage import (
     fetch_objects,
     fetch_policy_rows,
 )
+from cbioportal_mcp.study_authz.grants import audit_grants, collect_grants
 from cbioportal_mcp.study_authz.sqlgen import (
     policy_conflicts,
     quote_identifier,
+    validate_identifier,
 )
 
 FILTERING_ENV = "CBIOPORTAL_MCP_STUDY_FILTERING"
 EMAIL_SETTING = "SQL_cbio_user"
 # RFC 2606 reserves .invalid: no real caller can ever have this address.
 PROBE_DOMAIN = "startup-probe.invalid"
-
-# Privileges a direct grant on the database may carry (user target only).
-READ_PRIVILEGES = frozenset(
-    {
-        "SELECT",
-        "SHOW",
-        "SHOW TABLES",
-        "SHOW COLUMNS",
-        "SHOW DATABASES",
-        "SHOW DICTIONARIES",
-        "SHOW ROW POLICIES",
-        "SHOW POLICIES",
-    }
-)
-SELECT_PRIVILEGES = frozenset({"SELECT", "ALL", "ALL PRIVILEGES"})
-
-# Effective privileges (user + default roles) that must be absent, ON *.*.
-FORBIDDEN_GLOBAL = (
-    "ACCESS MANAGEMENT",
-    "CREATE USER",
-    "ALTER USER",
-    "DROP USER",
-    "CREATE ROLE",
-    "ALTER ROLE",
-    "DROP ROLE",
-    "ROLE ADMIN",
-    "CREATE ROW POLICY",
-    "ALTER ROW POLICY",
-    "DROP ROW POLICY",
-    "CREATE QUOTA",
-    "ALTER QUOTA",
-    "CREATE SETTINGS PROFILE",
-    "ALTER SETTINGS PROFILE",
-    "SHOW USERS",
-    "ALLOW SQL SECURITY NONE",
-    "SYSTEM",
-    "CREATE TEMPORARY TABLE",
-    "REMOTE",
-    "URL",
-    "FILE",
-    "S3",
-)
-# ON <db>.* and ON the authz tables (catches table-level grants there).
-FORBIDDEN_ON_DATABASE = (
-    "INSERT",
-    "ALTER",
-    "ALTER UPDATE",
-    "ALTER DELETE",
-    "CREATE TABLE",
-    "CREATE VIEW",
-    "CREATE DICTIONARY",
-    "DROP TABLE",
-    "DROP VIEW",
-    "TRUNCATE",
-    "OPTIMIZE",
-    "CREATE ROW POLICY",
-    "ALTER ROW POLICY",
-    "DROP ROW POLICY",
-    "dictGet",
-)
-FORBIDDEN_ON_AUTHZ_TABLES = ("INSERT", "ALTER UPDATE", "ALTER DELETE", "TRUNCATE")
-AUTHZ_TABLES = (USER_STUDY_TABLE, USER_STUDY_MANUAL_TABLE, "cancer_study")
 
 _EMAIL_RE = re.compile(r"[^\s@'\"`]+@[^\s@'\"`]+")
 MAX_REASONS = 5
@@ -139,16 +80,6 @@ class CheckResult:
     public_studies: int
 
 
-@dataclass(frozen=True)
-class Grant:
-    """One ``SHOW GRANTS`` privilege line: ``GRANT <privileges> ON <object>``."""
-
-    privileges: tuple[str, ...]
-    database: str  # '*' for ON *.* / ON *
-    table: str
-    grant_option: bool
-
-
 def filtering_enabled(env=os.environ) -> bool:
     return env.get(FILTERING_ENV, "off").strip().lower() == "on"
 
@@ -161,53 +92,6 @@ def redact(text: str) -> str:
 
 def probe_email() -> str:
     return f"cbio-mcp-probe-{uuid.uuid4().hex}@{PROBE_DOMAIN}"
-
-
-def _split_privileges(text: str) -> list[str]:
-    out, depth, cur = [], 0, ""
-    for ch in text:
-        depth += ch == "("
-        depth -= ch == ")"
-        if ch == "," and depth == 0:
-            out.append(cur)
-            cur = ""
-        else:
-            cur += ch
-    out.append(cur)
-    return [re.sub(r"\(.*\)", "", p).strip().upper() for p in out if p.strip()]
-
-
-def parse_show_grants(lines: list[str]) -> tuple[list[Grant], dict[str, bool]]:
-    """(privilege grants, granted role -> with admin option) for the current user.
-
-    ``REVOKE`` lines are ignored: a partially revoked direct grant is still a
-    direct grant.
-    """
-    grants: list[Grant] = []
-    roles: dict[str, bool] = {}
-    for raw in lines:
-        line = raw.strip()
-        if not line.upper().startswith("GRANT "):
-            continue
-        match = re.match(r"GRANT\s+(.+?)\s+ON\s+(\S+)\s+TO\s+", line, re.I)
-        if match:
-            target = match.group(2).replace("`", "")
-            db, _, table = target.partition(".")
-            grants.append(
-                Grant(
-                    tuple(_split_privileges(match.group(1))),
-                    db,
-                    table or "*",
-                    "WITH GRANT OPTION" in line.upper(),
-                )
-            )
-            continue
-        match = re.match(r"GRANT\s+(.+?)\s+TO\s+\S+", line, re.I)
-        if match:
-            admin = "WITH ADMIN OPTION" in line.upper()
-            for role in match.group(1).split(","):
-                roles[role.strip().strip("`")] = admin
-    return grants, roles
 
 
 class _Session:
@@ -224,13 +108,6 @@ class _Session:
 
     def scalar(self, sql: str, parameters=None, **extra):
         return self.rows(sql, parameters, **extra)[0][0]
-
-    def granted(self, privilege: str, scope: str, **extra) -> bool:
-        # Without readonly: under readonly=1 CHECK GRANT reports every write and
-        # access-management privilege as absent, and the MCP's readonly=1 is a
-        # per-query setting that someone holding these credentials can omit.
-        sql = f"CHECK GRANT {privilege} ON {scope}"
-        return int(self.scalar(sql, readonly=None, **extra)) == 1
 
 
 def check(client, database: str, email: str | None = None) -> CheckResult:
@@ -278,9 +155,11 @@ def _check(client, database: str, email: str | None) -> CheckResult:
             ),
         )
     }
-    grants, granted_roles = parse_show_grants(
-        [r[0] for r in step("SHOW GRANTS", lambda: s.rows("SHOW GRANTS"))]
+    principal_grants = step(
+        "grant metadata (needs SELECT ON system.grants and system.role_grants)",
+        lambda: collect_grants(s, user),
     )
+    granted_roles = principal_grants.roles
     rows: list[PolicyRow] = step(
         f"cannot read system.row_policies (grant SHOW ROW POLICIES ON {database}.* "
         "to the policy target)",
@@ -308,6 +187,10 @@ def _check(client, database: str, email: str | None) -> CheckResult:
             )
         target, target_is_user = role_targets[0], False
 
+    try:
+        validate_identifier("policy target", target)
+    except ValueError as e:
+        raise PolicyCoverageError(str(e)) from None
     reasons: list[str] = []
     principals = {user} | set(enabled)
     applicable = [r.policy for r in rows if r.applies_to(principals)]
@@ -333,47 +216,13 @@ def _check(client, database: str, email: str | None) -> CheckResult:
         f"{name}: unclassified table/view (classify in catalog.py)" for name in report.unclassified
     ]
 
-    # 3. Grants that bypass a role target, and admin options.
-    if not target_is_user:
-        if not enabled[target][0]:
-            reasons.append(f"policy role {target} is not a default role")
-        for grant in grants:
-            if grant.database in (database, "*") and SELECT_PRIVILEGES & set(grant.privileges):
-                reasons.append(
-                    f"direct SELECT grant ON {grant.database}.{grant.table} bypasses role "
-                    f"{target} (SET ROLE NONE)"
-                )
-        for other in sorted(set(granted_roles) - deny_targets):
-            if step(
-                f"CHECK GRANT as role {other}",
-                lambda o=other: s.granted("SELECT", f"{qdb}.*", role=o),
-            ):
-                reasons.append(f"role {other} grants SELECT ON {database}.* without {target}")
-    for grant in grants:
-        if grant.database not in (database, "*"):
-            continue
-        extra = sorted(set(grant.privileges) - READ_PRIVILEGES - SELECT_PRIVILEGES)
-        if extra:
-            reasons.append(f"direct grant {', '.join(extra)} ON {grant.database}.{grant.table}")
-        if grant.grant_option:
-            reasons.append(f"direct grant ON {grant.database}.{grant.table} WITH GRANT OPTION")
-    for role, admin in granted_roles.items():
-        if admin or enabled.get(role, (False, False))[1]:
-            reasons.append(f"role {role} is granted WITH ADMIN OPTION")
+    # 3. Positive allow list over every grant the user holds, directly or
+    # through any (default or non-default) granted role.
+    if not target_is_user and not enabled[target][0]:
+        reasons.append(f"policy role {target} is not a default role")
+    reasons += audit_grants(principal_grants, user, target, target_is_user, database)
 
-    # 4. Admin-ish effective privileges (the user plus its default roles).
-    checks = [(p, "*.*", "*.*") for p in FORBIDDEN_GLOBAL]
-    checks += [(p, f"{qdb}.*", f"{database}.*") for p in FORBIDDEN_ON_DATABASE]
-    checks += [
-        (p, f"{qdb}.`{t}`", f"{database}.{t}")
-        for t in AUTHZ_TABLES
-        for p in FORBIDDEN_ON_AUTHZ_TABLES
-    ]
-    for privilege, scope, label in checks:
-        if step(f"CHECK GRANT {privilege}", lambda p=privilege, sc=scope: s.granted(p, sc)):
-            reasons.append(f"user holds {privilege} ON {label}")
-
-    # 5. Behavior as an unknown caller.
+    # 4. Behavior as an unknown caller.
     public = 0
     if not reasons:
         db = qdb
@@ -399,14 +248,36 @@ def _check(client, database: str, email: str | None) -> CheckResult:
             reasons.append(
                 f"an unknown caller sees {visible} cancer_study rows but {public} public studies"
             )
+        visible_ids = step(
+            "probe cancer_study identifiers",
+            lambda: s.scalar(
+                f"SELECT arraySort(groupUniqArray(cancer_study_identifier)) "
+                f"FROM {db}.`cancer_study`"
+            ),
+        )
+        public_ids = step(
+            "probe public study identifiers",
+            lambda: s.scalar(
+                f"SELECT arraySort(groupUniqArray(cancer_study_identifier)) "
+                f"FROM {db}.`{USER_STUDY_TABLE}` WHERE email = ''"
+            ),
+        )
+        if visible_ids != public_ids:
+            reasons.append("an unknown caller's study identifiers differ from public studies")
         if int(others):
             reasons.append(f"{USER_STUDY_TABLE}: an unknown caller sees other callers' rows")
         if int(manual):
             reasons.append(f"{USER_STUDY_MANUAL_TABLE}: readable by the runtime user")
 
     if reasons:
-        shown = "; ".join(reasons[:MAX_REASONS])
-        more = f" (+{len(reasons) - MAX_REASONS} more)" if len(reasons) > MAX_REASONS else ""
+        shown_reasons = []
+        for reason in reasons[:MAX_REASONS]:
+            if shown_reasons and len("; ".join(shown_reasons + [reason])) > 230:
+                break
+            shown_reasons.append(reason[:230])
+        shown = "; ".join(shown_reasons)
+        remaining = len(reasons) - len(shown_reasons)
+        more = f" (+{remaining} more)" if remaining else ""
         raise PolicyCoverageError(f"{database}: {shown}{more}")
     return CheckResult(user, target, target_is_user, len(objects), int(public))
 
