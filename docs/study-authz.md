@@ -407,8 +407,9 @@ as `currentUser()`, and never logs an email:
   `system.tables`. Explicit DEFINER/NONE views always refuse.
 - Any database with a table/view name classified in `catalog.py`, or a table
   with `cancer_study_identifier`/`cancer_study_id`, is treated as study data.
-  Catalog-defined linkage columns (such as `genetic_profile_id` on renamed
-  mutation copies) also identify study data; generic `internal_id` alone does
+  Column names are matched case-insensitively. Catalog-defined linkage
+  columns (such as `genetic_profile_id` on renamed mutation copies) also
+  identify study data; generic `internal_id` alone does
   not. Such a database must have an applicable `cbioportal_mcp_*` database-wide
   default-deny or be explicitly declared public. This is metadata detection,
   not a data-lineage proof: copies that rename both the table and every
@@ -458,10 +459,12 @@ filtering off, startup neither requires the public-database declaration nor
 runs these checks.
 
 Known conservative refusals: non-plain database/table names, any partial
-revoke, and extra table/column-level grants on the policy database (even if
-redundant with database-wide SELECT). These are deliberate fail-closed
-limits of the parser/allow list. Use plain names and the documented
-database-wide grant shape rather than widening the runtime permissions.
+revoke, and table/column-level grants on **every database**, including listed
+public databases. Only database-wide grants (`ON <db>.*`) are accepted:
+column-scoped SELECT hides unreadable study-link columns from
+`system.columns`, so metadata classification cannot safely audit that shape.
+These are deliberate fail-closed limits of the parser/allow list. Use plain
+names and the documented database-wide grant shape rather than widening the runtime permissions.
 Docker 25.8 and 26.6 exercise these rules without system-table SELECT grants.
 A read-only Cloud 26.6.1.2455 metadata inspection observed `SharedMergeTree`.
 The allow list also includes `SharedReplacingMergeTree` and the other known

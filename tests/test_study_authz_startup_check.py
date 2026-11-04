@@ -693,3 +693,16 @@ def test_renamed_study_tables_detected_by_columns(column):
     fake.other_study_columns["other_pub"] = ["renamed"]
     refused(fake, "not declared public")
     assert check(fake, DB, EMAIL, public_databases=frozenset({"other_pub"})).target_is_user
+
+
+@pytest.mark.parametrize("scope", ["d.*", "other_pub.*", "other_pub.zz"])
+@pytest.mark.parametrize("privilege", ["SELECT", "SELECT(sample_unique_id)"])
+def test_grants_must_be_database_wide_without_column_lists(scope, privilege):
+    from cbioportal_mcp.study_authz.grants import HeldGrants, audit_grants, parse_grants
+
+    parsed = parse_grants([f"GRANT {privilege} ON {scope} TO llm_user"], "llm_user")
+    reasons = audit_grants(HeldGrants(parsed, parsed), "llm_user", "llm_user", True, DB)
+    if scope.endswith(".*") and privilege == "SELECT":
+        assert reasons == []
+    else:
+        assert any("table/column-scoped grants" in reason for reason in reasons)

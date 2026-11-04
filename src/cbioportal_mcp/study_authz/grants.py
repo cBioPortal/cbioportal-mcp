@@ -222,9 +222,12 @@ def audit_grants(
             reasons.append(f"user holds {desc}: grants on system are not allowed")
             continue
         allowed = {"SELECT", "SHOW ROW POLICIES"} if grant.database == database else {"SELECT"}
-        if set(grant.privileges) - allowed or (
-            grant.database == database and (grant.table != "*" or grant.columns)
-        ):
+        if grant.table != "*" or grant.columns:
+            reasons.append(
+                f"user holds {desc} is not allowed: table/column-scoped grants "
+                "require database-wide grants on every database"
+            )
+        elif set(grant.privileges) - allowed:
             reasons.append(f"user holds {desc} is not allowed")
     return reasons
 

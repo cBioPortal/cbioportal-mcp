@@ -1195,3 +1195,57 @@ def test_clauseless_stored_view_is_invoker_under_both_defaults(server, default_s
     admin.command(f"GRANT SELECT ON {other}.* TO {user}")
     assert server.http(f"SELECT n FROM {other}.v", user) == "1"
     assert _startup_check(server, user, db).public_studies == 1
+
+
+@pytest.mark.parametrize("grant", ["SELECT(sample_unique_id)", "SELECT"])
+def test_startup_check_other_database_narrow_grant_refused(server, grant):
+    admin = server.admin
+    suffix = "column" if "(" in grant else "table"
+    db, user, other = f"authz_c1_{suffix}", f"c1_{suffix}_user", f"other_c1_{suffix}"
+    _p6_user_target_db(admin, db, user)
+    admin.command(f"CREATE DATABASE {other}")
+    admin.command(
+        f"CREATE TABLE {other}.zz ENGINE=MergeTree ORDER BY tuple() "
+        f"AS SELECT * FROM {db}_source.sample_derived"
+    )
+    admin.command(f"GRANT {grant} ON {other}.zz TO {user}")
+    # A column grant hides the study-link column while still exposing private IDs.
+    assert "priv_1:s" in server.studies_seen(f"SELECT sample_unique_id FROM {other}.zz", user)
+    if suffix == "column":
+        assert (
+            server.http(
+                "SELECT name FROM system.columns "
+                f"WHERE database='{other}' AND table='zz' "
+                "AND name='cancer_study_identifier'",
+                user,
+            )
+            == ""
+        )
+    _refused(server, user, "table/column-scoped grants", db)
+    _refused(server, user, "table/column-scoped grants", db, frozenset({other}))
+    admin.command(f"REVOKE SELECT ON {other}.zz FROM {user}")
+    admin.command(f"GRANT SELECT ON {other}.* TO {user}")
+    _refused(server, user, "not declared public", db)
+    assert _startup_check(server, user, db, frozenset({other})).public_studies == 1
+
+
+@pytest.mark.parametrize(
+    "column,source_column",
+    [
+        ("CANCER_STUDY_ID", "cancer_study_id"),
+        ("CANCER_STUDY_IDENTIFIER", "cancer_study_identifier"),
+    ],
+)
+def test_startup_check_uppercase_study_column_detected(server, column, source_column):
+    admin = server.admin
+    suffix = "id" if column.endswith("_ID") else "identifier"
+    db, user, other = f"authz_c1_upper_{suffix}", f"c1_upper_{suffix}", f"other_c1_upper_{suffix}"
+    _p6_user_target_db(admin, db, user)
+    admin.command(f"CREATE DATABASE {other}")
+    admin.command(
+        f"CREATE TABLE {other}.zz ENGINE=Memory AS "
+        f"SELECT {source_column} AS {column} FROM {db}_source.cancer_study"
+    )
+    admin.command(f"GRANT SELECT ON {other}.* TO {user}")
+    _refused(server, user, "not declared public", db)
+    assert _startup_check(server, user, db, frozenset({other})).public_studies == 1

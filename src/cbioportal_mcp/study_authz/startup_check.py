@@ -277,8 +277,11 @@ def _check(
                 f"system.columns for {db}",
                 lambda db=db: s.rows(
                     "SELECT DISTINCT table FROM system.columns WHERE database = {db:String} "
-                    "AND name IN {columns:Array(String)}",
-                    {"db": db, "columns": sorted(STUDY_LINK_COLUMNS)},
+                    "AND lowerUTF8(name) IN {columns:Array(String)}",
+                    {
+                        "db": db,
+                        "columns": sorted({column.lower() for column in STUDY_LINK_COLUMNS}),
+                    },
                 ),
             )
             reasons += audit_other_database(
