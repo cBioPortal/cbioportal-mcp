@@ -96,7 +96,7 @@ def test_grant_comes_after_every_policy():
 def test_render_fills_every_placeholder_and_statements_split():
     files = dict(sqlgen.rendered_files(PARAMS))
     user_study = files["0-user-study.sql.tmpl"]
-    assert "cbio_green.user_study_refresh" in user_study
+    assert "`cbio_green`.user_study_refresh" in user_study
     assert "upperUTF8('PUBLIC')" in user_study and "app_name=cbioportal" in user_study
     assert "REFRESH EVERY 5 MINUTE" in user_study and "toIntervalMinute(15)" in user_study
     stmts = sqlgen.statements(user_study)
@@ -199,8 +199,171 @@ def test_grant_key_matches(key, study, groups, match):
 def test_restricted_user_sql_grants_role_only():
     sql = sqlgen.restricted_user_sql("mcp_ro", "s3cret", "cbio_green")
     assert "s3cret" not in sql and "sha256_hash" in sql
-    assert "GRANT cbioportal_mcp_study_restricted TO mcp_ro;" in sql
+    assert sql.startswith("CREATE USER OR REPLACE `mcp_ro`")
+    assert "GRANT `cbioportal_mcp_study_restricted` TO `mcp_ro`;" in sql
     assert "GRANT SELECT" not in sql and "PROFILE" not in sql and "readonly" not in sql
+
+
+def test_restricted_user_sql_honours_role_and_user_target():
+    sql = sqlgen.restricted_user_sql("mcp_ro", "pw", "db", role="team_role")
+    assert "GRANT `team_role` TO `mcp_ro`;" in sql
+    assert "SET DEFAULT ROLE `team_role` TO `mcp_ro`;" in sql
+    assert "cbioportal_mcp_study_restricted" not in sql
+    sql = sqlgen.restricted_user_sql("llm_user", "pw", "db", role=None)
+    assert sql.startswith("CREATE USER `llm_user`")  # never OR REPLACE an existing user
+    assert "GRANT" not in sql and "ROLE" not in sql
+
+
+def test_user_sql_cli_honours_policy_role(monkeypatch, capsys):
+    from cbioportal_mcp.study_authz.__main__ import main
+
+    monkeypatch.setenv("CBIOPORTAL_MCP_RESTRICTED_PASSWORD", "pw")
+    base = ["user-sql", "--user", "u1", "--database", "db"]
+    assert main(base + ["--policy-role", "team_role"]) == 0
+    assert "GRANT `team_role` TO `u1`;" in capsys.readouterr().out
+    assert main(base + ["--user-target"]) == 0
+    out = capsys.readouterr().out
+    assert "GRANT" not in out and "ROLE" not in out
+    assert main(base) == 0
+    assert "GRANT `cbioportal_mcp_study_restricted` TO `u1`;" in capsys.readouterr().out
+    with pytest.raises(SystemExit):
+        main(base + ["--policy-role", "r", "--user-target"])
+
+
+HOSTILE = [
+    "authz_live.cancer_study WHERE 0 UNION ALL SELECT 'pub_a' --",
+    "x`; DROP DATABASE y; --",
+    "a.b",
+    "a b",
+    "a'b",
+    "",
+    "1abc",
+    "x" * 200,
+]
+
+
+@pytest.mark.parametrize("value", HOSTILE)
+@pytest.mark.parametrize("field", ["database", "policy_target"])
+def test_hostile_identifiers_rejected_by_params(field, value):
+    base = {"database": "db", "public_group": "PUBLIC", "app_name": "cbioportal"}
+    with pytest.raises(ValueError, match=field.replace("_", " ")):
+        sqlgen.Params(**{**base, field: value})
+
+
+# Values, not identifiers: dots and leading digits are legitimate group names.
+HOSTILE_VALUES = [v for v in HOSTILE if v not in ("a.b", "1abc")]
+
+
+@pytest.mark.parametrize("value", HOSTILE_VALUES + ["PUB'LIC", "PUB\\LIC", "PUB;LIC"])
+@pytest.mark.parametrize("field", ["public_group", "app_name"])
+def test_hostile_values_rejected_by_params(field, value):
+    base = {"database": "db", "public_group": "PUBLIC", "app_name": "cbioportal"}
+    with pytest.raises(ValueError):
+        sqlgen.Params(**{**base, field: value})
+
+
+@pytest.mark.parametrize("value", HOSTILE)
+def test_hostile_identifiers_rejected_by_user_sql(value):
+    for kwargs in (
+        {"user": value, "database": "db"},
+        {"user": "u", "database": value},
+        {"user": "u", "database": "db", "role": value},
+    ):
+        with pytest.raises(ValueError):
+            sqlgen.restricted_user_sql(password="pw", **kwargs)
+
+
+class _RecordingClient:
+    def __init__(self):
+        self.calls = []
+
+    def query(self, *a, **k):
+        self.calls.append(a)
+        raise AssertionError("no query may run with a hostile identifier")
+
+    command = query
+
+
+@pytest.mark.parametrize("value", HOSTILE)
+def test_hostile_source_database_rejected_before_any_query(value):
+    from cbioportal_mcp.study_authz.testdb import make_test_db
+
+    client = _RecordingClient()
+    with pytest.raises(ValueError, match="source database"):
+        make_test_db(client, value, PARAMS, {"s1": "G"}, ["s2"], [], log=lambda *_: None)
+    assert client.calls == []
+
+
+@pytest.mark.parametrize("value", HOSTILE)
+def test_hostile_identifiers_rejected_by_check_and_conflicts(value):
+    from cbioportal_mcp.study_authz.coverage import fetch_and_evaluate
+
+    for db, target in ((value, "r"), ("db", value)):
+        client = _RecordingClient()
+        with pytest.raises(ValueError):
+            fetch_and_evaluate(client, db, target)
+        with pytest.raises(ValueError):
+            sqlgen.policy_conflicts(client, db, target)
+        assert client.calls == []
+
+
+@pytest.mark.parametrize("value", ["G'1", "G1') OR 1 --", "PUBLIC\\"])
+def test_hostile_test_db_values_rejected(value):
+    from cbioportal_mcp.study_authz.testdb import make_test_db
+
+    for gated, public in (({value: "G"}, ["s2"]), ({"s1": value}, ["s2"]), ({"s1": "G"}, [value])):
+        with pytest.raises(ValueError):
+            make_test_db(_RecordingClient(), "src", PARAMS, gated, public, [], log=lambda *_: None)
+
+
+def test_string_values_are_escaped_and_identifiers_quoted():
+    assert sqlgen.sql_string("a'b\\c") == "'a\\'b\\\\c'"
+    assert sqlgen.quote_identifier("database", "cbio_green") == "`cbio_green`"
+    rendered = sqlgen.render("upperUTF8('__PUBLIC_GROUP__') FROM __CLICKHOUSE_DATABASE__.t", PARAMS)
+    assert rendered == "upperUTF8('PUBLIC') FROM `cbio_green`.t"
+
+
+class _PolicyClient:
+    def __init__(self, rows):
+        self.rows = rows
+
+    def query(self, sql, parameters=None):
+        assert "system.row_policies" in sql and set(parameters) == {"db"}
+        return type("R", (), {"result_rows": self.rows})()
+
+
+def test_policy_conflicts_flags_foreign_and_retargeted_policies():
+    ours = [
+        ("cbioportal_mcp_default_deny", "", False, ["llm_user"], []),
+        ("cbioportal_mcp_unrestricted_others", "", True, [], ["llm_user"]),
+        ("cbioportal_mcp_study_patient", "patient", False, ["llm_user"], []),
+    ]
+    assert sqlgen.policy_conflicts(_PolicyClient(ours), "db", "llm_user") == []
+    foreign = ours + [("outsider_only", "cancer_study", False, ["outsider"], [])]
+    found = sqlgen.policy_conflicts(_PolicyClient(foreign), "db", "llm_user")
+    assert found == ["outsider_only ON db.cancer_study (not created by study_authz)"]
+    # Ours, but for another target: switching target would expose the old one.
+    found = sqlgen.policy_conflicts(_PolicyClient(ours), "db", "cbioportal_mcp_study_restricted")
+    assert len(found) == 1 and found[0].startswith("3 study_authz policies on db")
+
+
+def test_apply_refuses_on_conflict_without_running_anything():
+    rows = [("someone_elses", "gene", False, ["u"], [])]
+
+    class Client(_PolicyClient):
+        def command(self, sql):
+            raise AssertionError("apply must not change anything")
+
+    with pytest.raises(ValueError, match="someone_elses ON cbio_green.gene"):
+        sqlgen.apply(Client(rows), PARAMS, log=lambda *_: None)
+
+
+def test_coverage_reports_conflicts():
+    objects, policies = _good_objects_and_policies()
+    report = evaluate(
+        objects, policies, "d", conflicts=["x ON d.gene (not created by study_authz)"]
+    )
+    assert not report.ok and any("x ON d.gene" in e for e in report.errors)
 
 
 def _good_objects_and_policies(db="d"):
@@ -277,7 +440,7 @@ def test_grants_csv(tmp_path):
 def test_view_rewrite_moves_every_reference():
     q = "CREATE VIEW src.v SQL SECURITY INVOKER AS SELECT 1 FROM src.a JOIN `src`.b USING x"
     assert _rewrite_view(q, "src", "tgt") == (
-        "CREATE VIEW tgt.v SQL SECURITY INVOKER AS SELECT 1 FROM tgt.a JOIN `tgt`.b USING x"
+        "CREATE VIEW `tgt`.v SQL SECURITY INVOKER AS SELECT 1 FROM `tgt`.a JOIN `tgt`.b USING x"
     )
 
 
@@ -310,7 +473,7 @@ def test_cli_refuses_public_looking_database(capsys):
         )
         == 0
     )
-    assert "cbio_restricted_blue.user_study" in capsys.readouterr().out
+    assert "`cbio_restricted_blue`.user_study" in capsys.readouterr().out
 
 
 def test_nothing_under_sql_dir_or_apply_sql_references_study_authz():
@@ -323,8 +486,8 @@ def test_nothing_under_sql_dir_or_apply_sql_references_study_authz():
 def test_policy_target_role_creates_the_role_first():
     policies = dict(sqlgen.rendered_files(PARAMS))["1-row-policies.sql.tmpl"]
     stmts = sqlgen.statements(policies)
-    assert stmts[0] == "CREATE ROLE IF NOT EXISTS cbioportal_mcp_study_restricted"
-    assert "TO ALL EXCEPT cbioportal_mcp_study_restricted" in policies
+    assert stmts[0] == "CREATE ROLE IF NOT EXISTS `cbioportal_mcp_study_restricted`"
+    assert "TO ALL EXCEPT `cbioportal_mcp_study_restricted`" in policies
 
 
 def test_policy_target_user_attaches_every_policy_to_that_user():
@@ -341,11 +504,11 @@ def test_policy_target_user_attaches_every_policy_to_that_user():
     created = [s for s in stmts if s.startswith("CREATE ROW POLICY")]
     assert len(created) == 2 + 1 + 45 + 17 + 21
     targets = {re.split(r"\sTO\s", s)[-1] for s in created}
-    assert targets == {"llm_user", "ALL EXCEPT llm_user"}
-    assert stmts[-1] == "GRANT SELECT ON authz_e2e_test.* TO llm_user"
+    assert targets == {"`llm_user`", "ALL EXCEPT `llm_user`"}
+    assert stmts[-1] == "GRANT SELECT ON `authz_e2e_test`.* TO `llm_user`"
     identity = next(s for s in created if "cbioportal_mcp_identity_user_study" in s)
-    assert sqlgen.USER_STUDY_MATCH in identity and identity.endswith("TO llm_user")
-    on_tables = {re.search(r"\bON authz_e2e_test\.(\S+)", s).group(1) for s in created}
+    assert sqlgen.USER_STUDY_MATCH in identity and identity.endswith("TO `llm_user`")
+    on_tables = {re.search(r"\bON `authz_e2e_test`\.(\S+)", s).group(1) for s in created}
     assert "user_study_manual" not in on_tables  # denied by the default-deny
 
 
@@ -357,3 +520,95 @@ def test_policy_target_validated_and_cli_flags_exclusive():
     base = ["render", "--database", "d", "--public-group", "P", "--app-name", "a"]
     with pytest.raises(SystemExit):
         main(base + ["--policy-role", "r", "--policy-user", "u"])
+
+
+def _bypass(params: sqlgen.Params, **fields) -> sqlgen.Params:
+    """A Params whose fields skipped __post_init__ validation (simulates a bug)."""
+    for name, value in fields.items():
+        object.__setattr__(params, name, value)
+    return params
+
+
+def test_review_repro_placeholder_database_is_rejected():
+    # Round-2 repro: database '__PUBLIC_GROUP__' + public_group 'review_victim'
+    # used to render SQL against review_victim.
+    with pytest.raises(ValueError, match="placeholder"):
+        sqlgen.Params(
+            database="__PUBLIC_GROUP__", public_group="review_victim", app_name="cbioportal"
+        )
+
+
+@pytest.mark.parametrize("token", ["__PUBLIC_GROUP__", "__CLICKHOUSE_DATABASE__", "x__APP_NAME__y"])
+@pytest.mark.parametrize("field", ["database", "policy_target", "public_group", "app_name"])
+def test_placeholder_tokens_rejected_in_every_parameter(field, token):
+    base = {"database": "db", "public_group": "PUBLIC", "app_name": "cbioportal"}
+    with pytest.raises(ValueError, match="placeholder"):
+        sqlgen.Params(**{**base, field: token})
+
+
+def test_render_is_single_pass():
+    params = _bypass(
+        sqlgen.Params(database="cbio_green", public_group="PUBLIC", app_name="cbioportal"),
+        public_group="__CLICKHOUSE_DATABASE__",
+        app_name="__POLICY_TARGET__",
+    )
+    template = "upperUTF8('__PUBLIC_GROUP__') '__APP_NAME__' FROM __CLICKHOUSE_DATABASE__.t"
+    assert sqlgen.render(template, params) == (
+        "upperUTF8('__CLICKHOUSE_DATABASE__') '__POLICY_TARGET__' FROM `cbio_green`.t"
+    )
+    with pytest.raises(ValueError, match="unrendered"):
+        sqlgen.render("SELECT __NOT_A_PLACEHOLDER__", PARAMS)
+
+
+def test_apply_with_bypassed_review_repro_params_runs_nothing():
+    params = _bypass(
+        sqlgen.Params(database="db", public_group="PUBLIC", app_name="cbioportal"),
+        database="__PUBLIC_GROUP__",
+        public_group="review_victim",
+    )
+    client = _RecordingClient()
+    with pytest.raises(ValueError, match="placeholder"):
+        sqlgen.apply(client, params, log=lambda *_: None)
+    assert client.calls == []
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT 1 FROM `review_victim`.cancer_study",
+        "CREATE ROW POLICY p ON `review_victim`.* USING 1 TO r",
+        "SELECT 1 FROM review_victim.cancer_study",
+        "INSERT INTO review_victim.t SELECT 1",
+        "CREATE TABLE IF NOT EXISTS review_victim.t (x Int8) ENGINE = Memory",
+    ],
+)
+def test_assert_only_database_refuses_other_databases(sql):
+    with pytest.raises(ValueError, match="review_victim"):
+        sqlgen.assert_only_database(sql, "cbio_green")
+
+
+def test_assert_only_database_accepts_rendered_files_and_ignores_comments_strings():
+    for _, sql in sqlgen.rendered_files(PARAMS):
+        sqlgen.assert_only_database(sql, "cbio_green")
+    sqlgen.assert_only_database(
+        "-- FROM other.t\nSELECT 'FROM other.t', g.x FROM `cbio_green`.t AS g JOIN s ON g.a = s.a",
+        "cbio_green",
+    )
+    with pytest.raises(ValueError):
+        sqlgen.assert_only_database(sqlgen.rendered_files(PARAMS)[1][1], "cbio_blue")
+
+
+@pytest.mark.parametrize("suffix", ["\n", "\r", "\x00", "\r\n"])
+def test_trailing_control_characters_rejected(suffix):
+    from cbioportal_mcp.study_authz.groups import validate_name
+
+    with pytest.raises(ValueError):
+        sqlgen.validate_identifier("database", "db" + suffix)
+    with pytest.raises(ValueError):
+        validate_name("public group", "PUBLIC" + suffix)
+    base = {"database": "db", "public_group": "PUBLIC", "app_name": "cbioportal"}
+    for field in ("database", "policy_target", "public_group", "app_name"):
+        with pytest.raises(ValueError):
+            sqlgen.Params(**{**base, field: base.get(field, "r") + suffix})
+    with pytest.raises(ValueError):
+        sqlgen.restricted_user_sql("u" + suffix, "pw", "db")

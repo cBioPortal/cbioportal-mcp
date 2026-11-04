@@ -107,14 +107,21 @@ def cmd_user_sql(args) -> int:
     password = os.getenv(PASSWORD_ENV)
     if not password:
         raise SystemExit(f"error: put the new user's password in {PASSWORD_ENV}")
-    sql = sqlgen.restricted_user_sql(args.user, password, args.database)
+    role = None if args.user_target else args.policy_role
+    try:
+        sql = sqlgen.restricted_user_sql(args.user, password, args.database, role=role)
+    except ValueError as e:
+        raise SystemExit(f"error: {e}") from e
     if not args.apply:
         print(sql)
         return 0
     client = _client()
     for statement in sqlgen.statements(sql):
         client.command(statement)
-    print(f"user {args.user} now reads {args.database} only through {ROW_POLICY_ROLE}")
+    if role is None:
+        print(f"user {args.user} created with no grants; now run apply --policy-user {args.user}")
+    else:
+        print(f"user {args.user} now reads {args.database} only through {role}")
     return 0
 
 
@@ -181,6 +188,18 @@ def main(argv=None) -> int:
     )
     p.add_argument("--user", required=True)
     p.add_argument("--database", required=True, help="the user's default database")
+    who = p.add_mutually_exclusive_group()
+    who.add_argument(
+        "--policy-role",
+        default=ROW_POLICY_ROLE,
+        help="the role the policies are TO; the user gets only this role (default: %(default)s)",
+    )
+    who.add_argument(
+        "--user-target",
+        action="store_true",
+        help="the user itself will be the policy target (apply --policy-user): no role "
+        "grant, and refuse to replace an existing user",
+    )
     p.add_argument("--apply", action="store_true", help="execute instead of printing")
     p.set_defaults(func=cmd_user_sql)
 

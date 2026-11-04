@@ -24,7 +24,14 @@ from cbioportal_mcp.study_authz.catalog import (
     USER_STUDY_REFRESH_VIEW,
 )
 from cbioportal_mcp.study_authz.groups import NAME_RE, validate_name
-from cbioportal_mcp.study_authz.sqlgen import Params, apply, render_path
+from cbioportal_mcp.study_authz.sqlgen import (
+    Params,
+    apply,
+    quote_identifier,
+    render_path,
+    sql_string,
+    validate_identifier,
+)
 
 MARKER = "study-authz test database (make-test-db)"
 DEFAULT_GRANT_DAYS = 7
@@ -48,7 +55,7 @@ def read_grants_csv(path: Path, now: datetime | None = None) -> list[Grant]:
         for line, row in enumerate(csv.DictReader(fh), start=2):
             email = (row.get("email") or "").strip().lower()
             key = (row.get("grant_key") or "").strip()
-            if "@" not in email or not NAME_RE.match(key):
+            if "@" not in email or not NAME_RE.fullmatch(key):
                 raise ValueError(f"{path}:{line}: need an email and a grant_key ({row})")
             raw = (row.get("valid_until") or "").strip()
             if raw:
@@ -61,12 +68,15 @@ def read_grants_csv(path: Path, now: datetime | None = None) -> list[Grant]:
 
 
 def _in_list(ids: list[str]):
-    values = ", ".join(f"'{i}'" for i in ids)
+    values = ", ".join(sql_string(i) for i in ids)
     return lambda column, depth: f"{column} IN ({values})"
 
 
 def _rewrite_view(create_query: str, source: str, target: str) -> str:
-    return re.sub(rf"(`?){re.escape(source)}\1\.", rf"\g<1>{target}\g<1>.", create_query)
+    """Point a view's database references at the target (both names validated)."""
+    validate_identifier("source database", source)
+    validate_identifier("database", target)
+    return re.sub(rf"`?\b{re.escape(source)}\b`?\.", f"`{target}`.", create_query)
 
 
 def make_test_db(
@@ -81,6 +91,8 @@ def make_test_db(
 ) -> dict[str, int]:
     """Create ``params.database`` from ``source``; returns copied row counts per table."""
     target = params.database
+    src = quote_identifier("source database", source)
+    tgt = quote_identifier("database", target)
     studies = list(gated) + list(public)
     if target == source:
         raise ValueError("target database must differ from the source")
@@ -96,7 +108,7 @@ def make_test_db(
     found = {
         r[0]
         for r in client.query(
-            f"SELECT cancer_study_identifier FROM {source}.cancer_study "
+            f"SELECT cancer_study_identifier FROM {src}.cancer_study "
             "WHERE cancer_study_identifier IN {ids:Array(String)}",
             parameters={"ids": studies},
         ).result_rows
@@ -113,8 +125,8 @@ def make_test_db(
             raise ValueError(
                 f"{target} exists; pass --replace (only works on databases this tool created)"
             )
-        client.command(f"DROP DATABASE {target} SYNC")
-    client.command(f"CREATE DATABASE {target} COMMENT '{MARKER}'")
+        client.command(f"DROP DATABASE {tgt} SYNC")
+    client.command(f"CREATE DATABASE {tgt} COMMENT {sql_string(MARKER)}")
 
     objects = client.query(
         "SELECT name, engine, create_table_query FROM system.tables "
@@ -124,9 +136,9 @@ def make_test_db(
     leaf = _in_list(studies)
     groups_expr = (
         "transform(assumeNotNull(cancer_study_identifier), "
-        f"[{', '.join(repr(s) for s in gated)}]::Array(String), "
-        f"[{', '.join(repr(g) for g in gated.values())}]::Array(String), "
-        f"'{params.public_group}')"
+        f"[{', '.join(sql_string(s) for s in gated)}]::Array(String), "
+        f"[{', '.join(sql_string(g) for g in gated.values())}]::Array(String), "
+        f"{sql_string(params.public_group)})"
     )
     counts: dict[str, int] = {}
     views = []
@@ -138,18 +150,19 @@ def make_test_db(
             log(f"skip   {name} ({engine})")
             continue
         if name in STUDY_SCOPED_TABLE_PATHS:
-            where = render_path(STUDY_SCOPED_TABLE_PATHS[name], leaf, db=source)
+            where = render_path(STUDY_SCOPED_TABLE_PATHS[name], leaf, db=src)
             select = f"* REPLACE ({groups_expr} AS `groups`)" if name == "cancer_study" else "*"
         elif name in STUDY_AGNOSTIC_REFERENCE_TABLES:
             where, select = "1", "*"
         else:
             log(f"skip   {name} (auth/unclassified table: not copied)")
             continue
-        client.command(f"CREATE TABLE {target}.{name} AS {source}.{name}")
+        table = quote_identifier("table", name)
+        client.command(f"CREATE TABLE {tgt}.{table} AS {src}.{table}")
         client.command(
-            f"INSERT INTO {target}.{name} SELECT {select} FROM {source}.{name} WHERE {where}"
+            f"INSERT INTO {tgt}.{table} SELECT {select} FROM {src}.{table} WHERE {where}"
         )
-        counts[name] = client.query(f"SELECT count() FROM {target}.{name}").result_rows[0][0]
+        counts[name] = client.query(f"SELECT count() FROM {tgt}.{table}").result_rows[0][0]
         log(f"copy   {name}: {counts[name]} rows")
     for name, create_query in views:
         if name not in STUDY_SCOPED_VIEWS:
@@ -166,7 +179,7 @@ def make_test_db(
             database=target,
             column_names=["email", "grant_key", "valid_until", "note"],
         )
-    client.command(f"SYSTEM REFRESH VIEW {target}.{USER_STUDY_REFRESH_VIEW}")
-    client.command(f"SYSTEM WAIT VIEW {target}.{USER_STUDY_REFRESH_VIEW}")
+    client.command(f"SYSTEM REFRESH VIEW {tgt}.{USER_STUDY_REFRESH_VIEW}")
+    client.command(f"SYSTEM WAIT VIEW {tgt}.{USER_STUDY_REFRESH_VIEW}")
     log(f"seeded {len(grants)} manual grants; user_study refreshed")
     return counts

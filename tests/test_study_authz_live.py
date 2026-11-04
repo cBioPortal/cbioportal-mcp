@@ -618,3 +618,138 @@ def test_p7_user_tools_and_cache_isolation(server, monkeypatch):
         assert "verified user identity" in studies()[0]["error"]
     finally:
         common.set_setting("invalid_setting_action", previous)
+
+
+def test_apply_refuses_to_widen_an_existing_restricted_principal(server):
+    """Reviewer repro: a foreign policy is OR-ed with the catch-all USING 1."""
+    admin = server.admin
+    db = "authz_outsider"
+    _load_fixture(admin, db)
+    admin.command("CREATE USER outsider IDENTIFIED BY 'pw'")
+    admin.command(f"GRANT SELECT ON {db}.* TO outsider")
+    admin.command(
+        f"CREATE ROW POLICY outsider_only ON {db}.cancer_study "
+        "USING cancer_study_id = 1 TO outsider"
+    )
+    q = f"SELECT cancer_study_identifier FROM {db}.cancer_study"
+    assert server.studies_seen(q, "outsider") == {"pub_a"}
+
+    params = sqlgen.Params(database=db, public_group=PUBLIC_GROUP, app_name="cbioportal")
+    with pytest.raises(ValueError, match=f"outsider_only ON {db}.cancer_study"):
+        sqlgen.apply(admin, params, log=lambda *_: None)
+    # Nothing was changed: no policy, no user_study, outsider still sees 1 study.
+    assert server.studies_seen(q, "outsider") == {"pub_a"}
+    assert (
+        admin.query(
+            "SELECT count() FROM system.row_policies WHERE database = {db:String}",
+            parameters={"db": db},
+        ).result_rows[0][0]
+        == 1
+    )
+    assert not admin.query(
+        "SELECT 1 FROM system.tables WHERE database = {db:String} AND name = 'user_study'",
+        parameters={"db": db},
+    ).result_rows
+
+
+def test_check_fails_when_a_foreign_policy_appears_after_apply(server):
+    admin = server.admin
+    admin.command("CREATE USER IF NOT EXISTS late_user IDENTIFIED BY 'pw'")
+    admin.command(f"GRANT SELECT ON {DB}.* TO late_user")
+    admin.command(
+        f"CREATE ROW POLICY late_policy ON {DB}.cancer_study USING cancer_study_id = 1 TO late_user"
+    )
+    try:
+        # The catch-all is OR-ed with it: late_user sees everything, which check reports.
+        q = f"SELECT cancer_study_identifier FROM {DB}.cancer_study"
+        assert len(server.studies_seen(q, "late_user")) == len(STUDIES)
+        report = fetch_and_evaluate(admin, DB, ROW_POLICY_ROLE)
+        assert not report.ok
+        assert any(f"late_policy ON {DB}.cancer_study" in e for e in report.errors)
+        with pytest.raises(ValueError, match="late_policy"):
+            sqlgen.apply(admin, PARAMS, log=lambda *_: None)
+    finally:
+        admin.command(f"DROP ROW POLICY IF EXISTS late_policy ON {DB}.cancer_study")
+        admin.command("DROP USER IF EXISTS late_user")
+    assert fetch_and_evaluate(admin, DB, ROW_POLICY_ROLE).ok
+
+
+def test_apply_refuses_to_switch_policy_target(server):
+    """Re-targeting would put the old role into ALL EXCEPT <new target>, unfiltered."""
+    switched = sqlgen.Params(
+        database=DB,
+        public_group=PUBLIC_GROUP,
+        app_name="cbioportal",
+        policy_target="mcp_restricted",
+        target_is_user=True,
+    )
+    with pytest.raises(ValueError, match="attached to cbioportal_mcp_study_restricted, not"):
+        sqlgen.apply(server.admin, switched, log=lambda *_: None)
+    seen = server.studies_seen(TABLE_QUERIES["cancer_study"], SQL_cbio_user="alice@example.org")
+    assert seen == EXPECTED["alice@example.org"]
+
+
+def test_hostile_source_database_is_rejected_live(server):
+    """Reviewer repro: this source name used to return pub_a via UNION ALL."""
+    hostile = f"{DB}.cancer_study WHERE 0 UNION ALL SELECT 'pub_a' --"
+    target = sqlgen.Params(database="authz_inject", public_group="PUBLIC", app_name="cbioportal")
+    with pytest.raises(ValueError, match="source database"):
+        make_test_db(
+            server.admin, hostile, target, {"priv_1": "G"}, ["pub_a"], [], log=lambda *_: None
+        )
+    assert not server.admin.query(
+        "SELECT 1 FROM system.databases WHERE name = 'authz_inject'"
+    ).result_rows
+
+
+def test_user_sql_with_custom_policy_role(server):
+    admin = server.admin
+    db = "authz_custom_role"
+    _load_fixture(admin, db)
+    params = sqlgen.Params(
+        database=db, public_group=PUBLIC_GROUP, app_name="cbioportal", policy_target="team_role"
+    )
+    sqlgen.apply(admin, params, log=lambda *_: None)
+    for statement in sqlgen.statements(
+        sqlgen.restricted_user_sql("team_member", "pw", db, role="team_role")
+    ):
+        admin.command(statement)
+    q = f"SELECT cancer_study_identifier FROM {db}.cancer_study"
+    assert server.studies_seen(q, "team_member") == PUBLIC
+    assert fetch_and_evaluate(admin, db, "team_role").ok
+
+
+def test_review_repro_placeholder_database_cannot_redirect_apply(server):
+    """Round-2 repro: database '__PUBLIC_GROUP__' + public_group 'review_victim'."""
+    admin = server.admin
+    victim = "review_victim"
+    _load_fixture(admin, victim)
+    admin.command("CREATE DATABASE `__PUBLIC_GROUP__`")
+    admin.command("CREATE USER review_outsider IDENTIFIED BY 'pw'")
+    admin.command(f"GRANT SELECT ON {victim}.* TO review_outsider")
+    admin.command(
+        f"CREATE ROW POLICY review_outsider_only ON {victim}.cancer_study "
+        "USING cancer_study_id = 1 TO review_outsider"
+    )
+    q = f"SELECT cancer_study_identifier FROM {victim}.cancer_study"
+    assert server.studies_seen(q, "review_outsider") == {"pub_a"}
+
+    with pytest.raises(ValueError, match="placeholder"):
+        sqlgen.Params(database="__PUBLIC_GROUP__", public_group=victim, app_name="cbioportal")
+    # Even with validation bypassed, apply refuses before touching the server.
+    bypassed = sqlgen.Params(database="db", public_group="PUBLIC", app_name="cbioportal")
+    object.__setattr__(bypassed, "database", "__PUBLIC_GROUP__")
+    object.__setattr__(bypassed, "public_group", victim)
+    with pytest.raises(ValueError, match="placeholder"):
+        sqlgen.apply(admin, bypassed, log=lambda *_: None)
+
+    assert server.studies_seen(q, "review_outsider") == {"pub_a"}
+    policies = admin.query(
+        "SELECT database, short_name FROM system.row_policies "
+        "WHERE database IN ('review_victim', '__PUBLIC_GROUP__')"
+    ).result_rows
+    assert policies == [(victim, "review_outsider_only")]
+    assert not admin.query(
+        "SELECT 1 FROM system.tables WHERE database IN ('review_victim', '__PUBLIC_GROUP__') "
+        "AND name LIKE 'user_study%'"
+    ).result_rows

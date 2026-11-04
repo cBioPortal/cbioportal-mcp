@@ -27,13 +27,18 @@ from __future__ import annotations
 
 import re
 
-# Group / app names end up inside generated SQL string literals.
-NAME_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+# Group / app names end up inside generated SQL string literals. Always use
+# fullmatch: with .match(), `$` would accept a trailing newline.
+NAME_RE = re.compile(r"[A-Za-z0-9_.-]{1,128}")
+# Template placeholder tokens (sqlgen.render); never allowed inside a value.
+PLACEHOLDER_RE = re.compile(r"__[A-Z_]+__")
 
 
 def validate_name(kind: str, value: str) -> str:
-    if not value or not NAME_RE.match(value):
+    if not isinstance(value, str) or not NAME_RE.fullmatch(value):
         raise ValueError(f"{kind} must be non-empty and match {NAME_RE.pattern}, got {value!r}")
+    if PLACEHOLDER_RE.search(value):
+        raise ValueError(f"{kind} must not contain a template placeholder, got {value!r}")
     return value
 
 

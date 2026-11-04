@@ -19,6 +19,7 @@ from pathlib import Path
 from cbioportal_mcp.study_authz.catalog import (
     DEFAULT_DENY_POLICY,
     DENIED_TABLES,
+    OWNED_POLICY_PREFIX,
     ROW_POLICY_ROLE,
     STUDY_AGNOSTIC_REFERENCE_TABLES,
     STUDY_SCOPED_TABLE_PATHS,
@@ -32,7 +33,7 @@ from cbioportal_mcp.study_authz.catalog import (
     Via,
     describe,
 )
-from cbioportal_mcp.study_authz.groups import validate_name
+from cbioportal_mcp.study_authz.groups import PLACEHOLDER_RE, validate_name
 
 TEMPLATES = Path(__file__).resolve().parent / "templates"
 USER_STUDY_TEMPLATE = TEMPLATES / "0-user-study.sql.tmpl"
@@ -50,7 +51,32 @@ USER_STUDY_MATCH = (
     "AND valid_until > now64(3)"
 )
 _PAD = "    "
-_DB_RE = re.compile(r"^[A-Za-z0-9_]+$")
+# The ONE validator for identifiers that come from config/CLI (databases,
+# roles, users). Validated names are also always emitted back-quoted.
+# Always fullmatch: with .match(), `$` would accept a trailing newline.
+IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}")
+
+
+def validate_identifier(kind: str, value: str) -> str:
+    if not isinstance(value, str) or not IDENTIFIER_RE.fullmatch(value):
+        raise ValueError(f"{kind} must match {IDENTIFIER_RE.pattern}, got {value!r}")
+    if PLACEHOLDER_RE.search(value):
+        raise ValueError(f"{kind} must not contain a template placeholder, got {value!r}")
+    return value
+
+
+def quote_identifier(kind: str, value: str) -> str:
+    """Validated identifier in back-quotes, e.g. `cbio_green`."""
+    return f"`{validate_identifier(kind, value)}`"
+
+
+def escape_string(value: str) -> str:
+    """Body of a single-quoted ClickHouse string literal (no surrounding quotes)."""
+    return value.replace("\\", "\\\\").replace("'", "\\'")
+
+
+def sql_string(value: str) -> str:
+    return f"'{escape_string(value)}'"
 
 
 def _subquery(column: str, key: str, table: str, where: str, depth: int, db: str) -> str:
@@ -218,12 +244,14 @@ class Params:
     target_is_user: bool = False
 
     def __post_init__(self):
-        if not _DB_RE.match(self.database or ""):
-            raise ValueError(f"database must match {_DB_RE.pattern}, got {self.database!r}")
+        self.validate()
+
+    def validate(self) -> None:
+        """Raise ValueError on any bad value (also re-run by apply)."""
+        validate_identifier("database", self.database)
+        validate_identifier("policy target", self.policy_target)
         validate_name("public group", self.public_group)
         validate_name("app name", self.app_name)
-        if not _DB_RE.match(self.policy_target or ""):
-            raise ValueError(f"policy target must match {_DB_RE.pattern}")
         if not 1 <= self.refresh_minutes <= 1440:
             raise ValueError("refresh_minutes must be in 1..1440")
         if not self.refresh_minutes < self.private_grace_minutes <= 7 * 1440:
@@ -234,18 +262,46 @@ class Params:
 
 
 def render(template: str, params: Params) -> str:
-    rendered = (
-        template.replace(DB, params.database)
-        .replace("__PUBLIC_GROUP__", params.public_group)
-        .replace("__APP_NAME__", params.app_name)
-        .replace("__REFRESH_MINUTES__", str(params.refresh_minutes))
-        .replace("__PRIVATE_GRACE_MINUTES__", str(params.private_grace_minutes))
-        .replace(TARGET, params.policy_target)
-    )
-    leftover = re.findall(r"__[A-Z_]+__", rendered)
-    if leftover:
-        raise ValueError(f"unrendered placeholders: {sorted(set(leftover))}")
-    return rendered
+    """Fill the placeholders: identifiers back-quoted, values string-escaped.
+
+    The templates put __PUBLIC_GROUP__ / __APP_NAME__ only inside '...'
+    literals, so they get the escaped literal body.
+    """
+    values = {
+        DB: quote_identifier("database", params.database),
+        TARGET: quote_identifier("policy target", params.policy_target),
+        "__PUBLIC_GROUP__": escape_string(params.public_group),
+        "__APP_NAME__": escape_string(params.app_name),
+        "__REFRESH_MINUTES__": str(int(params.refresh_minutes)),
+        "__PRIVATE_GRACE_MINUTES__": str(int(params.private_grace_minutes)),
+    }
+    unknown = sorted(set(PLACEHOLDER_RE.findall(template)) - set(values))
+    if unknown:
+        raise ValueError(f"unrendered placeholders: {unknown}")
+    # One pass: an inserted value is never rescanned for further tokens.
+    return PLACEHOLDER_RE.sub(lambda m: values[m.group(0)], template)
+
+
+_COMMENT_RE = re.compile(r"--[^\n]*")
+_STRING_RE = re.compile(r"'(?:[^'\\]|\\.)*'")
+_QUALIFIER_RE = re.compile(r"`([^`]*)`\s*\.")
+_UNQUOTED_QUALIFIED_RE = re.compile(
+    r"\b(?:FROM|JOIN|TABLE|VIEW|INTO|EXISTS)\s+([A-Za-z_][A-Za-z0-9_]*)\s*\.", re.I
+)
+
+
+def assert_only_database(sql: str, database: str) -> None:
+    """Defence in depth: rendered SQL may only qualify objects with ``database``.
+
+    Every database qualifier the templates emit is back-quoted; an unquoted
+    ``db.table`` after FROM/JOIN/TABLE/VIEW/INTO/EXISTS is refused too.
+    Comments and string literals are ignored.
+    """
+    code = _STRING_RE.sub("''", _COMMENT_RE.sub("", sql))
+    found = set(_QUALIFIER_RE.findall(code)) | set(_UNQUOTED_QUALIFIED_RE.findall(code))
+    others = sorted(found - {database})
+    if others:
+        raise ValueError(f"rendered SQL references databases other than {database}: {others}")
 
 
 def rendered_files(params: Params) -> list[tuple[str, str]]:
@@ -253,11 +309,15 @@ def rendered_files(params: Params) -> list[tuple[str, str]]:
     must already exist (apply checks)."""
     policies = render(ROW_POLICIES_TEMPLATE.read_text(), params)
     if not params.target_is_user:
-        policies = f"CREATE ROLE IF NOT EXISTS {params.policy_target};\n\n{policies}"
-    return [
+        role = quote_identifier("policy role", params.policy_target)
+        policies = f"CREATE ROLE IF NOT EXISTS {role};\n\n{policies}"
+    files = [
         (USER_STUDY_TEMPLATE.name, render(USER_STUDY_TEMPLATE.read_text(), params)),
         (ROW_POLICIES_TEMPLATE.name, policies),
     ]
+    for _, sql in files:
+        assert_only_database(sql, params.database)
+    return files
 
 
 def statements(sql: str) -> list[str]:
@@ -270,8 +330,52 @@ def statements(sql: str) -> list[str]:
     return [s.strip() for s in re.split(r";[ \t]*$", body, flags=re.M) if s.strip()]
 
 
+def policy_conflicts(client, database: str, target: str) -> list[str]:
+    """Row policies on ``database`` that apply would silently widen or hand over.
+
+    - any policy not named with OWNED_POLICY_PREFIX: the catch-all
+      ``USING 1 TO ALL EXCEPT <target>`` is PERMISSIVE and OR-ed with it, so a
+      principal it restricts would see every row (and one TO the target would
+      widen the target);
+    - our own policies attached to a different target: re-applying with a new
+      target would move the target's old principal into ALL EXCEPT, unfiltered.
+    """
+    validate_identifier("database", database)
+    validate_identifier("policy target", target)
+    rows = client.query(
+        "SELECT short_name, table, apply_to_all, apply_to_list, apply_to_except "
+        "FROM system.row_policies WHERE database = {db:String} ORDER BY short_name, table",
+        parameters={"db": database},
+    ).result_rows
+    conflicts = []
+    other_targets: dict[str, int] = {}
+    for name, table, to_all, to_list, to_except in rows:
+        if not name.startswith(OWNED_POLICY_PREFIX):
+            conflicts.append(f"{name} ON {database}.{table or '*'} (not created by study_authz)")
+            continue
+        attached = list(to_except) if to_all else list(to_list)
+        if attached != [target]:
+            key = ", ".join(attached) or "nobody"
+            other_targets[key] = other_targets.get(key, 0) + 1
+    for other, count in sorted(other_targets.items()):
+        conflicts.append(
+            f"{count} study_authz policies on {database} are attached to {other}, not {target} "
+            "(changing the target would leave the old one unfiltered; drop them first)"
+        )
+    return conflicts
+
+
 def apply(client, params: Params, log=print) -> None:
-    """Run both rendered files, statement by statement, with an admin client."""
+    """Run both rendered files, statement by statement, with an admin client.
+
+    Before any query: re-validates the parameters and renders every file
+    (single-pass substitution, then assert_only_database). Then refuses,
+    before changing anything, if the database has row policies this tool does
+    not own (policy_conflicts). Policy administration on the database must be
+    serialized with apply; run `check` afterwards (docs/study-authz.md).
+    """
+    params.validate()
+    files = rendered_files(params)
     if (
         params.target_is_user
         and not client.query(
@@ -280,30 +384,43 @@ def apply(client, params: Params, log=print) -> None:
         ).result_rows
     ):
         raise ValueError(f"policy target user {params.policy_target} does not exist")
-    for name, sql in rendered_files(params):
+    conflicts = policy_conflicts(client, params.database, params.policy_target)
+    if conflicts:
+        raise ValueError(
+            f"refusing to apply to {params.database}: study_authz owns every row policy on "
+            "the database, and its catch-all USING 1 for non-targets would widen these "
+            "(drop or move them first): " + "; ".join(conflicts)
+        )
+    for name, sql in files:
         log(f"apply  {name} -> {params.database}")
         for statement in statements(sql):
             client.command(statement)
 
 
-def restricted_user_sql(user: str, password: str, database: str) -> str:
-    """SQL creating an MCP runtime user that reads ONLY through the role.
+def restricted_user_sql(
+    user: str, password: str, database: str, role: str | None = ROW_POLICY_ROLE
+) -> str:
+    """SQL creating an MCP runtime user.
 
-    CREATE USER OR REPLACE drops any direct grant the user had. No settings
-    profile is attached: the MCP must be able to send SQL_cbio_user and
-    readonly=1 per query, which a profile forcing readonly would forbid.
+    With ``role`` (a role target): CREATE USER OR REPLACE, which drops any
+    direct grant the user had, then the role as its only privilege. With
+    ``role=None`` (the user will itself be the policy target, `apply
+    --policy-user`): a plain CREATE USER with no role grant, which fails
+    rather than replace an existing user and its grants. No settings profile
+    either way: the MCP must be able to send SQL_cbio_user and readonly=1 per
+    query, which a profile forcing readonly would forbid.
     """
-    if not _DB_RE.match(user or "") or not _DB_RE.match(database or ""):
-        raise ValueError("user and database must match ^[A-Za-z0-9_]+$")
+    quser = quote_identifier("user", user)
+    qdb = quote_identifier("database", database)
     if not password:
         raise ValueError("password must not be empty")
     digest = hashlib.sha256(password.encode()).hexdigest()
-    return "\n".join(
-        [
-            f"CREATE USER OR REPLACE {user} IDENTIFIED WITH sha256_hash BY '{digest}'",
-            f"    DEFAULT DATABASE {database};",
-            f"GRANT {ROW_POLICY_ROLE} TO {user};",
-            f"SET DEFAULT ROLE {ROW_POLICY_ROLE} TO {user};",
-            "",
-        ]
-    )
+    create = "CREATE USER OR REPLACE" if role is not None else "CREATE USER"
+    lines = [
+        f"{create} {quser} IDENTIFIED WITH sha256_hash BY '{digest}'",
+        f"    DEFAULT DATABASE {qdb};",
+    ]
+    if role is not None:
+        qrole = quote_identifier("policy role", role)
+        lines += [f"GRANT {qrole} TO {quser};", f"SET DEFAULT ROLE {qrole} TO {quser};"]
+    return "\n".join(lines + [""])

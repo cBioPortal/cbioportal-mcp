@@ -209,6 +209,10 @@ STUDY_SCOPED_VIEWS: frozenset[str] = frozenset(
 )
 
 ROW_POLICY_ROLE = "cbioportal_mcp_study_restricted"
+# Every policy this tool creates is named with this prefix. The tool owns ALL
+# row policies on a target database: any other policy there is refused by
+# apply and reported by check (docs/study-authz.md, "Policy ownership").
+OWNED_POLICY_PREFIX = "cbioportal_mcp_"
 DEFAULT_DENY_POLICY = "cbioportal_mcp_default_deny"
 UNRESTRICTED_OTHERS_POLICY = "cbioportal_mcp_unrestricted_others"
 

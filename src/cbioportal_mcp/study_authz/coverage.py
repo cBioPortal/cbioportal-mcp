@@ -13,6 +13,9 @@ For the policy target (the restricted role, or a user), against ``catalog.py``:
   ``user_study_refresh``, and its last refresh succeeded; no dictionaries
   (dictGet bypasses row policies);
 - policy subqueries reference only the target database;
+- no row policy on the database was created by anyone else, or attaches our
+  policies to another target (``sqlgen.policy_conflicts``): the catch-all
+  ``USING 1 TO ALL EXCEPT <target>`` would widen it;
 - anything unclassified fails the check: the default-deny keeps it safe, but
   nobody has decided how it maps to a study.
 
@@ -34,7 +37,11 @@ from cbioportal_mcp.study_authz.catalog import (
     USER_STUDY_REFRESH_VIEW,
     USER_STUDY_TABLE,
 )
-from cbioportal_mcp.study_authz.sqlgen import USER_STUDY_MATCH
+from cbioportal_mcp.study_authz.sqlgen import (
+    USER_STUDY_MATCH,
+    policy_conflicts,
+    validate_identifier,
+)
 
 BYPASS_ENGINES = {"MaterializedView", "Dictionary", "LiveView", "WindowView"}
 
@@ -80,9 +87,15 @@ def evaluate(
     policies: list[Policy],
     database: str,
     refresh_error: str | None = None,
+    conflicts: list[str] = (),
 ) -> Report:
-    """Pure check over fetched metadata: ``objects`` is name -> (engine, create query)."""
+    """Pure check over fetched metadata: ``objects`` is name -> (engine, create query).
+
+    ``conflicts`` is ``sqlgen.policy_conflicts`` for the database and target.
+    """
     report = Report()
+    for conflict in conflicts:
+        report.errors.append(f"row policy the catch-all would widen: {conflict}")
     by_table: dict[str, list[Policy]] = {}
     for policy in policies:
         if policy.is_restrictive:
@@ -150,6 +163,8 @@ def evaluate(
 
 def fetch_and_evaluate(client, database: str, target: str) -> Report:
     """``target``: the role or user the policies are attached TO."""
+    validate_identifier("database", database)
+    validate_identifier("policy target", target)
     tables = client.query(
         "SELECT name, engine, create_table_query FROM system.tables "
         "WHERE database = {db:String} AND NOT is_temporary",
@@ -183,4 +198,6 @@ def fetch_and_evaluate(client, database: str, target: str) -> Report:
             refresh_error = f"last refresh failed: {str(refresh[0][0]).splitlines()[0][:200]}"
         elif refresh[0][1] is None:
             refresh_error = "has never refreshed successfully"
-    return evaluate(objects, policies, database, refresh_error)
+    return evaluate(
+        objects, policies, database, refresh_error, policy_conflicts(client, database, target)
+    )
