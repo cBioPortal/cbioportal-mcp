@@ -89,9 +89,13 @@ the public-database check is reserved for a later release.
 
 `CBIOPORTAL_MCP_AUTH_ENFORCEMENT=enforce` requires verified login on every
 HTTP/SSE request, including tool/resource/prompt discovery and reads. With `off`,
-only emails in `CBIOPORTAL_MCP_AUTH_TEST_USERS` receive these checks; other
-requests retain anonymous access. A claimed tester email adds checks even if
-its credentials fail. Decisions log only the route and admission booleans.
+only emails in `CBIOPORTAL_MCP_AUTH_TEST_USERS` receive the full verification
+checks. Other callers retain the existing login behavior: Google-configured
+servers require a valid bearer or bridge secret; without Google, anonymous
+requests remain allowed. Presented invalid credentials always fail, in either
+mode. A valid bridge secret admits non-testers in `off` without a verified flag,
+but no verified identity is assigned until the full checks pass. A claimed tester
+email adds checks even if its credentials fail. Decisions log only the route and admission booleans.
 Legacy `AUTH_REQUIRED` / `ALLOW_UNAUTHENTICATED` settings have no effect.
 
 Two login routes can coexist on the same endpoint:

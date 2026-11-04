@@ -9,9 +9,10 @@ import pytest
 from fastmcp.exceptions import ToolError
 from fastmcp.server.auth import AccessToken
 from fastmcp.server.middleware import Middleware, MiddlewareContext
+from starlette.applications import Starlette
 from starlette.datastructures import Headers
 from starlette.responses import JSONResponse
-from starlette.routing import Route
+from starlette.routing import Mount, Route
 from starlette.testclient import TestClient
 
 from cbioportal_mcp import rollout
@@ -188,6 +189,10 @@ async def test_rollout_targeting(monkeypatch, mode, email, verified, allowed, ch
             headers = {"authorization": "Bearer test-token"}
         else:
             headers = bridge(**{"x-user-email": email, "x-user-email-verified": str(verified)})
+    if route == "librechat":
+        provider = None
+    elif email is None and mode == "off":
+        allowed = False  # Google already required login before the rollout.
     decision = await CombinedAuth(provider).decide(Headers(headers))
     assert (decision.allowed, decision.checked) == (allowed, checked)
     if decision.identity:
@@ -201,12 +206,13 @@ async def test_rollout_targeting(monkeypatch, mode, email, verified, allowed, ch
 @pytest.mark.parametrize("mode", ["enforce", "off"])
 async def test_no_fallback_from_invalid_credential(monkeypatch, bad_route, mode):
     monkeypatch.setenv(rollout.AUTH_ENFORCEMENT_ENV, mode)
-    monkeypatch.setenv(rollout.AUTH_TEST_USERS_ENV, "alice@example.org")
+    monkeypatch.setenv(rollout.AUTH_TEST_USERS_ENV, "")
     pin()
     headers = {**bridge(), "authorization": "Bearer test-token"}
     provider = google(token())
     if bad_route == "oauth":
         provider.verify_token.return_value = None
+        del headers["x-user-email"]  # No tester hint is needed to fail closed.
     else:
         headers["x-cbioportal-mcp-bridge-secret"] = "wrong"
     decision = await CombinedAuth(provider).decide(Headers(headers))
@@ -214,7 +220,7 @@ async def test_no_fallback_from_invalid_credential(monkeypatch, bad_route, mode)
 
 
 @pytest.mark.asyncio
-async def test_both_routes_coexist_and_invalid_exempt_has_no_identity(monkeypatch):
+async def test_both_routes_coexist_and_invalid_credentials_always_reject(monkeypatch):
     monkeypatch.setenv(rollout.AUTH_ENFORCEMENT_ENV, "off")
     pin()
     auth = CombinedAuth(google(token()))
@@ -226,7 +232,7 @@ async def test_both_routes_coexist_and_invalid_exempt_has_no_identity(monkeypatc
         decision = await auth.decide(Headers(headers))
         assert decision.allowed and decision.identity.route == route
     decision = await auth.decide(Headers(bridge(**{"x-cbioportal-mcp-bridge-secret": "bad"})))
-    assert decision.allowed and decision.identity is None
+    assert not decision.allowed and decision.identity is None
 
 
 @pytest.mark.asyncio
@@ -566,6 +572,10 @@ def test_unknown_google_evidence_fails_closed(evidence):
 
 
 def test_real_google_discovery_and_registration_survive_adapter():
+    from importlib.metadata import version
+
+    # Deliberate upgrade tripwire: the adapter uses this version's private API.
+    assert version("fastmcp") == "2.13.3", "Revalidate CombinedAuth's _get_resource_url adapter"
     from fastmcp.server.auth.providers.google import GoogleProvider
     from key_value.aio.stores.memory import MemoryStore
 
@@ -577,6 +587,7 @@ def test_real_google_discovery_and_registration_survive_adapter():
         required_scopes=["openid", "email", "profile"],
         require_authorization_consent=False,
     )
+    assert str(provider._get_resource_url("/mcp")) == "https://mcp.example.org/mcp"
     server, _ = make_server(provider)
     with TestClient(server.http_app(stateless_http=True)) as client:
         metadata = client.get("/.well-known/oauth-protected-resource/mcp")
@@ -598,3 +609,88 @@ def test_real_google_discovery_and_registration_survive_adapter():
         denied = rpc(client, "tools/list")
         assert denied.status_code == 401
         assert "oauth-protected-resource/mcp" in denied.headers["www-authenticate"]
+
+
+@pytest.mark.parametrize(
+    "configured,headers,testers,result,status",
+    [
+        (True, {}, "", None, 401),
+        (True, {"authorization": "Bearer garbage"}, "", None, 401),
+        (True, {"authorization": "Bearer garbage"}, "alice@example.org", None, 401),
+        (True, {"authorization": "Bearer valid"}, "", token(), 200),
+        (True, {"authorization": "Bearer legacy"}, "", token({}), 200),
+        (False, {}, "", None, 200),
+        (False, {"authorization": "Bearer garbage"}, "", None, 401),
+        (False, bridge(**{"x-cbioportal-mcp-bridge-secret": "wrong"}), "", None, 401),
+        (False, bridge(**{"x-cbioportal-mcp-bridge-secret": "${SECRET}"}), "", None, 401),
+        (True, bridge(**{"x-user-email-verified": "false"}), "", None, 200),
+        (True, bridge(**{"x-user-email-verified": "false"}), "alice@example.org", None, 401),
+        (False, bridge(**{"x-user-email-verified": "false"}), "", None, 200),
+    ],
+)
+def test_off_preserves_login_and_rejects_failed_credentials(
+    monkeypatch,
+    configured,
+    headers,
+    testers,
+    result,
+    status,
+):
+    monkeypatch.setenv(rollout.AUTH_ENFORCEMENT_ENV, "off")
+    monkeypatch.setenv(rollout.AUTH_TEST_USERS_ENV, testers)
+    provider = None
+    if configured:
+        for name, value in GOOGLE_ENV.items():
+            monkeypatch.setenv(name, value)
+        provider = google(result)
+        provider.get_routes = Mock(return_value=[])
+        provider._get_resource_url = Mock(return_value="https://mcp.example.org/mcp")
+    server, _ = make_server(provider)
+    with TestClient(server.http_app(stateless_http=True, json_response=True)) as client:
+        response = rpc(client, "tools/list", headers=headers)
+        assert response.status_code == status, response.text
+        if status == 401:
+            assert "Bearer" in response.headers["www-authenticate"]
+        else:
+            assert "error" not in response.json()
+
+
+@pytest.mark.parametrize("mode", ["off", "enforce"])
+@pytest.mark.asyncio
+async def test_conflicting_valid_credentials_reject(monkeypatch, mode):
+    monkeypatch.setenv(rollout.AUTH_ENFORCEMENT_ENV, mode)
+    pin()
+    auth = CombinedAuth(google(token(email="bob@example.org")))
+    decision = await auth.decide(Headers({**bridge(), "authorization": "Bearer valid"}))
+    assert not decision.allowed and decision.identity is None
+
+
+@pytest.mark.asyncio
+async def test_bridge_user_id_is_stripped():
+    pin()
+    decision = await CombinedAuth().decide(Headers(bridge(**{"x-user-id": "  bridge-id  "})))
+    assert decision.allowed and decision.identity.user_id == "bridge-id"
+
+
+@pytest.mark.parametrize("mode", ["enforce", "off"])
+@pytest.mark.parametrize("mounted", [False, True])
+def test_root_path_and_parent_mount_preserve_auth_challenge(monkeypatch, mode, mounted):
+    monkeypatch.setenv(rollout.AUTH_ENFORCEMENT_ENV, mode)
+    monkeypatch.setenv(rollout.AUTH_TEST_USERS_ENV, "alice@example.org")
+    server, calls = make_server()
+    app = server.http_app(stateless_http=True, json_response=True)
+    path = "/deployment/mcp"
+    if mounted:
+        app = Starlette(routes=[Mount("/portal", app=app)])
+        path = "/deployment/portal/mcp"
+    with TestClient(app, root_path="/deployment") as client:
+        response = rpc(
+            client,
+            "tools/call",
+            {"name": "probe"},
+            bridge(**{"x-user-email-verified": "false"}),
+            path=path,
+        )
+        assert response.status_code == 401
+        assert "Bearer" in response.headers["www-authenticate"]
+        assert not calls
