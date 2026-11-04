@@ -28,6 +28,7 @@ import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager  # noqa: E402 (after LLMObs.enable)
 from functools import lru_cache
 from importlib import resources as importlib_resources
 from pathlib import Path
@@ -37,7 +38,12 @@ from fastmcp import FastMCP
 
 import mcp.types as mt
 
-from cbioportal_mcp.env import get_mcp_config, TransportType
+from cbioportal_mcp.env import (  # noqa: E402 (after LLMObs.enable)
+    TransportType,
+    get_mcp_config,
+    validate_startup,
+)
+from cbioportal_mcp import rollout  # noqa: E402 (after LLMObs.enable)
 from cbioportal_mcp.authentication.permissions import ensure_db_permissions
 from cbioportal_mcp.auth import _build_auth_provider
 from cbioportal_mcp.telemetry import (
@@ -296,8 +302,66 @@ def _build_hierarchy_path(code: str, entries_by_code: dict[str, dict]) -> str:
     return " > ".join(parts)
 
 
-# Create FastMCP instance
-mcp = FastMCP(
+def _validate_server_startup(transport=None):
+    """Shared startup gate for the console script, Inspector and ASGI servers."""
+    filtering, effective_transport = validate_startup(transport)
+    config = get_mcp_config()
+    # Refuse to serve if mcp-clickhouse's query pool doesn't match the cap
+    # (see query_concurrency); report the pool's actual size, not the env.
+    try:
+        query_concurrency.verify_query_pool(MAX_CONCURRENT_QUERIES)
+    except RuntimeError as e:
+        logger.critical("❌ %s", e)
+        sys.exit(2)
+    logger.info(
+        "ClickHouse query pool: %d workers", query_concurrency.query_pool_size()
+    )
+
+    try:
+        ensure_db_permissions(config=config)
+    except PermissionError as e:
+        logger.critical("❌ ClickHouse permission check failed: %s", e)
+        sys.exit(2)
+
+    enforce_study_policy_coverage(config.mcp_database)
+
+    logger.info(
+        "cBioPortal MCP startup: study_filtering=%s transport=%s", filtering, effective_transport
+    )
+    logger.info("cBioPortal MCP rollout switches: %s", rollout.summary(filtering))
+
+
+@asynccontextmanager
+async def _startup_lifespan(server):
+    logging.basicConfig(level=logging.INFO)
+    _validate_server_startup(server.startup_transport)
+    yield
+
+
+class ConfiguredFastMCP(FastMCP):
+    """Keep alternate launchers subject to the same transport policy."""
+
+    def __init__(self, **kwargs):
+        _, self.startup_transport = validate_startup()
+        super().__init__(**kwargs, lifespan=_startup_lifespan)
+
+    async def run_async(self, transport=None, show_banner=True, **kwargs):
+        # FastMCP's own default is stdio; use our configured HTTP default.
+        transport = transport if transport is not None else get_mcp_config().mcp_server_transport
+        validate_startup(transport)
+        await super().run_async(transport=transport, show_banner=show_banner, **kwargs)
+
+    async def run_stdio_async(self, show_banner=True, log_level=None):
+        _, self.startup_transport = validate_startup("stdio")
+        await super().run_stdio_async(show_banner=show_banner, log_level=log_level)
+
+    def http_app(self, path=None, **kwargs):
+        _, self.startup_transport = validate_startup(kwargs.get("transport", "http"))
+        return super().http_app(path=path, **kwargs)
+
+
+# Construction validates even when main() is bypassed by fastmcp dev / ASGI.
+mcp = ConfiguredFastMCP(
     name="cBioPortal MCP Server",
     instructions=_load_resource("system-prompt.md"),
     auth=_build_auth_provider(),
@@ -337,25 +401,6 @@ def main():
 
     # Get config
     config = get_mcp_config()
-
-    # Refuse to serve if mcp-clickhouse's query pool doesn't match the cap
-    # (see query_concurrency); report the pool's actual size, not the env.
-    try:
-        query_concurrency.verify_query_pool(MAX_CONCURRENT_QUERIES)
-    except RuntimeError as e:
-        logger.critical("❌ %s", e)
-        sys.exit(2)
-    logger.info(
-        "ClickHouse query pool: %d workers", query_concurrency.query_pool_size()
-    )
-
-    try:
-        ensure_db_permissions(config=config)
-    except PermissionError as e:
-        logger.critical("❌ ClickHouse permission check failed: %s", e)
-        sys.exit(2)
-
-    enforce_study_policy_coverage(config.mcp_database)
 
     # Warm the list_studies cache immediately, without blocking server
     # startup on the ClickHouse round trip, then keep it proactively

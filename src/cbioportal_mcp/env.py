@@ -1,9 +1,39 @@
 """Environment configuration for cBioPortal MCP server."""
 
-from dataclasses import dataclass
 import os
-from typing import Optional
+from dataclasses import dataclass
 from enum import Enum
+from typing import Optional, Sequence
+
+
+def _required_env(name: str) -> str:
+    """Read an explicitly set variable; an absent value never gets a default."""
+    value = os.getenv(name)
+    if value is None:
+        raise ValueError(f"{name} is required and must be explicitly set")
+    return value.strip()
+
+
+def required_enum(name: str, choices: Sequence[str]) -> str:
+    """Parse a required enum, trimming whitespace and ignoring case; no aliases."""
+    value = _required_env(name).lower()
+    if value not in choices:
+        raise ValueError(f"{name} must be one of: {', '.join(choices)}")
+    return value
+
+
+def required_list(name: str) -> list[str]:
+    """Parse a required comma list; explicit blank means [], blank items fail.
+
+    Preserve item case and order (e.g. user IDs), trimming surrounding spaces.
+    """
+    value = _required_env(name)
+    if not value:
+        return []
+    items = [item.strip() for item in value.split(",")]
+    if any(not item for item in items):
+        raise ValueError(f"{name} must be a comma-separated list without empty items")
+    return items
 
 
 class TransportType(str, Enum):
@@ -31,9 +61,11 @@ class McpConfig:
         """Get the MCP server transport method.
 
         Valid options: "stdio", "http", "sse"
-        Default: "stdio"
+        Default: "http"
         """
-        transport = os.getenv("CLICKHOUSE_MCP_SERVER_TRANSPORT", TransportType.STDIO.value).lower()
+        transport = (
+            os.getenv("CLICKHOUSE_MCP_SERVER_TRANSPORT", TransportType.HTTP.value).strip().lower()
+        )
 
         # Validate transport type
         if transport not in TransportType.values():
@@ -185,3 +217,29 @@ def get_mcp_config():
         # Instantiate the config object here, ensuring load_dotenv() has likely run
         _MCP_CONFIG_INSTANCE = McpConfig()
     return _MCP_CONFIG_INSTANCE
+
+
+def validate_startup(transport: Optional[str] = None) -> tuple[str, str]:
+    """Fail closed for configuration on construction and alternate launch paths.
+
+    A launcher can override the transport (e.g. Inspector selects stdio), so
+    validate that effective transport too, rather than trusting only the env.
+    """
+    filtering = required_enum("CBIOPORTAL_MCP_STUDY_FILTERING", ("on", "off"))
+    if filtering == "on":
+        raise ValueError(
+            "CBIOPORTAL_MCP_STUDY_FILTERING=on: study filtering cannot be enabled "
+            "until a later release (P11); set it to off for this release"
+        )
+    configured_transport = get_mcp_config().mcp_server_transport
+    effective_transport = transport if transport is not None else configured_transport
+    if "stdio" in (configured_transport, effective_transport):
+        if os.getenv("CBIOPORTAL_MCP_LOCAL_DEV") != "1":
+            raise ValueError(
+                "stdio requires the local-development opt-in CBIOPORTAL_MCP_LOCAL_DEV=1"
+            )
+    from cbioportal_mcp import rollout  # rollout imports this module's parsers
+
+    # Rollout switches default to off only when actually serving local stdio.
+    rollout.initialize(filtering, local_dev=effective_transport == "stdio")
+    return filtering, effective_transport
