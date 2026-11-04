@@ -57,7 +57,7 @@
 
 DROP VIEW IF EXISTS mutation_panel_gene_coverage;
 
-CREATE VIEW mutation_panel_gene_coverage AS
+CREATE VIEW mutation_panel_gene_coverage SQL SECURITY INVOKER AS
 SELECT
     stgp.sample_unique_id,
     stgp.cancer_study_identifier,
@@ -71,7 +71,7 @@ WHERE stgp.alteration_type = 'MUTATION_EXTENDED';
 
 DROP VIEW IF EXISTS mutation_wes_coverage;
 
-CREATE VIEW mutation_wes_coverage AS
+CREATE VIEW mutation_wes_coverage SQL SECURITY INVOKER AS
 SELECT
     sample_unique_id,
     cancer_study_identifier
@@ -117,7 +117,7 @@ WHERE alteration_type = 'MUTATION_EXTENDED'
 
 DROP VIEW IF EXISTS gene_mutation_frequency_by_cancer_type;
 
-CREATE VIEW gene_mutation_frequency_by_cancer_type AS
+CREATE VIEW gene_mutation_frequency_by_cancer_type SQL SECURITY INVOKER AS
 WITH cohort AS (
     SELECT cancer_study_identifier
     FROM cancer_study_query_preferences
@@ -195,7 +195,7 @@ WHERE p.profiled_samples >= 50;
 
 DROP VIEW IF EXISTS gene_mutation_frequency_in_study;
 
-CREATE VIEW gene_mutation_frequency_in_study AS
+CREATE VIEW gene_mutation_frequency_in_study SQL SECURITY INVOKER AS
 WITH sample_cancer_type AS (
     SELECT cd.sample_unique_id, cd.attribute_value AS cancer_type
     FROM clinical_data_derived cd
@@ -270,7 +270,7 @@ WHERE p.profiled_samples >= 50;
 
 DROP VIEW IF EXISTS gene_mutation_frequency_in_studies;
 
-CREATE VIEW gene_mutation_frequency_in_studies AS
+CREATE VIEW gene_mutation_frequency_in_studies SQL SECURITY INVOKER AS
 WITH sample_cancer_type AS (
     SELECT cd.sample_unique_id, cd.attribute_value AS cancer_type
     FROM clinical_data_derived cd
@@ -352,7 +352,7 @@ WHERE p.profiled_samples >= 50;
 
 DROP VIEW IF EXISTS gene_alteration_frequency_by_cancer_type;
 
-CREATE VIEW gene_alteration_frequency_by_cancer_type AS
+CREATE VIEW gene_alteration_frequency_by_cancer_type SQL SECURITY INVOKER AS
 WITH cohort AS (
     SELECT cancer_study_identifier
     FROM cancer_study_query_preferences
@@ -468,7 +468,7 @@ WHERE p.profiled_samples >= 50;
 
 DROP VIEW IF EXISTS top_mutated_genes_in_cohort;
 
-CREATE VIEW top_mutated_genes_in_cohort AS
+CREATE VIEW top_mutated_genes_in_cohort SQL SECURITY INVOKER AS
 WITH cohort AS (
     SELECT cancer_study_identifier
     FROM cancer_study_query_preferences
@@ -541,7 +541,7 @@ LIMIT {top_n:UInt32};
 
 DROP VIEW IF EXISTS top_mutated_genes_in_study;
 
-CREATE VIEW top_mutated_genes_in_study AS
+CREATE VIEW top_mutated_genes_in_study SQL SECURITY INVOKER AS
 WITH wes_profiled_count AS (
     SELECT COUNT(DISTINCT sample_unique_id) AS n
     FROM mutation_wes_coverage
@@ -609,7 +609,7 @@ LIMIT {top_n:UInt32};
 
 DROP VIEW IF EXISTS gene_mutation_variants_in_study;
 
-CREATE VIEW gene_mutation_variants_in_study AS
+CREATE VIEW gene_mutation_variants_in_study SQL SECURITY INVOKER AS
 WITH profiled_count AS (
     SELECT COUNT(DISTINCT sample_unique_id) AS n
     FROM (
@@ -684,7 +684,7 @@ ORDER BY altered_samples DESC, mutation_variant ASC;
 
 DROP VIEW IF EXISTS co_altered_genes_in_study;
 
-CREATE VIEW co_altered_genes_in_study AS
+CREATE VIEW co_altered_genes_in_study SQL SECURITY INVOKER AS
 WITH wes_samples AS (
     SELECT DISTINCT sample_unique_id
     FROM mutation_wes_coverage
@@ -777,7 +777,7 @@ LIMIT {top_n:UInt32};
 
 DROP VIEW IF EXISTS cna_panel_gene_coverage;
 
-CREATE VIEW cna_panel_gene_coverage AS
+CREATE VIEW cna_panel_gene_coverage SQL SECURITY INVOKER AS
 SELECT
     stgp.sample_unique_id,
     stgp.cancer_study_identifier,
@@ -793,7 +793,7 @@ WHERE stgp.alteration_type = 'COPY_NUMBER_ALTERATION'
 
 DROP VIEW IF EXISTS cna_wes_coverage;
 
-CREATE VIEW cna_wes_coverage AS
+CREATE VIEW cna_wes_coverage SQL SECURITY INVOKER AS
 SELECT
     stgp.sample_unique_id,
     stgp.cancer_study_identifier
@@ -831,7 +831,7 @@ WHERE stgp.alteration_type = 'COPY_NUMBER_ALTERATION'
 
 DROP VIEW IF EXISTS top_cna_genes_in_study;
 
-CREATE VIEW top_cna_genes_in_study AS
+CREATE VIEW top_cna_genes_in_study SQL SECURITY INVOKER AS
 WITH wes_profiled_count AS (
     SELECT COUNT(DISTINCT sample_unique_id) AS n
     FROM cna_wes_coverage
@@ -904,7 +904,7 @@ LIMIT {top_n:UInt32};
 
 DROP VIEW IF EXISTS gene_cna_distribution_in_study;
 
-CREATE VIEW gene_cna_distribution_in_study AS
+CREATE VIEW gene_cna_distribution_in_study SQL SECURITY INVOKER AS
 WITH discrete_profiles AS (
     SELECT substring(gprof.stable_id, length({study:String}) + 2) AS profile_type
     FROM genetic_profile gprof
@@ -968,7 +968,7 @@ ORDER BY r.profile_type, r.cna_value = 'NA', toFloat64OrNull(r.cna_value) DESC;
 
 DROP VIEW IF EXISTS sv_panel_gene_coverage;
 
-CREATE VIEW sv_panel_gene_coverage AS
+CREATE VIEW sv_panel_gene_coverage SQL SECURITY INVOKER AS
 SELECT
     stgp.sample_unique_id,
     stgp.cancer_study_identifier,
@@ -982,7 +982,7 @@ WHERE stgp.alteration_type = 'STRUCTURAL_VARIANT';
 
 DROP VIEW IF EXISTS sv_wes_coverage;
 
-CREATE VIEW sv_wes_coverage AS
+CREATE VIEW sv_wes_coverage SQL SECURITY INVOKER AS
 SELECT
     sample_unique_id,
     cancer_study_identifier
@@ -1016,7 +1016,7 @@ WHERE alteration_type = 'STRUCTURAL_VARIANT'
 
 DROP VIEW IF EXISTS top_sv_genes_in_study;
 
-CREATE VIEW top_sv_genes_in_study AS
+CREATE VIEW top_sv_genes_in_study SQL SECURITY INVOKER AS
 WITH wes_profiled_count AS (
     SELECT COUNT(DISTINCT sample_unique_id) AS n
     FROM sv_wes_coverage
