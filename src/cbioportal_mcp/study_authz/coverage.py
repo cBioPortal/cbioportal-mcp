@@ -16,8 +16,10 @@ For the policy target (the restricted role, or a user), against ``catalog.py``:
 - anything unclassified fails the check: the default-deny keeps it safe, but
   nobody has decided how it maps to a study.
 
-Presence and shape only; the live tests prove row-level behavior. Reading
-``system.row_policies`` needs admin credentials, never the MCP runtime user.
+Presence and shape only; the live tests prove row-level behavior. The admin
+CLI reads with admin credentials; the server's own startup check
+(``startup_check.py``, filtering on) reuses ``evaluate`` as the runtime user,
+which needs ``SHOW ROW POLICIES ON <db>.*`` (granted by the policy template).
 """
 
 from __future__ import annotations
@@ -148,39 +150,84 @@ def evaluate(
     return report
 
 
-def fetch_and_evaluate(client, database: str, target: str) -> Report:
-    """``target``: the role or user the policies are attached TO."""
+@dataclass(frozen=True)
+class PolicyRow:
+    """A ``system.row_policies`` row: the policy plus who it applies TO."""
+
+    policy: Policy
+    apply_to_all: bool = False
+    apply_to_list: tuple[str, ...] = ()
+    apply_to_except: tuple[str, ...] = ()
+
+    def applies_to(self, principals: set[str]) -> bool:
+        """ClickHouse's match: the user or any of its *enabled* roles."""
+        listed = self.apply_to_all or bool(principals & set(self.apply_to_list))
+        return listed and not principals & set(self.apply_to_except)
+
+
+def fetch_objects(
+    client, database: str, *, dictionaries: bool = True
+) -> dict[str, tuple[str, str]]:
+    """name -> (engine, create query) for every table, view and dictionary.
+
+    ``dictionaries=False`` skips ``system.dictionaries``, which a non-admin
+    user cannot read; DDL dictionaries also appear in ``system.tables``.
+    """
     tables = client.query(
         "SELECT name, engine, create_table_query FROM system.tables "
         "WHERE database = {db:String} AND NOT is_temporary",
         parameters={"db": database},
     ).result_rows
     objects = {row[0]: (row[1], row[2] or "") for row in tables}
-    for (name,) in client.query(
-        "SELECT name FROM system.dictionaries WHERE database = {db:String}",
+    if dictionaries:
+        for (name,) in client.query(
+            "SELECT name FROM system.dictionaries WHERE database = {db:String}",
+            parameters={"db": database},
+        ).result_rows:
+            objects.setdefault(name, ("Dictionary", ""))
+    return objects
+
+
+def fetch_policy_rows(client, database: str) -> list[PolicyRow]:
+    """Every row policy on ``database``, whoever it applies to."""
+    rows = client.query(
+        "SELECT short_name, table, select_filter, is_restrictive, apply_to_all, "
+        "apply_to_list, apply_to_except FROM system.row_policies WHERE database = {db:String}",
         parameters={"db": database},
-    ).result_rows:
-        objects.setdefault(name, ("Dictionary", ""))
+    ).result_rows
+    return [
+        PolicyRow(
+            Policy(r[0], r[1], r[2] or "", bool(r[3])),
+            bool(r[4]),
+            tuple(r[5] or ()),
+            tuple(r[6] or ()),
+        )
+        for r in rows
+    ]
+
+
+def fetch_refresh_error(client, database: str) -> str | None:
+    refresh = client.query(
+        "SELECT exception, last_success_time FROM system.view_refreshes "
+        "WHERE database = {db:String} AND view = {v:String}",
+        parameters={"db": database, "v": USER_STUDY_REFRESH_VIEW},
+    ).result_rows
+    if not refresh:
+        return "not scheduled (no row in system.view_refreshes)"
+    if refresh[0][0]:
+        return f"last refresh failed: {str(refresh[0][0]).splitlines()[0][:200]}"
+    if refresh[0][1] is None:
+        return "has never refreshed successfully"
+    return None
+
+
+def fetch_and_evaluate(client, database: str, target: str) -> Report:
+    """``target``: the role or user the policies are attached TO."""
+    objects = fetch_objects(client, database)
     if not objects:
         raise SystemExit(f"no tables visible in {database}: wrong database or admin lacks SHOW")
-    rows = client.query(
-        "SELECT short_name, table, select_filter, is_restrictive FROM system.row_policies "
-        "WHERE database = {db:String} AND (apply_to_all OR has(apply_to_list, {role:String})) "
-        "AND NOT has(apply_to_except, {role:String})",
-        parameters={"db": database, "role": target},
-    ).result_rows
-    policies = [Policy(r[0], r[1], r[2] or "", bool(r[3])) for r in rows]
+    policies = [r.policy for r in fetch_policy_rows(client, database) if r.applies_to({target})]
     refresh_error = None
     if USER_STUDY_REFRESH_VIEW in objects:
-        refresh = client.query(
-            "SELECT exception, last_success_time FROM system.view_refreshes "
-            "WHERE database = {db:String} AND view = {v:String}",
-            parameters={"db": database, "v": USER_STUDY_REFRESH_VIEW},
-        ).result_rows
-        if not refresh:
-            refresh_error = "not scheduled (no row in system.view_refreshes)"
-        elif refresh[0][0]:
-            refresh_error = f"last refresh failed: {str(refresh[0][0]).splitlines()[0][:200]}"
-        elif refresh[0][1] is None:
-            refresh_error = "has never refreshed successfully"
+        refresh_error = fetch_refresh_error(client, database)
     return evaluate(objects, policies, database, refresh_error)
