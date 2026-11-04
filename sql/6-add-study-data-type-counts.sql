@@ -80,7 +80,7 @@ WITH
     resource_rows AS (
         SELECT r.cancer_study_id AS cancer_study_id, rd.display_name AS display_name, count(DISTINCT s.internal_id) AS n
         FROM resource AS r
-        INNER JOIN resource_definition AS rd ON rd.resource_id = r.resource_id
+        INNER JOIN resource_definition AS rd ON rd.resource_id = r.resource_id AND rd.cancer_study_id = r.cancer_study_id
         INNER JOIN (
             SELECT s.internal_id, s.stable_id, p.cancer_study_id
             FROM sample AS s
@@ -93,7 +93,7 @@ WITH
         FROM resource AS r
         INNER JOIN patient AS p ON p.stable_id = r.patient_id AND p.cancer_study_id = r.cancer_study_id
         INNER JOIN sample AS s ON p.internal_id = s.patient_id
-        INNER JOIN resource_definition AS rd ON rd.resource_id = r.resource_id
+        INNER JOIN resource_definition AS rd ON rd.resource_id = r.resource_id AND rd.cancer_study_id = r.cancer_study_id
         WHERE r.resource_scope = 'PATIENT'
         GROUP BY p.cancer_study_id, rd.display_name
     ),

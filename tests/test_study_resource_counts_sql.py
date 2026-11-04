@@ -15,7 +15,9 @@ def test_resource_counts_resolve_stable_ids_within_study_and_preserve_scope_coun
             """
             CREATE TABLE patient (internal_id INTEGER, stable_id TEXT, cancer_study_id INTEGER);
             CREATE TABLE sample (internal_id INTEGER, stable_id TEXT, patient_id INTEGER);
-            CREATE TABLE resource_definition (resource_id TEXT, display_name TEXT);
+            CREATE TABLE resource_definition (
+                resource_id TEXT, display_name TEXT, cancer_study_id INTEGER
+            );
             CREATE TABLE resource (
                 internal_id INTEGER, resource_id TEXT, cancer_study_id INTEGER,
                 resource_scope TEXT, sample_id TEXT, patient_id TEXT
@@ -23,7 +25,9 @@ def test_resource_counts_resolve_stable_ids_within_study_and_preserve_scope_coun
             INSERT INTO patient VALUES (1, 'P1', 10), (2, 'P1', 20), (3, 'P2', 10);
             INSERT INTO sample VALUES
                 (101, 'S1', 1), (102, 'S2', 1), (201, 'S1', 2), (301, 'S3', 3);
-            INSERT INTO resource_definition VALUES ('slide', 'Slide'), ('other', 'Slide');
+            INSERT INTO resource_definition VALUES
+                ('slide', 'Slide', 10), ('other', 'Slide', 10),
+                ('slide', 'Study 20 Slide', 20);
             INSERT INTO resource VALUES
                 (9001, 'slide', 10, 'SAMPLE', 'S1', NULL),
                 (9002, 'slide', 10, 'SAMPLE', 'S1', NULL),
@@ -43,5 +47,5 @@ def test_resource_counts_resolve_stable_ids_within_study_and_preserve_scope_coun
             FROM resource_rows GROUP BY cancer_study_id, display_name
             ORDER BY cancer_study_id"""
         ).fetchall()
-    # Sample and patient contributions stay additive even when they overlap.
-    assert counts == [(10, "Slide", 3), (20, "Slide", 2)]
+    # Scope contributions stay additive; reused resource IDs keep their study's label.
+    assert counts == [(10, "Slide", 3), (20, "Study 20 Slide", 2)]
