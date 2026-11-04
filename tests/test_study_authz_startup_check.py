@@ -25,6 +25,11 @@ ROLE = "cbioportal_mcp_study_restricted"
 EMAIL = "probe@startup-probe.invalid"
 
 
+@pytest.fixture(autouse=True)
+def _explicit_public_databases(monkeypatch):
+    monkeypatch.setenv(startup_check.PUBLIC_DATABASES_ENV, "")
+
+
 @dataclass
 class FakeClickHouse:
     """Answers the startup check's queries from plain state."""
@@ -49,6 +54,8 @@ class FakeClickHouse:
     accept_custom_setting: bool = True
     can_read_policies: bool = True
     can_read_grants: bool = True
+    other_objects: dict = field(default_factory=dict)
+    other_policies: dict = field(default_factory=dict)
     settings_seen: list = field(default_factory=list)
 
     def __post_init__(self):
@@ -83,45 +90,41 @@ class FakeClickHouse:
             return [[self.user]]
         if "system.enabled_roles" in sql:
             return [list(r) for r in self.enabled]
-        if "system.grants" in sql or "system.role_grants" in sql:
+        if sql == "SHOW GRANTS":
             if not self.can_read_grants:
-                raise RuntimeError("ACCESS_DENIED: SELECT ON system.grants")
-            principal = parameters["principal"]
-            lines = self.grants if "user_name" in sql else self.role_grants.get(principal, [])
-            rows = []
-            # Fixture notation only; the production audit consumes structured rows.
-            for line in lines:
-                privilege = re.fullmatch(r"GRANT (.+) ON (.+) TO \S+( WITH GRANT OPTION)?", line)
-                if privilege and "system.grants" in sql:
-                    db, table = privilege[2].replace("`", "").split(".")
-                    for part in privilege[1].split(", "):
-                        column = "x" if "(" in part else None
-                        part = part.split("(")[0]
-                        rows.append(
-                            (
-                                part,
-                                None if db == "*" else db.rstrip("*"),
-                                None if table == "*" else table.rstrip("*"),
-                                column,
-                                0,
-                                bool(privilege[3]),
-                            )
-                        )
-                elif not privilege and "system.role_grants" in sql:
-                    match = re.fullmatch(r"GRANT (.+) TO \S+( WITH ADMIN OPTION)?", line)
-                    assert match, line
-                    rows.extend((r.strip("`"), bool(match[2])) for r in match[1].split(", "))
-            return rows
+                raise RuntimeError("cannot read own grants")
+            return [[g] for g in self.grants]
         if sql == "SHOW GRANTS FINAL":
-            return [[g] for g in self.grants + sum(self.role_grants.values(), [])]
+            lines, queue, seen = list(self.grants), list(self.grants), set()
+            while queue:
+                line = queue.pop()
+                if " ON " in line:
+                    continue
+                match = re.fullmatch(r"GRANT (.+) TO \S+(?: WITH ADMIN OPTION)?", line)
+                assert match, line
+                for role in match[1].split(", "):
+                    if role not in seen:
+                        seen.add(role)
+                        nested = self.role_grants.get(role, [])
+                        lines.extend(nested)
+                        queue.extend(nested)
+            return [
+                [re.sub(r" TO \S+", " TO `" + self.user + "`", g)] for g in lines if " ON " in g
+            ]
         if "system.row_policies" in sql:
+            if "SELECT DISTINCT database" in sql:
+                return [(DB,)] + [(db,) for db in self.other_policies]
             if not self.can_read_policies:
                 raise RuntimeError("Code: 497. mcp: Not enough privileges (ACCESS_DENIED)")
+            if parameters["db"] != DB:
+                return self.other_policies.get(parameters["db"], [])
             if "select_filter" in sql:
                 return [list(p) for p in self.policies]
             # sqlgen.policy_conflicts: name, table, apply_to_all/list/except.
             return [[p[0], p[1], p[4], p[5], p[6]] for p in self.policies]
         if "system.tables" in sql:
+            if parameters["db"] != DB:
+                return self.other_objects.get(parameters["db"], [])
             create = "CREATE VIEW d.v SQL SECURITY INVOKER AS SELECT 1"
             return [[n, e, create if e == "View" else ""] for n, e in self.tables.items()]
         if "groupUniqArray" in sql:
@@ -210,7 +213,7 @@ def test_other_role_with_select_refused():
             "analyst": [f"GRANT SELECT ON {DB}.* TO analyst"],
         },
     )
-    refused(fake, "role analyst grants SELECT ON d.* without")
+    refused(fake, "only policy role")
 
 
 def test_role_granted_but_not_default_refused():
@@ -331,7 +334,7 @@ def test_admin_privileges_refused(privilege, scope):
 def test_direct_write_grant_refused_even_for_user_target():
     fake = user_target()
     fake.grants.append(f"GRANT INSERT ON {DB}.user_study TO llm_user")
-    refused(fake, "direct grant INSERT ON d.user_study")
+    refused(fake, "user holds INSERT ON d.user_study")
     fake = user_target()
     fake.grants[-1] = f"GRANT SELECT ON {DB}.* TO llm_user WITH GRANT OPTION"
     refused(fake, "WITH GRANT OPTION")
@@ -342,8 +345,8 @@ def test_role_with_admin_option_refused():
     refused(fake, "WITH ADMIN OPTION")
 
 
-def test_unreadable_grant_metadata_refused():
-    refused(FakeClickHouse(can_read_grants=False), "needs SELECT ON system.grants")
+def test_unreadable_own_grants_refused():
+    refused(FakeClickHouse(can_read_grants=False), "cannot audit SHOW GRANTS")
 
 
 def test_target_role_grant_option_refused():
@@ -353,11 +356,11 @@ def test_target_role_grant_option_refused():
     refused(fake, "WITH GRANT OPTION")
 
 
-def test_user_target_role_carrying_grants_refused():
+def test_user_target_final_grants_from_roles_are_audited():
     fake = user_target()
     fake.grants.append("GRANT analyst TO llm_user")
     fake.role_grants = {"analyst": [f"GRANT SELECT ON {DB}.* TO analyst"]}
-    refused(fake, "only the policy target may carry grants")
+    assert check(fake, DB, EMAIL).target_is_user
 
 
 def test_wildcard_database_grant_refused():
@@ -393,7 +396,7 @@ def test_probe_email_is_reserved_and_random():
     assert a != b and a.endswith("@startup-probe.invalid") and a == a.lower()
 
 
-def test_structured_role_recursion_and_dormant_grants():
+def test_final_includes_nested_nondefault_grants():
     fake = FakeClickHouse()
     fake.role_grants[ROLE].append("GRANT outer TO " + ROLE)
     fake.role_grants["outer"] = ["GRANT inner TO outer"]
@@ -409,11 +412,11 @@ def test_empty_nested_role_graph_passes_with_cycle():
     assert check(fake, DB, EMAIL).target == ROLE
 
 
-def test_role_on_unrelated_database_is_also_refused():
+def test_user_target_role_on_unrelated_database_with_safe_final_grants_passes():
     fake = user_target()
     fake.grants.append("GRANT extra TO llm_user")
     fake.role_grants = {"extra": ["GRANT SELECT ON other.* TO extra"]}
-    refused(fake, "role extra grants SELECT ON other.*")
+    assert check(fake, DB, EMAIL).target_is_user
 
 
 def test_redact_strips_emails_and_newlines():
@@ -432,8 +435,8 @@ def test_filtering_off_runs_nothing(value):
 
 def test_filtering_on_runs_the_check():
     calls = []
-    env = {startup_check.FILTERING_ENV: " On "}
-    run_startup_check(DB, env=env, runner=calls.append)
+    env = {startup_check.FILTERING_ENV: " On ", startup_check.PUBLIC_DATABASES_ENV: ""}
+    run_startup_check(DB, env=env, runner=lambda db, **_: calls.append(db))
     assert calls == [DB]
 
 
@@ -478,26 +481,35 @@ def _params():
         "GRANT SELECT ON d.`sample`* TO mcp",
     ],
 )
-def test_wildcard_flags_missing_from_structured_metadata_refused(line):
-    from cbioportal_mcp.study_authz.grants import Grant, HeldGrants, audit_grants
+def test_wildcard_names_refused(line):
+    from cbioportal_mcp.study_authz.grants import HeldGrants, audit_grants, parse_grants
 
-    held = HeldGrants(
-        [("mcp", True, Grant("SELECT", "authz", None, None, False, False))], set(), [], [line]
+    grants = parse_grants([line], "mcp")
+    assert any(
+        "wildcard" in r for r in audit_grants(HeldGrants(grants, grants), "mcp", "mcp", True, DB)
     )
-    assert any("wildcard" in r for r in audit_grants(held, "mcp", "mcp", True, DB))
 
 
-@pytest.mark.parametrize("partial,option", [(True, False), (False, True)])
-def test_structured_grant_flags_refused(partial, option):
-    from cbioportal_mcp.study_authz.grants import Grant, HeldGrants, audit_grants
+@pytest.mark.parametrize(
+    "line",
+    [
+        "REVOKE SELECT ON d.t FROM mcp",
+        "GRANT SELECT ON d.* TO mcp garbage",
+        "GRANT SELECT ON d.* TO other",
+        "GRANT SELECT( ON d.* TO mcp",
+        "GRANT SELECT ON d.* TO mcp WITH ADMIN OPTION",
+        "GRANT role TO mcp WITH GRANT OPTION",
+        "",
+        "GRANT SELECT ON d.* TO mcp;",
+        "GRANT SELECT ON d.`*` TO mcp",
+        "GRANT SELECT ON d.* , TO mcp",
+    ],
+)
+def test_unrecognized_grants_fail_closed(line):
+    from cbioportal_mcp.study_authz.grants import GrantParseError, parse_grants
 
-    held = HeldGrants(
-        [("mcp", True, Grant("SELECT", DB, None, None, partial, option))],
-        set(),
-        [],
-        ["GRANT SELECT ON d.* TO mcp"],
-    )
-    assert audit_grants(held, "mcp", "mcp", True, DB)
+    with pytest.raises(GrantParseError):
+        parse_grants([line], "mcp")
 
 
 def test_probe_same_count_wrong_study_identifiers_refused():
@@ -505,3 +517,105 @@ def test_probe_same_count_wrong_study_identifiers_refused():
     fake.counts["visible_ids"] = ["public_a", "private_b"]
     fake.counts["public_ids"] = ["public_a", "public_c"]
     refused(fake, "study identifiers differ from public studies")
+
+
+@pytest.mark.parametrize("raw", [None, "a,,b", "a,", "bad-name", "authz*", "a.b"])
+def test_public_database_setting_is_required_and_strict(raw):
+    env = {} if raw is None else {startup_check.PUBLIC_DATABASES_ENV: raw}
+    with pytest.raises(ValueError):
+        startup_check.parse_public_databases(env)
+
+
+@pytest.mark.parametrize("raw,expected", [("", set()), ("a, b", {"a", "b"})])
+def test_public_database_setting_accepts_explicit_values(raw, expected):
+    assert (
+        startup_check.parse_public_databases({startup_check.PUBLIC_DATABASES_ENV: raw}) == expected
+    )
+
+
+def test_filtering_on_requires_public_database_setting_before_connecting(monkeypatch):
+    monkeypatch.delenv(startup_check.PUBLIC_DATABASES_ENV)
+    with pytest.raises(PolicyCoverageError, match="required and must be explicitly set"):
+        run_startup_check(
+            DB,
+            env={startup_check.FILTERING_ENV: "on"},
+            runner=lambda *_a, **_k: pytest.fail("must not connect"),
+        )
+
+
+@pytest.mark.parametrize(
+    "engine,create",
+    [
+        ("View", "CREATE VIEW o.v SQL SECURITY DEFINER AS SELECT 1"),
+        ("View", "CREATE VIEW o.v SQL SECURITY NONE AS SELECT 1"),
+        ("View", ""),
+        ("Dictionary", ""),
+        ("Merge", ""),
+        ("Merge", "CREATE TABLE o.t ENGINE=Merge('d', 'cancer_study')"),
+        ("Distributed", "CREATE TABLE o.t ENGINE=Distributed('c', 'd', 'cancer_study')"),
+        ("Buffer", "CREATE TABLE o.t ENGINE=Buffer(d, t, 1,1,1,1,1,1,1)"),
+        ("MaterializedView", "CREATE MATERIALIZED VIEW o.t AS SELECT * FROM d.cancer_study"),
+        ("MySQL", "CREATE TABLE o.t ENGINE=MySQL('host', 'd', 't', 'u', 'pw')"),
+    ],
+)
+def test_public_declaration_never_overrides_unsafe_objects(engine, create):
+    fake = user_target()
+    fake.other_objects["other_pub"] = [("t", engine, create)]
+    with pytest.raises(PolicyCoverageError):
+        check(fake, DB, EMAIL, public_databases=frozenset({"other_pub"}))
+
+
+def test_unfiltered_study_database_needs_declaration():
+    fake = user_target()
+    fake.other_objects["other_pub"] = [("cancer_study", "Memory", "CREATE TABLE t ENGINE=Memory")]
+    refused(fake, "not declared public")
+    assert check(fake, DB, EMAIL, public_databases=frozenset({"other_pub"})).target_is_user
+
+
+def test_other_study_database_with_applicable_owned_default_deny_passes():
+    fake = user_target()
+    fake.other_objects["other_pub"] = [("cancer_study", "Memory", "CREATE TABLE t ENGINE=Memory")]
+    fake.other_policies["other_pub"] = good_policies("llm_user")
+    assert check(fake, DB, EMAIL).target_is_user
+
+
+@pytest.mark.parametrize("scope", ["system.*", "system.query_log"])
+def test_all_system_grants_refused(scope):
+    fake = user_target()
+    fake.grants.append(f"GRANT SELECT ON {scope} TO llm_user")
+    refused(fake, "grants on system are not allowed")
+
+
+@pytest.mark.parametrize("scope", ["*", "*.*"])
+def test_global_grant_reason_is_explicit(scope):
+    fake = user_target()
+    fake.grants.append(f"GRANT SELECT ON {scope} TO llm_user")
+    message = refused(fake, "global grant is not allowed")
+    assert "wildcard" not in message
+
+
+def test_indirect_engine_cannot_name_another_policy_database():
+    fake = user_target()
+    fake.other_policies["hidden_policy_db"] = good_policies("outsider")
+    fake.other_objects["other_pub"] = [
+        ("leak", "Distributed", "CREATE TABLE t ENGINE=Distributed('c', 'hidden_policy_db', 't')")
+    ]
+    with pytest.raises(PolicyCoverageError, match="definition names a policy database"):
+        check(fake, DB, EMAIL, public_databases=frozenset({"other_pub"}))
+
+
+def test_other_study_database_default_deny_must_apply_to_runtime_user():
+    fake = user_target()
+    fake.other_objects["other_pub"] = [("cancer_study", "Memory", "CREATE TABLE t ENGINE=Memory")]
+    fake.other_policies["other_pub"] = good_policies("outsider")
+    refused(fake, "not declared public")
+
+
+def test_parser_accepts_combined_scopes_and_column_lists():
+    from cbioportal_mcp.study_authz.grants import parse_grants
+
+    parsed = parse_grants(["GRANT SELECT(a, b), SHOW ROW POLICIES ON d.*, SELECT ON o.t TO u"], "u")
+    assert [(g.database, g.table, g.columns) for g in parsed.grants] == [
+        ("d", "*", True),
+        ("o", "t", False),
+    ]

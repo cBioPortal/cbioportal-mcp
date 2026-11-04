@@ -374,62 +374,78 @@ as `currentUser()`, and never logs an email:
   another principal is widened by the catch-all.
 - The database, and the user or role the policies target, must be plain
   identifiers (`sqlgen.validate_identifier`, as `apply` requires).
-- Every grant held directly or through **any** granted role is audited from
-  `system.grants` and `system.role_grants`, recursively, including non-default
-  roles. Unreadable metadata refuses startup. `SHOW GRANTS FINAL` additionally
-  detects wildcard names: both 25.8 and 26.6 omit wildcard suffixes from
-  `system.grants` (for example, `authz*` appears as `authz`). No `CHECK GRANT`
-  or per-role `SHOW GRANTS FOR` permission is needed.
-- User target: only database-wide `SELECT` and `SHOW ROW POLICIES` on the
-  connected database, plus `SELECT` on unrelated databases, are allowed.
-  Role target: only the default policy role may hold those grants; the user
-  must have no direct privileges. Other granted roles may be empty but may
-  not carry any grants, even on unrelated databases. Use a separate policy
-  role per policy database (including blue/green deployments).
-- Wildcard names, global privileges, column/table-scoped grants on the policy
-  database, partial revokes, grant/admin options, and every privilege outside
-  that short allow list refuse startup. This includes table functions,
-  specific `SYSTEM` rights, write/DDL and access management. Identifier
-  validation and policy ownership reuse P4's checks.
-- As a random `@startup-probe.invalid` caller: visible `cancer_study` rows
-  and identifiers equal the public studies in `user_study` (`email = ''`), no other caller's
-  `user_study` rows, and zero `user_study_manual` rows.
+- The runtime user's `SHOW GRANTS` and `SHOW GRANTS FINAL` are parsed
+  fail-closed. FINAL contains the union of all held privileges, including
+  non-default roles and roles granted to roles. `system.enabled_roles` checks
+  the policy role's default status. No `SELECT` on `system.grants` or
+  `system.role_grants`, and no `SHOW USERS`/`SHOW ROLES`, is needed.
+- User target: FINAL may contain only database-wide `SELECT` and
+  `SHOW ROW POLICIES` on the connected database, and `SELECT` on other
+  databases that pass the checks below. Role target: the direct grants must
+  contain only `GRANT <policy_role> TO <runtime_user>` without ADMIN OPTION;
+  that role must be default, and FINAL must satisfy the same allow list.
+- Explicit grants on **any object in `system`** are refused, including
+  `system.*`, `system.query_log`, and the two grant tables. Global grants,
+  wildcard names, grant/admin options, and privileges outside the allow list
+  also refuse startup. The self-scoped SHOW commands avoid exposing other
+  users' grants and email-named console identities to agent SQL.
+- Every other database selectable through FINAL is inspected using
+  `system.tables`. A View must explicitly use `SQL SECURITY INVOKER`;
+  DEFINER/NONE views and Dictionaries are always refused. Merge, Distributed,
+  Buffer, MaterializedView and other indirect/table-function engines refuse
+  startup if their definitions name **any** policy database, or their
+  definitions cannot be read. All policy database names come from
+  `system.row_policies`. These refusals have **no public-database override**.
+- A database containing the catalog study table `cancer_study` must have an
+  applicable `cbioportal_mcp_*` database-wide default-deny, or be explicitly
+  declared public using the setting below. This prevents an unfiltered copy
+  of the protected study data from being silently accepted.
+- As a random `@startup-probe.invalid` caller: visible `cancer_study` counts
+  and identifiers equal public studies in `user_study` (`email = ''`), with
+  no other caller's `user_study` rows and no `user_study_manual` rows.
 
-The policy template grants `SHOW ROW POLICIES ON <db>.*` to the policy target
-(re-run `apply` on existing databases). The runbook must also grant these
-metadata reads, as an administrator, **to the same policy target** (user or
-role):
+When filtering is **on**, the following setting is required, including for
+local stdio. There is no implicit default. Set it to the empty string when
+there are no trusted public study databases:
 
-```sql
-GRANT SELECT ON system.grants TO <policy_target>;
-GRANT SELECT ON system.role_grants TO <policy_target>;
+```bash
+export CBIOPORTAL_MCP_STUDY_FILTERING_PUBLIC_DATABASES=''
 ```
 
-These are `SELECT` grants on an unrelated database and are inside the allow
-list. They expose server-wide grant/role metadata to that credential; the
-startup queries themselves select only the connected user's reachable graph.
-Do not grant a separate metadata role: that would be another role carrying
-grants. Missing access is a startup refusal, never an empty grant set.
+The comma-separated entries use P4's plain identifier validation, with
+surrounding whitespace trimmed; empty entries are rejected. A listed database
+is **trusted to contain no gated data and only data every logged-in user may
+see**. This is the operator's responsibility: startup cannot distinguish a
+public LibreChat clone from an unfiltered private study copy. Listing does
+not grant access and never overrides the unsafe-object checks above. Do not
+list a private source copy to make a startup error disappear.
 
-ClickHouse lists policies of every database with `SHOW ROW POLICIES`; policy
-text holds predicates, never emails. Refresh status (`system.view_refreshes`)
-remains an admin `check`. With filtering off, none of this runs.
+For the laptop `llm_user` test with the existing five public LibreChat clones,
+the declaration is:
 
-Cloud compatibility: Docker 25.8 and 26.6 exercise SQL-created users with no
-roles, direct policies, and `SELECT` on five other databases. They do not
-replicate a Cloud service's built-in grant configuration. Cloud's documented
-[`default_role` and SQL Console roles](https://clickhouse.com/docs/products/cloud/guides/security/cloud-access-management/common-access-management-queries)
-can carry administrative or global read privileges; those are deliberately
-refused. Inspect the actual runtime user with `SHOW GRANTS FINAL` and its
-reachable rows in both system tables before rollout. Read-only inspection of a real Cloud **26.6.1.2455** runtime credential found
-one explicit database `SELECT` grant, no granted/enabled roles, and the same
-single grant in `SHOW GRANTS FINAL`; there were no extra implicit `SHOW`
-grants. Both structured system tables returned `ACCESS_DENIED`; an administrator
-must supply the two grants above. The credential could not inspect
-`llm_user` (`SHOW USERS` denied), so that user's actual grants, Cloud's built-in
-role contents, and an end-to-end policy-enabled startup on Cloud remain
-unverified. No Cloud grants or data were changed. Do not broaden the allow
-list to accommodate a console/admin role; use a dedicated SQL runtime user.
+```bash
+export CBIOPORTAL_MCP_STUDY_FILTERING_PUBLIC_DATABASES='cbioportal_public_librechat_blue,cbioportal_public_librechat_green,cbioportal_public_librechat_beta_blue,cbioportal_public_librechat_beta_green,cgds_public_librechat_20251209'
+```
+
+Confirm the current `SHOW GRANTS` against that list before using it. The list
+comes from the local clone/runbook configuration; the available Cloud
+credential could not inspect `llm_user`'s actual grants. It does not include
+the protected laptop test database (`cbioportal_authz_test`).
+
+The policy template grants `SHOW ROW POLICIES ON <db>.*` to the policy target
+(re-run `apply` on existing databases). This exposes policy predicates, not
+authentication grants; no additional system-table grants should be added.
+Refresh status (`system.view_refreshes`) remains an admin `check`. With
+filtering off, startup neither requires the public-database declaration nor
+runs these checks.
+
+Known conservative refusals: non-plain database/table names, any partial
+revoke, and extra table/column-level grants on the policy database (even if
+redundant with database-wide SELECT). These are deliberate fail-closed
+limits of the parser/allow list. Use plain names and the documented
+database-wide grant shape rather than widening the runtime permissions.
+Docker 25.8 and 26.6 exercise these rules without system-table SELECT grants.
+A full policy-enabled startup on Cloud 26.6.1 remains unverified.
 
 ## Security notes and caveats
 

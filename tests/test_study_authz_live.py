@@ -160,7 +160,6 @@ def server():
         srv.admin.command(f"SYSTEM REFRESH VIEW {DB}.user_study_refresh")
         srv.admin.command(f"SYSTEM WAIT VIEW {DB}.user_study_refresh")
         _create_users(srv.admin)
-        _grant_metadata(srv.admin, ROW_POLICY_ROLE)
         yield srv
     finally:
         subprocess.run(["docker", "rm", "-f", name], capture_output=True)
@@ -720,18 +719,22 @@ def _runtime_client(server, user: str):
     )
 
 
-def _startup_check(server, user: str, database: str = DB):
+def _startup_check(server, user: str, database: str = DB, public_databases=frozenset()):
     from cbioportal_mcp.study_authz import startup_check
 
     with startup_check._send_custom_settings():
-        return startup_check.check(_runtime_client(server, user), database)
+        return startup_check.check(
+            _runtime_client(server, user), database, public_databases=public_databases
+        )
 
 
-def _refused(server, user: str, needle: str, database: str = DB) -> str:
+def _refused(
+    server, user: str, needle: str, database: str = DB, public_databases=frozenset()
+) -> str:
     from cbioportal_mcp.study_authz.startup_check import PolicyCoverageError
 
     with pytest.raises(PolicyCoverageError) as exc:
-        _startup_check(server, user, database)
+        _startup_check(server, user, database, public_databases)
     message = str(exc.value)
     assert needle in message, message
     assert "\n" not in message and "@" not in message
@@ -762,7 +765,7 @@ def test_startup_check_other_role_with_select_refused(server):
     admin.command("GRANT p6_analyst TO p6_two_roles")
     admin.command("SET DEFAULT ROLE ALL TO p6_two_roles")
     try:
-        _refused(server, "p6_two_roles", f"role p6_analyst grants SELECT ON {DB}.* without")
+        _refused(server, "p6_two_roles", "only policy role")
     finally:
         admin.command("DROP USER IF EXISTS p6_two_roles")
         admin.command("DROP ROLE IF EXISTS p6_analyst")
@@ -843,19 +846,14 @@ def test_startup_check_user_target_passes(server):
         target_is_user=True,
     )
     make_test_db(admin, source, target, {"priv_1": "TEAM_A"}, ["pub_a"], [], log=lambda *_: None)
-    _grant_metadata(admin, "p6_llm_user")
     result = _startup_check(server, "p6_llm_user", target.database)
     assert (result.target, result.target_is_user, result.public_studies) == (
         "p6_llm_user",
         True,
         1,
     )
-    # An unreadable structured grant table must never be treated as empty.
-    admin.command("REVOKE SELECT ON system.grants FROM p6_llm_user")
-    try:
-        _refused(server, "p6_llm_user", "needs SELECT ON system.grants", target.database)
-    finally:
-        admin.command("GRANT SELECT ON system.grants TO p6_llm_user")
+    assert server.http("CHECK GRANT SELECT ON system.grants", "p6_llm_user") == "0"
+    assert server.http("CHECK GRANT SELECT ON system.role_grants", "p6_llm_user") == "0"
     # Without the SHOW ROW POLICIES grant the check cannot see the policies: refuse.
     admin.command(f"REVOKE SHOW ROW POLICIES ON {target.database}.* FROM p6_llm_user")
     try:
@@ -881,7 +879,7 @@ def test_startup_check_through_the_mcp_connection(server, monkeypatch):
     }.items():
         monkeypatch.setenv(key, value)
     monkeypatch.setattr(mcp_env, "_CONFIG_INSTANCE", None)
-    on = {startup_check.FILTERING_ENV: "on"}
+    on = {startup_check.FILTERING_ENV: "on", startup_check.PUBLIC_DATABASES_ENV: ""}
     assert startup_check.run_startup_check(DB, env=on).target == ROW_POLICY_ROLE
     assert startup_check.run_startup_check(DB, env={}) is None
     monkeypatch.setenv("CLICKHOUSE_USER", "mcp_direct")
@@ -891,11 +889,6 @@ def test_startup_check_through_the_mcp_connection(server, monkeypatch):
 
 
 # --- P6 allow-list audit: the reviewer's false-PASS repros -------------------
-
-
-def _grant_metadata(admin, target):
-    admin.command(f"GRANT SELECT ON system.grants TO {target}")
-    admin.command(f"GRANT SELECT ON system.role_grants TO {target}")
 
 
 def _p6_user_target_db(admin, db: str, user: str):
@@ -911,7 +904,6 @@ def _p6_user_target_db(admin, db: str, user: str):
         target_is_user=True,
     )
     make_test_db(admin, source, target, {"priv_1": "TEAM_A"}, ["pub_a"], [], log=lambda *_: None)
-    _grant_metadata(admin, user)
     return target
 
 
@@ -927,7 +919,6 @@ def _p6_role_target_db(admin, db: str, role: str, user: str):
     )
     make_test_db(admin, source, target, {"priv_1": "TEAM_A"}, ["pub_a"], [], log=lambda *_: None)
     admin.command(f"CREATE USER IF NOT EXISTS {user} IDENTIFIED BY 'pw'")
-    _grant_metadata(admin, role)
     admin.command(f"GRANT {role} TO {user}")
     admin.command(f"SET DEFAULT ROLE {role} TO {user}")
     return target
@@ -952,7 +943,7 @@ def test_startup_check_other_role_table_select_refused(server):
     admin.command("CREATE ROLE p6_sample_reader")
     admin.command(f"GRANT SELECT ON {db}.sample TO p6_sample_reader")
     admin.command(f"GRANT p6_sample_reader TO {user}")
-    _refused(server, user, "p6_sample_reader", db)
+    _refused(server, user, "only policy role", db)
 
 
 def test_startup_check_role_grant_option_refused(server):
@@ -973,7 +964,7 @@ def test_startup_check_non_default_role_admin_privilege_refused(server):
     admin.command("CREATE ROLE p6_nondefault_admin")
     admin.command("GRANT ACCESS MANAGEMENT ON *.* TO p6_nondefault_admin")
     admin.command(f"GRANT p6_nondefault_admin TO {user}")  # deliberately not default
-    _refused(server, user, "p6_nondefault_admin", db)
+    _refused(server, user, "only policy role", db)
 
 
 def test_startup_check_target_role_table_ddl_refused(server):
@@ -1025,7 +1016,7 @@ def test_startup_check_nested_role_grant_refused(server):
     admin.command("CREATE ROLE p6_nested_inner")
     admin.command(f"GRANT SELECT ON {db}.sample TO p6_nested_inner WITH GRANT OPTION")
     admin.command(f"GRANT p6_nested_inner TO {role}")
-    _refused(server, user, "p6_nested_inner", db)
+    _refused(server, user, "WITH GRANT OPTION", db)
 
 
 def test_startup_check_user_target_with_five_other_databases_passes(server):
@@ -1043,13 +1034,62 @@ def test_startup_check_user_target_with_five_other_databases_passes(server):
         "SELECT count() FROM system.role_grants WHERE user_name = {u:String}",
         parameters={"u": user},
     ).result_rows == [(0,)]
-    # Five unrelated database SELECTs, the policy database's two grants,
-    # and the two explicit system metadata SELECTs. No implicit SHOW rows.
-    rows = admin.query(
-        "SELECT access_type, database, table FROM system.grants WHERE user_name = {u:String}",
-        parameters={"u": user},
-    ).result_rows
-    assert len(rows) == 9
-    assert {r[0] for r in rows} == {"SELECT", "SHOW ROW POLICIES"}
-    result = _startup_check(server, user, db)
+    for other in others:
+        admin.command(f"CREATE TABLE {other}.cancer_study (id Int64) ENGINE=Memory")
+    _refused(server, user, "not declared public", db)
+    # A public declaration permits study copies, never privileged objects.
+    result = _startup_check(server, user, db, frozenset(others))
     assert (result.target, result.target_is_user, result.public_studies) == (user, True, 1)
+
+
+def test_startup_check_unfiltered_source_requires_public_declaration(server):
+    admin = server.admin
+    db, user = "authz_p6_copy", "p6_copy_user"
+    _p6_user_target_db(admin, db, user)
+    source = db + "_source"
+    admin.command(f"GRANT SELECT ON {source}.* TO {user}")
+    assert server.http(f"SELECT count() FROM {source}.cancer_study", user) == "9"
+    _refused(server, user, "not declared public", db)
+    assert _startup_check(server, user, db, frozenset({source})).public_studies == 1
+
+
+@pytest.mark.parametrize("kind", ["definer", "none", "dictionary", "merge"])
+def test_startup_check_unsafe_other_database_even_when_public(server, kind):
+    admin = server.admin
+    db, user, other = f"authz_p6_{kind}", f"p6_{kind}_user", f"other_p6_{kind}"
+    _p6_user_target_db(admin, db, user)
+    admin.command(f"CREATE DATABASE {other}")
+    if kind in {"definer", "none"}:
+        security = (
+            "DEFINER=admin SQL SECURITY DEFINER" if kind == "definer" else "SQL SECURITY NONE"
+        )
+        admin.command(f"CREATE VIEW {other}.leak {security} AS SELECT * FROM {db}.cancer_study")
+        needle = "SQL SECURITY INVOKER"
+    elif kind == "dictionary":
+        admin.command(
+            f"CREATE DICTIONARY {other}.leak (cancer_study_id UInt64, name String) "
+            "PRIMARY KEY cancer_study_id SOURCE(CLICKHOUSE(HOST '127.0.0.1' PORT 9000 "
+            f"USER 'admin' PASSWORD 'admin' DB '{db}' TABLE 'cancer_study')) "
+            "LAYOUT(FLAT()) LIFETIME(0)"
+        )
+        needle = "Dictionary is not allowed"
+    else:
+        admin.command(
+            f"CREATE TABLE {other}.leak AS {db}.cancer_study "
+            f"ENGINE=Merge('{db}', '^cancer_study$')"
+        )
+        needle = "definition names a policy database"
+    admin.command(f"GRANT SELECT ON {other}.* TO {user}")
+    if kind == "definer":
+        assert server.http(f"SELECT count() FROM {other}.leak", user) == "2"
+    _refused(server, user, needle, db, frozenset({other}))
+
+
+@pytest.mark.parametrize("scope", ["system.*", "system.query_log"])
+def test_startup_check_system_grants_refused(server, scope):
+    admin = server.admin
+    suffix = "all" if scope.endswith("*") else "log"
+    db, user = f"authz_p6_sys_{suffix}", f"p6_sys_{suffix}"
+    _p6_user_target_db(admin, db, user)
+    admin.command(f"GRANT SELECT ON {scope} TO {user}")
+    _refused(server, user, "grants on system are not allowed", db)

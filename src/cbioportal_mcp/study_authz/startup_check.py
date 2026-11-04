@@ -16,19 +16,16 @@ the study row policies of its database. Using that same connection:
    Every row policy on the database must be ours and attached to this target
    (``sqlgen.policy_conflicts``, P4's ownership rule): a foreign PERMISSIVE
    policy is OR-ed with ours.
-3. Audit system.grants and system.role_grants for the user and every
-   transitively granted role, default or not. Only SELECT and SHOW ROW POLICIES
-   on the policy database and SELECT on unrelated databases are allowed.
-   Only the default policy role may carry grants for a role target; for a user
-   target no role may carry grants. Grant/admin options always refuse.
-   SHOW GRANTS FINAL additionally detects wildcard names: system.grants loses
-   the trailing wildcard on both ClickHouse 25.8 and 26.6.
-4. A reserved, random, non-existent caller sees exactly the public studies,
-   no other caller's user_study rows, and no user_study_manual rows.
+3. Fail-closed SHOW GRANTS / SHOW GRANTS FINAL parsing audits every held
+   privilege, including dormant and nested roles, without system-table grants.
+4. Other readable databases must not contain privileged views, dictionaries,
+   or indirect objects referring to policy databases. Unfiltered study copies
+   require an explicit operator declaration that they contain only public data.
+5. A reserved non-existent caller sees exactly public studies and own rows.
 
-Needs SHOW ROW POLICIES ON <db>.* and SELECT on system.grants and
-system.role_grants. Unreadable metadata refuses startup. With filtering off
-none of this runs. Failures are one line and never contain emails.
+Needs SHOW ROW POLICIES ON <db>.* and an explicit (possibly empty)
+CBIOPORTAL_MCP_STUDY_FILTERING_PUBLIC_DATABASES declaration. With filtering
+off none of this runs. Failures are one line and never contain emails.
 """
 
 from __future__ import annotations
@@ -51,13 +48,19 @@ from cbioportal_mcp.study_authz.coverage import (
     fetch_objects,
     fetch_policy_rows,
 )
-from cbioportal_mcp.study_authz.grants import audit_grants, collect_grants
+from cbioportal_mcp.study_authz.grants import (
+    audit_grants,
+    audit_other_database,
+    collect_grants,
+    selected_databases,
+)
 from cbioportal_mcp.study_authz.sqlgen import (
     policy_conflicts,
     quote_identifier,
     validate_identifier,
 )
 
+PUBLIC_DATABASES_ENV = "CBIOPORTAL_MCP_STUDY_FILTERING_PUBLIC_DATABASES"
 FILTERING_ENV = "CBIOPORTAL_MCP_STUDY_FILTERING"
 EMAIL_SETTING = "SQL_cbio_user"
 # RFC 2606 reserves .invalid: no real caller can ever have this address.
@@ -82,6 +85,20 @@ class CheckResult:
 
 def filtering_enabled(env=os.environ) -> bool:
     return env.get(FILTERING_ENV, "off").strip().lower() == "on"
+
+
+def parse_public_databases(env=os.environ) -> frozenset[str]:
+    raw = env.get(PUBLIC_DATABASES_ENV)
+    if raw is None:
+        raise ValueError(f"{PUBLIC_DATABASES_ENV} is required and must be explicitly set")
+    if not raw.strip():
+        return frozenset()
+    names = [name.strip() for name in raw.split(",")]
+    if any(not name for name in names):
+        raise ValueError(
+            f"{PUBLIC_DATABASES_ENV} must be a comma-separated list without empty items"
+        )
+    return frozenset(validate_identifier("public database", name) for name in names)
 
 
 def redact(text: str) -> str:
@@ -110,19 +127,37 @@ class _Session:
         return self.rows(sql, parameters, **extra)[0][0]
 
 
-def check(client, database: str, email: str | None = None) -> CheckResult:
+def check(
+    client,
+    database: str,
+    email: str | None = None,
+    *,
+    public_databases: frozenset[str] | None = None,
+) -> CheckResult:
     """Run every startup check over ``client`` (the MCP's own connection).
 
     Raises PolicyCoverageError naming the first few failures, on one line and
     without email addresses.
     """
     try:
-        return _check(client, database, email)
+        if public_databases is None:
+            try:
+                public_databases = parse_public_databases()
+            except ValueError as e:
+                raise PolicyCoverageError(str(e)) from None
+        for name in public_databases:
+            try:
+                validate_identifier("public database", name)
+            except ValueError as e:
+                raise PolicyCoverageError(str(e)) from None
+        return _check(client, database, email, public_databases)
     except PolicyCoverageError as e:
         raise PolicyCoverageError(redact(e)) from None
 
 
-def _check(client, database: str, email: str | None) -> CheckResult:
+def _check(
+    client, database: str, email: str | None, public_databases: frozenset[str]
+) -> CheckResult:
     try:
         qdb = quote_identifier("database", database)
     except ValueError as e:
@@ -156,7 +191,7 @@ def _check(client, database: str, email: str | None) -> CheckResult:
         )
     }
     principal_grants = step(
-        "grant metadata (needs SELECT ON system.grants and system.role_grants)",
+        "cannot audit SHOW GRANTS / SHOW GRANTS FINAL",
         lambda: collect_grants(s, user),
     )
     granted_roles = principal_grants.roles
@@ -222,7 +257,40 @@ def _check(client, database: str, email: str | None) -> CheckResult:
         reasons.append(f"policy role {target} is not a default role")
     reasons += audit_grants(principal_grants, user, target, target_is_user, database)
 
-    # 4. Behavior as an unknown caller.
+    # Inspect every readable database, including objects in declared public
+    # databases. A declaration never permits a privileged path into policy data.
+    if not reasons:
+        others = sorted(selected_databases(principal_grants) - {database})
+        other_policies = {
+            db: step(
+                f"row policies for {db}", lambda db=db: fetch_policy_rows(_SessionClient(s), db)
+            )
+            for db in others
+        }
+        policy_databases = {database} | {
+            row[0]
+            for row in step(
+                "policy database inventory",
+                lambda: s.rows(
+                    "SELECT DISTINCT database FROM system.row_policies",
+                ),
+            )
+        }
+        for db in others:
+            other_objects = step(
+                f"system.tables for {db}",
+                lambda db=db: fetch_objects(_SessionClient(s), db, dictionaries=False),
+            )
+            reasons += audit_other_database(
+                db,
+                [(name, engine, create) for name, (engine, create) in other_objects.items()],
+                other_policies[db],
+                principals,
+                policy_databases,
+                public_databases,
+            )
+
+    # 5. Behavior as an unknown caller.
     public = 0
     if not reasons:
         db = qdb
@@ -312,7 +380,7 @@ def _send_custom_settings():
         driver_log.setLevel(previous_level)
 
 
-def check_with_mcp_connection(database: str) -> CheckResult:
+def check_with_mcp_connection(database: str, *, public_databases=None) -> CheckResult:
     """``check`` over a fresh client built exactly like mcp-clickhouse's own."""
     from mcp_clickhouse.mcp_server import create_clickhouse_client
 
@@ -322,7 +390,7 @@ def check_with_mcp_connection(database: str) -> CheckResult:
         raise PolicyCoverageError(f"cannot connect to ClickHouse: {redact(e)}") from None
     try:
         with _send_custom_settings():
-            return check(client, database)
+            return check(client, database, public_databases=public_databases)
     finally:
         with contextlib.suppress(Exception):
             client.close()
@@ -332,4 +400,8 @@ def run_startup_check(database: str, env=os.environ, runner=None):
     """No-op (returns None) unless study filtering is on."""
     if not filtering_enabled(env):
         return None
-    return (runner or check_with_mcp_connection)(database)
+    try:
+        public_databases = parse_public_databases(env)
+    except ValueError as e:
+        raise PolicyCoverageError(redact(e)) from None
+    return (runner or check_with_mcp_connection)(database, public_databases=public_databases)
