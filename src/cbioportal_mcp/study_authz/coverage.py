@@ -7,8 +7,8 @@ For the policy target (the restricted role, or a user), against ``catalog.py``:
 - every study-scoped table has its own policy that reads ``user_study`` with
   the caller-email predicate (never ``USING 1``);
 - ``user_study`` has exactly the identity predicate;
-- every reference table and view has a policy, and every view is explicitly
-  ``SQL SECURITY INVOKER`` (DEFINER / NONE views leak every study);
+- every reference table and view has a policy, and every view uses
+  ``SQL SECURITY INVOKER`` (explicitly or implicitly) (DEFINER / NONE views leak every study);
 - denied tables have no policy; the only materialized view is
   ``user_study_refresh``, and its last refresh succeeded; no dictionaries
   (dictGet bypasses row policies);
@@ -19,8 +19,10 @@ For the policy target (the restricted role, or a user), against ``catalog.py``:
 - anything unclassified fails the check: the default-deny keeps it safe, but
   nobody has decided how it maps to a study.
 
-Presence and shape only; the live tests prove row-level behavior. Reading
-``system.row_policies`` needs admin credentials, never the MCP runtime user.
+Presence and shape only; the live tests prove row-level behavior. The admin
+CLI reads with admin credentials; the server's own startup check
+(``startup_check.py``, filtering on) reuses ``evaluate`` as the runtime user,
+which needs ``SHOW ROW POLICIES ON <db>.*`` (granted by the policy template).
 """
 
 from __future__ import annotations
@@ -72,9 +74,74 @@ def _squash(text: str) -> str:
 _MATCH = _squash(USER_STUDY_MATCH)
 
 
+def _unquoted_sql(sql: str) -> str | None:
+    """Mask SQL literals, quoted identifiers and comments; reject unterminated tokens."""
+    out, i = [], 0
+    while i < len(sql):
+        ch = sql[i]
+        if ch in "'\"`":
+            quote = ch
+            i += 1
+            while i < len(sql):
+                if sql[i] == "\\":
+                    i += 2
+                elif sql[i] == quote:
+                    if i + 1 < len(sql) and sql[i + 1] == quote:
+                        i += 2
+                    else:
+                        i += 1
+                        break
+                else:
+                    i += 1
+            else:
+                return None
+            out.append(" ")
+        elif sql.startswith("--", i) or ch == "#":
+            end = sql.find("\n", i)
+            i = len(sql) if end < 0 else end + 1
+            out.append(" ")
+        elif sql.startswith("/*", i):
+            depth = 1
+            i += 2
+            while i < len(sql) and depth:
+                if sql.startswith("/*", i):
+                    depth += 1
+                    i += 2
+                elif sql.startswith("*/", i):
+                    depth -= 1
+                    i += 2
+                else:
+                    i += 1
+            if depth:
+                return None
+            out.append(" ")
+        else:
+            out.append(ch)
+            i += 1
+    return "".join(out)
+
+
 def view_sql_security(create_query: str) -> str | None:
-    match = re.search(r"\bSQL\s+SECURITY\s+(INVOKER|DEFINER|NONE)\b", create_query, re.I)
-    return match.group(1).upper() if match else None
+    """Security of a stored CREATE VIEW, shared by startup and the admin check.
+
+    Neither 25.8 nor 26.6 exposes a structured security field in system.tables.
+    Both execute a stored clause-less normal view as INVOKER, even with
+    default_normal_view_sql_security=DEFINER (live regression tested).
+    """
+    sql = _unquoted_sql(create_query)
+    if sql is None:
+        return None
+    clauses = list(re.finditer(r"\bSQL\s+SECURITY\b", sql, re.I))
+    if len(clauses) > 1:
+        return None
+    if clauses:
+        mode = re.match(r"\s+(INVOKER|DEFINER|NONE)\b", sql[clauses[0].end() :], re.I)
+        return mode.group(1).upper() if mode else None
+    if re.match(r"\s*CREATE\s+(?:OR\s+REPLACE\s+)?VIEW\b", sql, re.I) and re.search(
+        r"\bAS\s+\(*\s*(SELECT|WITH)\b", sql, re.I
+    ):
+        return "INVOKER"
+    return None
 
 
 def _foreign_databases(select_filter: str, database: str) -> set[str]:
@@ -161,43 +228,88 @@ def evaluate(
     return report
 
 
-def fetch_and_evaluate(client, database: str, target: str) -> Report:
-    """``target``: the role or user the policies are attached TO."""
-    validate_identifier("database", database)
-    validate_identifier("policy target", target)
+@dataclass(frozen=True)
+class PolicyRow:
+    """A ``system.row_policies`` row: the policy plus who it applies TO."""
+
+    policy: Policy
+    apply_to_all: bool = False
+    apply_to_list: tuple[str, ...] = ()
+    apply_to_except: tuple[str, ...] = ()
+
+    def applies_to(self, principals: set[str]) -> bool:
+        """ClickHouse's match: the user or any of its *enabled* roles."""
+        listed = self.apply_to_all or bool(principals & set(self.apply_to_list))
+        return listed and not principals & set(self.apply_to_except)
+
+
+def fetch_objects(
+    client, database: str, *, dictionaries: bool = True
+) -> dict[str, tuple[str, str]]:
+    """name -> (engine, create query) for every table, view and dictionary.
+
+    ``dictionaries=False`` skips ``system.dictionaries``, which a non-admin
+    user cannot read; DDL dictionaries also appear in ``system.tables``.
+    """
     tables = client.query(
         "SELECT name, engine, create_table_query FROM system.tables "
         "WHERE database = {db:String} AND NOT is_temporary",
         parameters={"db": database},
     ).result_rows
     objects = {row[0]: (row[1], row[2] or "") for row in tables}
-    for (name,) in client.query(
-        "SELECT name FROM system.dictionaries WHERE database = {db:String}",
+    if dictionaries:
+        for (name,) in client.query(
+            "SELECT name FROM system.dictionaries WHERE database = {db:String}",
+            parameters={"db": database},
+        ).result_rows:
+            objects.setdefault(name, ("Dictionary", ""))
+    return objects
+
+
+def fetch_policy_rows(client, database: str) -> list[PolicyRow]:
+    """Every row policy on ``database``, whoever it applies to."""
+    rows = client.query(
+        "SELECT short_name, table, select_filter, is_restrictive, apply_to_all, "
+        "apply_to_list, apply_to_except FROM system.row_policies WHERE database = {db:String}",
         parameters={"db": database},
-    ).result_rows:
-        objects.setdefault(name, ("Dictionary", ""))
+    ).result_rows
+    return [
+        PolicyRow(
+            Policy(r[0], r[1], r[2] or "", bool(r[3])),
+            bool(r[4]),
+            tuple(r[5] or ()),
+            tuple(r[6] or ()),
+        )
+        for r in rows
+    ]
+
+
+def fetch_refresh_error(client, database: str) -> str | None:
+    refresh = client.query(
+        "SELECT exception, last_success_time FROM system.view_refreshes "
+        "WHERE database = {db:String} AND view = {v:String}",
+        parameters={"db": database, "v": USER_STUDY_REFRESH_VIEW},
+    ).result_rows
+    if not refresh:
+        return "not scheduled (no row in system.view_refreshes)"
+    if refresh[0][0]:
+        return f"last refresh failed: {str(refresh[0][0]).splitlines()[0][:200]}"
+    if refresh[0][1] is None:
+        return "has never refreshed successfully"
+    return None
+
+
+def fetch_and_evaluate(client, database: str, target: str) -> Report:
+    """``target``: the role or user the policies are attached TO."""
+    validate_identifier("database", database)
+    validate_identifier("policy target", target)
+    objects = fetch_objects(client, database)
     if not objects:
         raise SystemExit(f"no tables visible in {database}: wrong database or admin lacks SHOW")
-    rows = client.query(
-        "SELECT short_name, table, select_filter, is_restrictive FROM system.row_policies "
-        "WHERE database = {db:String} AND (apply_to_all OR has(apply_to_list, {role:String})) "
-        "AND NOT has(apply_to_except, {role:String})",
-        parameters={"db": database, "role": target},
-    ).result_rows
-    policies = [Policy(r[0], r[1], r[2] or "", bool(r[3])) for r in rows]
+    policies = [r.policy for r in fetch_policy_rows(client, database) if r.applies_to({target})]
     refresh_error = None
     if USER_STUDY_REFRESH_VIEW in objects:
-        refresh = client.query(
-            "SELECT exception, last_success_time FROM system.view_refreshes "
-            "WHERE database = {db:String} AND view = {v:String}",
-            parameters={"db": database, "v": USER_STUDY_REFRESH_VIEW},
-        ).result_rows
-        if not refresh:
-            refresh_error = "not scheduled (no row in system.view_refreshes)"
-        elif refresh[0][0]:
-            refresh_error = f"last refresh failed: {str(refresh[0][0]).splitlines()[0][:200]}"
-        elif refresh[0][1] is None:
-            refresh_error = "has never refreshed successfully"
+        refresh_error = fetch_refresh_error(client, database)
     return evaluate(
         objects, policies, database, refresh_error, policy_conflicts(client, database, target)
     )
