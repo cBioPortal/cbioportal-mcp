@@ -178,6 +178,9 @@ def _finish(result: dict, meta: dict, columns) -> dict:
             for k, v in (table.items() if key == "rows" else [(key, value)])
         }
     result["source"] = meta["source"]
+    scope_note = server._public_only_note()
+    if scope_note:
+        result["study_scope_note"] = scope_note
     return result
 
 

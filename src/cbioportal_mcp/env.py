@@ -242,4 +242,7 @@ def validate_startup(transport: Optional[str] = None) -> tuple[str, str]:
 
     # Rollout switches default to off only when actually serving local stdio.
     rollout.initialize(filtering, local_dev=effective_transport == "stdio")
+    from cbioportal_mcp.identity import validate_auth_startup
+
+    validate_auth_startup()
     return filtering, effective_transport
