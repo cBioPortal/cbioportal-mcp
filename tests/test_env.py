@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from fastmcp import FastMCP
 
+from cbioportal_mcp import rollout
 from cbioportal_mcp.env import McpConfig, required_enum, required_list, validate_startup
 from cbioportal_mcp.server import ConfiguredFastMCP
 
@@ -122,6 +123,9 @@ async def test_launcher_cannot_override_to_stdio_without_opt_in(monkeypatch):
             await app.run_stdio_async()
         run.assert_not_awaited()
         monkeypatch.setenv("CBIOPORTAL_MCP_LOCAL_DEV", "1")
+        # Construction pinned rollout switches for HTTP; switching context
+        # mid-process is refused (see test_rollout), so model a fresh process.
+        rollout._reset_for_tests()
         await app.run_stdio_async()
         run.assert_awaited_once()
 

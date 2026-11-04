@@ -43,6 +43,7 @@ from cbioportal_mcp.env import (  # noqa: E402 (after LLMObs.enable)
     get_mcp_config,
     validate_startup,
 )
+from cbioportal_mcp import rollout  # noqa: E402 (after LLMObs.enable)
 from cbioportal_mcp.authentication.permissions import ensure_db_permissions
 from cbioportal_mcp.auth import _build_auth_provider
 from cbioportal_mcp.telemetry import (
@@ -325,6 +326,7 @@ def _validate_server_startup(transport=None):
     logger.info(
         "cBioPortal MCP startup: study_filtering=%s transport=%s", filtering, effective_transport
     )
+    logger.info("cBioPortal MCP rollout switches: %s", rollout.summary(filtering))
 
 
 @asynccontextmanager
