@@ -1,0 +1,195 @@
+{
+  "realm": "cbioportal-mcp-local",
+  "sslRequired": "none",
+  "enabled": true,
+  "groups": [
+    {
+      "name": "research",
+      "subGroups": [
+        {
+          "name": "alpha"
+        },
+        {
+          "name": "beta"
+        }
+      ]
+    },
+    {
+      "name": "cbioportal",
+      "subGroups": [
+        {
+          "name": "admins"
+        }
+      ]
+    }
+  ],
+  "users": [
+    {
+      "username": "alice",
+      "enabled": true,
+      "firstName": "Alice",
+      "lastName": "Alpha",
+      "email": "alice@example.org",
+      "emailVerified": true,
+      "groups": [
+        "/research/alpha"
+      ],
+      "credentials": [
+        {
+          "type": "password",
+          "value": "alice",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "cbioportal:study_alpha",
+        "unrelated-role"
+      ]
+    },
+    {
+      "username": "bob",
+      "enabled": true,
+      "firstName": "Bob",
+      "lastName": "Beta",
+      "email": "bob@example.org",
+      "emailVerified": true,
+      "groups": [
+        "/research/beta"
+      ],
+      "credentials": [
+        {
+          "type": "password",
+          "value": "bob",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "cbioportal:study_beta"
+      ]
+    },
+    {
+      "username": "admin-user",
+      "enabled": true,
+      "firstName": "Admin",
+      "lastName": "User",
+      "email": "admin@example.org",
+      "emailVerified": true,
+      "groups": [
+        "/cbioportal/admins"
+      ],
+      "credentials": [
+        {
+          "type": "password",
+          "value": "admin-user",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "cbioportal:study_alpha",
+        "cbioportal:study_beta"
+      ]
+    },
+    {
+      "username": "carol",
+      "enabled": true,
+      "firstName": "Carol",
+      "lastName": "NoGroups",
+      "email": "carol@example.org",
+      "emailVerified": true,
+      "groups": [],
+      "credentials": [
+        {
+          "type": "password",
+          "value": "carol",
+          "temporary": false
+        }
+      ],
+      "realmRoles": []
+    }
+  ],
+  "clients": [
+    {
+      "clientId": "mcp-local",
+      "enabled": true,
+      "publicClient": true,
+      "directAccessGrantsEnabled": true,
+      "standardFlowEnabled": true,
+      "redirectUris": [
+        "http://localhost:8001/*"
+      ],
+      "webOrigins": [
+        "http://localhost:8001"
+      ],
+      "protocol": "openid-connect",
+      "protocolMappers": [
+        {
+          "name": "groups",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-group-membership-mapper",
+          "consentRequired": false,
+          "config": {
+            "claim.name": "groups",
+            "full.path": "true",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true",
+            "jsonType.label": "String",
+            "multivalued": "true"
+          }
+        }
+      ]
+    },
+    {
+      "clientId": "mcp-local-proxy",
+      "enabled": true,
+      "publicClient": false,
+      "secret": "mcp-local-proxy-secret",
+      "serviceAccountsEnabled": true,
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "protocol": "openid-connect"
+    },
+    {
+      "clientId": "mcp-oidc",
+      "name": "cbioportal-mcp OIDC login (local e2e only)",
+      "enabled": true,
+      "publicClient": false,
+      "secret": "mcp-oidc-local-secret-0123456789",
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "redirectUris": [
+        "http://127.0.0.1*",
+        "http://localhost*"
+      ],
+      "attributes": {
+        "pkce.code.challenge.method": "S256"
+      },
+      "protocolMappers": [
+        {
+          "name": "audience cbioportal-mcp",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.custom.audience": "cbioportal-mcp",
+            "access.token.claim": "true",
+            "id.token.claim": "false"
+          }
+        }
+      ]
+    }
+  ],
+  "roles": {
+    "realm": [
+      {
+        "name": "cbioportal:study_alpha"
+      },
+      {
+        "name": "cbioportal:study_beta"
+      },
+      {
+        "name": "unrelated-role"
+      }
+    ]
+  }
+}

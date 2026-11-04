@@ -268,79 +268,48 @@ def shutdown_telemetry() -> None:
             _tracer_provider = None
 
 
-def _extract_user_identity() -> tuple[str | None, str | None, str]:
-    """Read x-user-id and x-user-email headers injected by LibreChat.
+# The caller's identity is resolved in one place for auth, study access and
+# telemetry (authentication/caller.py). These names stay importable here.
+from cbioportal_mcp.authentication.caller import (  # noqa: E402
+    _extract_oauth_identity,
+    _extract_user_identity,
+    effective_source,
+    resolve_caller_identity,
+)
 
-    LibreChat populates these via {{LIBRECHAT_USER_ID}} / {{LIBRECHAT_USER_EMAIL}}
-    placeholders in mcpServers.headers. Returns (user_id, user_email, client) where
-    client is "librechat" when the x-user-id header is present (regardless of value)
-    or "direct" when the header is absent. LibreChat base64-encodes non-ASCII values
-    with a "b64:" prefix.
-    """
-    try:
-        from fastmcp.server.dependencies import get_http_headers
-
-        headers = get_http_headers(include_all=True)
-        logger.debug("_extract_user_identity: received headers: %s", sorted(headers.keys()))
-
-        raw_id = headers.get("x-user-id", "")
-        raw_email = headers.get("x-user-email", "")
-        # Presence of x-user-id header (set in librechat-config.yaml mcpServers.headers)
-        # distinguishes LibreChat traffic from direct MCP callers regardless of value.
-        client = "librechat" if "x-user-id" in headers else "direct"
-
-        user_id = raw_id or None
-        user_email = raw_email or None
-        if user_email and user_email.startswith("b64:"):
-            import base64
-            user_email = base64.b64decode(user_email[4:]).decode("utf-8", errors="replace")
-        return user_id, user_email, client
-    except Exception as exc:
-        logger.debug("_extract_user_identity failed: %s", exc)
-        return None, None, "unknown"
-
-
-def _extract_oauth_identity() -> tuple[str | None, str | None]:
-    """Read the verified caller identity from a validated OAuth access token.
-
-    Populated only when this deployment has OAuth enabled (see
-    ``cbioportal_mcp.auth._build_auth_provider``) and the caller completed a
-    real Google login — unlike ``_extract_user_identity`` above, which just
-    trusts whatever x-user-id header LibreChat happens to send, this is
-    cryptographically verified by FastMCP before the request ever reaches
-    this middleware.
-
-    Returns (user_id, user_email) from the token's ``sub``/``email`` claims,
-    either may be None. Returns (None, None) when OAuth isn't enabled for
-    this deployment, or the caller has no token (stdio transport, or an
-    unauthenticated HTTP deployment).
-    """
-    try:
-        from fastmcp.server.dependencies import get_access_token
-
-        token = get_access_token()
-        if token is None:
-            return None, None
-        claims = token.claims or {}
-        return claims.get("sub") or None, claims.get("email") or None
-    except Exception as exc:
-        logger.debug("_extract_oauth_identity failed: %s", exc)
-        return None, None
+__all__ = ["_extract_oauth_identity", "_extract_user_identity"]
 
 
 def _resolve_caller_identity() -> tuple[str | None, str | None, str]:
     """Resolve (user_id, user_email, client_kind) for the current caller.
 
-    Prefers the verified OAuth identity (``client_kind = "oauth"``) over the
-    trusted-but-unverified x-user-id header LibreChat sends, falling back to
-    the header-based resolution (``_extract_user_identity``) when no OAuth
-    token is present — e.g. this deployment has OAuth disabled, or the caller
-    is LibreChat, which does not yet forward an OAuth token of its own.
+    Delegates to ``authentication.caller.resolve_caller_identity`` (never
+    raising here). With the default provider (google) this is exactly the
+    previous resolution: the verified OAuth identity (``client_kind =
+    "oauth"``) over the trusted-but-unverified x-user-id header LibreChat
+    sends, falling back to the header-based resolution when no OAuth token is
+    present. ``oidc`` reads only the verified token's configured claims;
+    ``portal_dat`` reports the DAT owner (``client_kind = "portal_dat"``),
+    namespaced by portal.
     """
-    user_id, user_email = _extract_oauth_identity()
-    if user_id is not None:
-        return user_id, user_email, "oauth"
-    return _extract_user_identity()
+    try:
+        identity = resolve_caller_identity()
+    except Exception as exc:
+        logger.debug("_resolve_caller_identity failed: %s", type(exc).__name__)
+        return None, None, "unknown"
+    return identity.user_id, identity.email, identity.client_kind
+
+
+def _auth_tags() -> tuple[str | None, str | None]:
+    """(auth.provider, auth.source) for this deployment; never studies or groups."""
+    try:
+        from cbioportal_mcp.env import get_mcp_config
+
+        config = get_mcp_config()
+        return config.auth_provider, effective_source(config)
+    except Exception as exc:
+        logger.debug("_auth_tags failed: %s", type(exc).__name__)
+        return None, None
 
 
 def _extract_mcp_client_info(
@@ -437,6 +406,8 @@ class _CallerContext(NamedTuple):
     client_name: str | None
     client_version: str | None
     session_id: str | None
+    auth_provider: str | None = None
+    auth_source: str | None = None
 
 
 def _resolve_caller_context(context: MiddlewareContext[Any]) -> _CallerContext:
@@ -449,6 +420,7 @@ def _resolve_caller_context(context: MiddlewareContext[Any]) -> _CallerContext:
     """
     user_id, user_email, client_kind = _resolve_caller_identity()
     client_name, client_version = _extract_mcp_client_info(context)
+    auth_provider, auth_source = _auth_tags()
     return _CallerContext(
         user_id=user_id,
         user_email=user_email,
@@ -456,7 +428,29 @@ def _resolve_caller_context(context: MiddlewareContext[Any]) -> _CallerContext:
         client_name=client_name,
         client_version=client_version,
         session_id=_extract_session_id(context),
+        auth_provider=auth_provider,
+        auth_source=auth_source,
     )
+
+
+def _portal_dat_provider() -> bool:
+    try:
+        from cbioportal_mcp.env import AuthProvider, get_mcp_config
+
+        return get_mcp_config().auth_provider == AuthProvider.PORTAL_DAT.value
+    except Exception:
+        return False
+
+
+async def _resolve_caller_context_off_loop(context: MiddlewareContext[Any]) -> _CallerContext:
+    """``_resolve_caller_context``; on a worker thread only for portal_dat, whose
+    identity may need a (cached) blocking portal read. Every other provider
+    resolves inline, exactly as before."""
+    if _portal_dat_provider():
+        import anyio
+
+        return await anyio.to_thread.run_sync(_resolve_caller_context, context)
+    return _resolve_caller_context(context)
 
 
 def _tag_caller_attributes(span, caller: _CallerContext) -> None:
@@ -483,6 +477,12 @@ def _tag_caller_attributes(span, caller: _CallerContext) -> None:
     client_ip = _extract_client_ip()
     if client_ip:
         span.set_attribute("network.client.ip", client_ip)
+    # The only tags added for per-deployment login: which provider and study
+    # source this deployment runs. Studies and groups are never tagged.
+    if caller.auth_provider:
+        span.set_attribute("auth.provider", caller.auth_provider)
+    if caller.auth_source:
+        span.set_attribute("auth.source", caller.auth_source)
 
 
 def _span_from_failed_start(exc: BaseException, tracer: trace.Tracer) -> SdkSpan | None:
@@ -746,7 +746,7 @@ class TelemetryMiddleware(Middleware):
     ) -> mt.CallToolResult:
         tool_name = getattr(context.message, "name", None) or "unknown"
         arguments = getattr(context.message, "arguments", {}) or {}
-        caller = _resolve_caller_context(context)
+        caller = await _resolve_caller_context_off_loop(context)
 
         llmobs_span = _llmobs_tool_span(
             tool_name,
@@ -827,7 +827,7 @@ class TelemetryMiddleware(Middleware):
         try:
             span = _start_span_isolated(self._tracer, span_name)
             context_token = otel_context.attach(trace.set_span_in_context(span))
-            _tag_caller_attributes(span, _resolve_caller_context(context))
+            _tag_caller_attributes(span, await _resolve_caller_context_off_loop(context))
         except Exception as exc:
             logger.debug("Discovery span setup failed for %s: %s", span_name, exc)
 

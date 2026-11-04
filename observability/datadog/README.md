@@ -61,7 +61,7 @@ for m in data['monitors']:
   unified-service-tagging `env` (check via Trace Explorer first), either set
   `deployment.environment` in `configure_telemetry()`'s `Resource.create(...)`
   or drop the `$env` variable from the dashboard queries.
-- **Monitor thresholds** (20 errors/10m, 50 unattributed/30m) are starting
+- **Monitor thresholds** (20 errors/10m, 50 unattributed/30m, any authenticated request without enduser.id/15m) are starting
   guesses, not tuned against real traffic volume — adjust after a week of
   live data.
 - **Notification targets** (`@pagerduty-...`, `@slack-...`) are placeholders
@@ -70,6 +70,29 @@ for m in data['monitors']:
 - **"No requests" heartbeat** monitor will also fire during genuinely quiet
   periods (e.g. overnight with no LibreChat/connector traffic) — consider
   scoping its schedule or threshold if that's expected for this deployment.
+
+## Per-deployment login (auth.provider / auth.source)
+
+Every MCP span also carries `auth.provider` (`google`, `oidc` or
+`portal_dat`, from `CBIOPORTAL_MCP_AUTH_PROVIDER`) and `auth.source`
+(`public`, `acl`, `authorities`, `jwt` or `portal_dat`). They are
+per-deployment constants, so they only matter when one dashboard covers
+several deployments; filter on them to split public Google traffic from a
+private OIDC or DAT portal. All other tag names and values are unchanged
+(pinned by `tests/test_telemetry_golden.py`); studies and groups are never
+tagged.
+
+- `oidc`: `enduser.id` is the claim named by
+  `CBIOPORTAL_MCP_OIDC_USER_ID_CLAIM` (default `sub`); `enduser.email` only
+  when the email is verified. `mcp.client_kind` is `oauth`.
+- `portal_dat`: `mcp.client_kind` is `portal_dat` and `enduser.id` is
+  `portal:<host>:<username>` (or `portal:<host>:sub:<sub>` /
+  `portal:<host>:fp:<hmac>` when the owner lookup fails). It is telemetry
+  only and never used for access. `enduser.email` is set only with
+  `CBIOPORTAL_MCP_PORTAL_USERNAMES_ARE_EMAILS=true`.
+- The **"Authenticated requests with no enduser.id"** monitor fires when a
+  private login verified the caller but no user id could be derived (a wrong
+  claim path or a failed DAT owner lookup).
 
 ## What this can't show you
 

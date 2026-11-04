@@ -1,0 +1,979 @@
+{
+ "direct_anonymous": {
+  "llmobs": [
+   [
+    "tool",
+    "mcp.tool.ping",
+    "session-golden"
+   ],
+   [
+    "set_tag",
+    "mcp.client_kind",
+    "direct"
+   ],
+   [
+    "set_tag",
+    "mcp.client.name",
+    "claude-code"
+   ],
+   [
+    "set_tag",
+    "mcp.session.id",
+    "session-golden"
+   ],
+   [
+    "annotate",
+    {
+     "input_data": "{\"q\": 1}",
+     "metadata": {
+      "mcp_client_name": "claude-code",
+      "mcp_client_version": "1.2.3",
+      "mcp_session_id": "session-golden"
+     },
+     "tags": {
+      "mcp_client_kind": "direct",
+      "mcp_client_name": "claude-code",
+      "mcp_session_id": "session-golden"
+     }
+    }
+   ],
+   [
+    "annotate",
+    {
+     "output_data": "pong"
+    }
+   ],
+   [
+    "finish"
+   ],
+   [
+    "tool",
+    "mcp.tool.ping",
+    "session-golden"
+   ],
+   [
+    "set_tag",
+    "mcp.client_kind",
+    "direct"
+   ],
+   [
+    "set_tag",
+    "mcp.client.name",
+    "claude-code"
+   ],
+   [
+    "set_tag",
+    "mcp.session.id",
+    "session-golden"
+   ],
+   [
+    "annotate",
+    {
+     "input_data": "{\"q\": 1}",
+     "metadata": {
+      "mcp_client_name": "claude-code",
+      "mcp_client_version": "1.2.3",
+      "mcp_session_id": "session-golden"
+     },
+     "tags": {
+      "mcp_client_kind": "direct",
+      "mcp_client_name": "claude-code",
+      "mcp_session_id": "session-golden"
+     }
+    }
+   ],
+   [
+    "set_exc_info",
+    "RuntimeError",
+    "boom"
+   ],
+   [
+    "annotate",
+    {
+     "output_data": "error"
+    }
+   ],
+   [
+    "finish"
+   ]
+  ],
+  "metrics": [
+   "cbioportal_mcp.tool.calls:1|c|#client_kind:direct,client_name:claude-code,service:golden,success:true,tool:ping",
+   "cbioportal_mcp.tool.duration_ms:<v>|d|#client_kind:direct,client_name:claude-code,service:golden,success:true,tool:ping",
+   "cbioportal_mcp.tool.calls:1|c|#client_kind:direct,client_name:claude-code,service:golden,success:false,tool:ping",
+   "cbioportal_mcp.tool.duration_ms:<v>|d|#client_kind:direct,client_name:claude-code,service:golden,success:false,tool:ping",
+   "cbioportal_mcp.tool.errors:1|c|#client_kind:direct,client_name:claude-code,service:golden,success:false,tool:ping",
+   "cbioportal_mcp.db_query.calls:1|c|#query_label:golden.label,service:golden,success:true",
+   "cbioportal_mcp.db_query.duration_ms:<v>|d|#query_label:golden.label,service:golden,success:true"
+  ],
+  "spans": [
+   {
+    "attributes": {
+     "mcp.client.name": "claude-code",
+     "mcp.client.version": "1.2.3",
+     "mcp.client_kind": "direct",
+     "mcp.session.id": "session-golden",
+     "mcp.tool.name": "ping",
+     "mcp.tool.success": true
+    },
+    "name": "mcp.tool/ping"
+   },
+   {
+    "attributes": {
+     "error.type": "RuntimeError",
+     "mcp.client.name": "claude-code",
+     "mcp.client.version": "1.2.3",
+     "mcp.client_kind": "direct",
+     "mcp.session.id": "session-golden",
+     "mcp.tool.name": "ping",
+     "mcp.tool.success": false
+    },
+    "name": "mcp.tool/ping"
+   },
+   {
+    "attributes": {
+     "mcp.client.name": "claude-code",
+     "mcp.client.version": "1.2.3",
+     "mcp.client_kind": "direct",
+     "mcp.session.id": "session-golden"
+    },
+    "name": "mcp.discovery/tools_list"
+   },
+   {
+    "attributes": {
+     "db.query.label": "golden.label",
+     "db.query.success": true
+    },
+    "name": "db.query/golden.label"
+   }
+  ]
+ },
+ "forwarded_ip": {
+  "llmobs": [
+   [
+    "tool",
+    "mcp.tool.ping",
+    "session-golden"
+   ],
+   [
+    "set_tag",
+    "mcp.client_kind",
+    "direct"
+   ],
+   [
+    "set_tag",
+    "mcp.client.name",
+    "claude-code"
+   ],
+   [
+    "set_tag",
+    "mcp.session.id",
+    "session-golden"
+   ],
+   [
+    "annotate",
+    {
+     "input_data": "{\"q\": 1}",
+     "metadata": {
+      "mcp_client_name": "claude-code",
+      "mcp_client_version": "1.2.3",
+      "mcp_session_id": "session-golden"
+     },
+     "tags": {
+      "mcp_client_kind": "direct",
+      "mcp_client_name": "claude-code",
+      "mcp_session_id": "session-golden"
+     }
+    }
+   ],
+   [
+    "annotate",
+    {
+     "output_data": "pong"
+    }
+   ],
+   [
+    "finish"
+   ],
+   [
+    "tool",
+    "mcp.tool.ping",
+    "session-golden"
+   ],
+   [
+    "set_tag",
+    "mcp.client_kind",
+    "direct"
+   ],
+   [
+    "set_tag",
+    "mcp.client.name",
+    "claude-code"
+   ],
+   [
+    "set_tag",
+    "mcp.session.id",
+    "session-golden"
+   ],
+   [
+    "annotate",
+    {
+     "input_data": "{\"q\": 1}",
+     "metadata": {
+      "mcp_client_name": "claude-code",
+      "mcp_client_version": "1.2.3",
+      "mcp_session_id": "session-golden"
+     },
+     "tags": {
+      "mcp_client_kind": "direct",
+      "mcp_client_name": "claude-code",
+      "mcp_session_id": "session-golden"
+     }
+    }
+   ],
+   [
+    "set_exc_info",
+    "RuntimeError",
+    "boom"
+   ],
+   [
+    "annotate",
+    {
+     "output_data": "error"
+    }
+   ],
+   [
+    "finish"
+   ]
+  ],
+  "metrics": [
+   "cbioportal_mcp.tool.calls:1|c|#client_kind:direct,client_name:claude-code,service:golden,success:true,tool:ping",
+   "cbioportal_mcp.tool.duration_ms:<v>|d|#client_kind:direct,client_name:claude-code,service:golden,success:true,tool:ping",
+   "cbioportal_mcp.tool.calls:1|c|#client_kind:direct,client_name:claude-code,service:golden,success:false,tool:ping",
+   "cbioportal_mcp.tool.duration_ms:<v>|d|#client_kind:direct,client_name:claude-code,service:golden,success:false,tool:ping",
+   "cbioportal_mcp.tool.errors:1|c|#client_kind:direct,client_name:claude-code,service:golden,success:false,tool:ping",
+   "cbioportal_mcp.db_query.calls:1|c|#query_label:golden.label,service:golden,success:true",
+   "cbioportal_mcp.db_query.duration_ms:<v>|d|#query_label:golden.label,service:golden,success:true"
+  ],
+  "spans": [
+   {
+    "attributes": {
+     "mcp.client.name": "claude-code",
+     "mcp.client.version": "1.2.3",
+     "mcp.client_kind": "direct",
+     "mcp.session.id": "session-golden",
+     "mcp.tool.name": "ping",
+     "mcp.tool.success": true,
+     "network.client.ip": "203.0.113.9"
+    },
+    "name": "mcp.tool/ping"
+   },
+   {
+    "attributes": {
+     "error.type": "RuntimeError",
+     "mcp.client.name": "claude-code",
+     "mcp.client.version": "1.2.3",
+     "mcp.client_kind": "direct",
+     "mcp.session.id": "session-golden",
+     "mcp.tool.name": "ping",
+     "mcp.tool.success": false,
+     "network.client.ip": "203.0.113.9"
+    },
+    "name": "mcp.tool/ping"
+   },
+   {
+    "attributes": {
+     "mcp.client.name": "claude-code",
+     "mcp.client.version": "1.2.3",
+     "mcp.client_kind": "direct",
+     "mcp.session.id": "session-golden",
+     "network.client.ip": "203.0.113.9"
+    },
+    "name": "mcp.discovery/tools_list"
+   },
+   {
+    "attributes": {
+     "db.query.label": "golden.label",
+     "db.query.success": true
+    },
+    "name": "db.query/golden.label"
+   }
+  ]
+ },
+ "google_oauth_token": {
+  "llmobs": [
+   [
+    "tool",
+    "mcp.tool.ping",
+    "session-golden"
+   ],
+   [
+    "set_tag",
+    "mcp.client_kind",
+    "oauth"
+   ],
+   [
+    "set_tag",
+    "usr.id",
+    "109876543210"
+   ],
+   [
+    "set_tag",
+    "mcp.client.name",
+    "claude-code"
+   ],
+   [
+    "set_tag",
+    "mcp.session.id",
+    "session-golden"
+   ],
+   [
+    "annotate",
+    {
+     "input_data": "{\"q\": 1}",
+     "metadata": {
+      "mcp_client_name": "claude-code",
+      "mcp_client_version": "1.2.3",
+      "mcp_session_id": "session-golden",
+      "user_email": "alice@example.org"
+     },
+     "tags": {
+      "mcp_client_kind": "oauth",
+      "mcp_client_name": "claude-code",
+      "mcp_session_id": "session-golden",
+      "usr_id": "109876543210"
+     }
+    }
+   ],
+   [
+    "annotate",
+    {
+     "output_data": "pong"
+    }
+   ],
+   [
+    "finish"
+   ],
+   [
+    "tool",
+    "mcp.tool.ping",
+    "session-golden"
+   ],
+   [
+    "set_tag",
+    "mcp.client_kind",
+    "oauth"
+   ],
+   [
+    "set_tag",
+    "usr.id",
+    "109876543210"
+   ],
+   [
+    "set_tag",
+    "mcp.client.name",
+    "claude-code"
+   ],
+   [
+    "set_tag",
+    "mcp.session.id",
+    "session-golden"
+   ],
+   [
+    "annotate",
+    {
+     "input_data": "{\"q\": 1}",
+     "metadata": {
+      "mcp_client_name": "claude-code",
+      "mcp_client_version": "1.2.3",
+      "mcp_session_id": "session-golden",
+      "user_email": "alice@example.org"
+     },
+     "tags": {
+      "mcp_client_kind": "oauth",
+      "mcp_client_name": "claude-code",
+      "mcp_session_id": "session-golden",
+      "usr_id": "109876543210"
+     }
+    }
+   ],
+   [
+    "set_exc_info",
+    "RuntimeError",
+    "boom"
+   ],
+   [
+    "annotate",
+    {
+     "output_data": "error"
+    }
+   ],
+   [
+    "finish"
+   ]
+  ],
+  "metrics": [
+   "cbioportal_mcp.tool.calls:1|c|#client_kind:oauth,client_name:claude-code,service:golden,success:true,tool:ping",
+   "cbioportal_mcp.tool.duration_ms:<v>|d|#client_kind:oauth,client_name:claude-code,service:golden,success:true,tool:ping",
+   "cbioportal_mcp.tool.calls:1|c|#client_kind:oauth,client_name:claude-code,service:golden,success:false,tool:ping",
+   "cbioportal_mcp.tool.duration_ms:<v>|d|#client_kind:oauth,client_name:claude-code,service:golden,success:false,tool:ping",
+   "cbioportal_mcp.tool.errors:1|c|#client_kind:oauth,client_name:claude-code,service:golden,success:false,tool:ping",
+   "cbioportal_mcp.db_query.calls:1|c|#query_label:golden.label,service:golden,success:true",
+   "cbioportal_mcp.db_query.duration_ms:<v>|d|#query_label:golden.label,service:golden,success:true"
+  ],
+  "spans": [
+   {
+    "attributes": {
+     "enduser.email": "alice@example.org",
+     "enduser.id": "109876543210",
+     "mcp.client.name": "claude-code",
+     "mcp.client.version": "1.2.3",
+     "mcp.client_kind": "oauth",
+     "mcp.session.id": "session-golden",
+     "mcp.tool.name": "ping",
+     "mcp.tool.success": true
+    },
+    "name": "mcp.tool/ping"
+   },
+   {
+    "attributes": {
+     "enduser.email": "alice@example.org",
+     "enduser.id": "109876543210",
+     "error.type": "RuntimeError",
+     "mcp.client.name": "claude-code",
+     "mcp.client.version": "1.2.3",
+     "mcp.client_kind": "oauth",
+     "mcp.session.id": "session-golden",
+     "mcp.tool.name": "ping",
+     "mcp.tool.success": false
+    },
+    "name": "mcp.tool/ping"
+   },
+   {
+    "attributes": {
+     "enduser.email": "alice@example.org",
+     "enduser.id": "109876543210",
+     "mcp.client.name": "claude-code",
+     "mcp.client.version": "1.2.3",
+     "mcp.client_kind": "oauth",
+     "mcp.session.id": "session-golden"
+    },
+    "name": "mcp.discovery/tools_list"
+   },
+   {
+    "attributes": {
+     "db.query.label": "golden.label",
+     "db.query.success": true
+    },
+    "name": "db.query/golden.label"
+   }
+  ]
+ },
+ "google_token_and_librechat_headers": {
+  "llmobs": [
+   [
+    "tool",
+    "mcp.tool.ping",
+    "session-golden"
+   ],
+   [
+    "set_tag",
+    "mcp.client_kind",
+    "oauth"
+   ],
+   [
+    "set_tag",
+    "usr.id",
+    "109876543210"
+   ],
+   [
+    "set_tag",
+    "mcp.client.name",
+    "claude-code"
+   ],
+   [
+    "set_tag",
+    "mcp.session.id",
+    "session-golden"
+   ],
+   [
+    "annotate",
+    {
+     "input_data": "{\"q\": 1}",
+     "metadata": {
+      "mcp_client_name": "claude-code",
+      "mcp_client_version": "1.2.3",
+      "mcp_session_id": "session-golden",
+      "user_email": "alice@example.org"
+     },
+     "tags": {
+      "mcp_client_kind": "oauth",
+      "mcp_client_name": "claude-code",
+      "mcp_session_id": "session-golden",
+      "usr_id": "109876543210"
+     }
+    }
+   ],
+   [
+    "annotate",
+    {
+     "output_data": "pong"
+    }
+   ],
+   [
+    "finish"
+   ],
+   [
+    "tool",
+    "mcp.tool.ping",
+    "session-golden"
+   ],
+   [
+    "set_tag",
+    "mcp.client_kind",
+    "oauth"
+   ],
+   [
+    "set_tag",
+    "usr.id",
+    "109876543210"
+   ],
+   [
+    "set_tag",
+    "mcp.client.name",
+    "claude-code"
+   ],
+   [
+    "set_tag",
+    "mcp.session.id",
+    "session-golden"
+   ],
+   [
+    "annotate",
+    {
+     "input_data": "{\"q\": 1}",
+     "metadata": {
+      "mcp_client_name": "claude-code",
+      "mcp_client_version": "1.2.3",
+      "mcp_session_id": "session-golden",
+      "user_email": "alice@example.org"
+     },
+     "tags": {
+      "mcp_client_kind": "oauth",
+      "mcp_client_name": "claude-code",
+      "mcp_session_id": "session-golden",
+      "usr_id": "109876543210"
+     }
+    }
+   ],
+   [
+    "set_exc_info",
+    "RuntimeError",
+    "boom"
+   ],
+   [
+    "annotate",
+    {
+     "output_data": "error"
+    }
+   ],
+   [
+    "finish"
+   ]
+  ],
+  "metrics": [
+   "cbioportal_mcp.tool.calls:1|c|#client_kind:oauth,client_name:claude-code,service:golden,success:true,tool:ping",
+   "cbioportal_mcp.tool.duration_ms:<v>|d|#client_kind:oauth,client_name:claude-code,service:golden,success:true,tool:ping",
+   "cbioportal_mcp.tool.calls:1|c|#client_kind:oauth,client_name:claude-code,service:golden,success:false,tool:ping",
+   "cbioportal_mcp.tool.duration_ms:<v>|d|#client_kind:oauth,client_name:claude-code,service:golden,success:false,tool:ping",
+   "cbioportal_mcp.tool.errors:1|c|#client_kind:oauth,client_name:claude-code,service:golden,success:false,tool:ping",
+   "cbioportal_mcp.db_query.calls:1|c|#query_label:golden.label,service:golden,success:true",
+   "cbioportal_mcp.db_query.duration_ms:<v>|d|#query_label:golden.label,service:golden,success:true"
+  ],
+  "spans": [
+   {
+    "attributes": {
+     "enduser.email": "alice@example.org",
+     "enduser.id": "109876543210",
+     "mcp.client.name": "claude-code",
+     "mcp.client.version": "1.2.3",
+     "mcp.client_kind": "oauth",
+     "mcp.session.id": "session-golden",
+     "mcp.tool.name": "ping",
+     "mcp.tool.success": true
+    },
+    "name": "mcp.tool/ping"
+   },
+   {
+    "attributes": {
+     "enduser.email": "alice@example.org",
+     "enduser.id": "109876543210",
+     "error.type": "RuntimeError",
+     "mcp.client.name": "claude-code",
+     "mcp.client.version": "1.2.3",
+     "mcp.client_kind": "oauth",
+     "mcp.session.id": "session-golden",
+     "mcp.tool.name": "ping",
+     "mcp.tool.success": false
+    },
+    "name": "mcp.tool/ping"
+   },
+   {
+    "attributes": {
+     "enduser.email": "alice@example.org",
+     "enduser.id": "109876543210",
+     "mcp.client.name": "claude-code",
+     "mcp.client.version": "1.2.3",
+     "mcp.client_kind": "oauth",
+     "mcp.session.id": "session-golden"
+    },
+    "name": "mcp.discovery/tools_list"
+   },
+   {
+    "attributes": {
+     "db.query.label": "golden.label",
+     "db.query.success": true
+    },
+    "name": "db.query/golden.label"
+   }
+  ]
+ },
+ "librechat_b64_email": {
+  "llmobs": [
+   [
+    "tool",
+    "mcp.tool.ping",
+    "session-golden"
+   ],
+   [
+    "set_tag",
+    "mcp.client_kind",
+    "librechat"
+   ],
+   [
+    "set_tag",
+    "usr.id",
+    "librechat-2"
+   ],
+   [
+    "set_tag",
+    "mcp.client.name",
+    "claude-code"
+   ],
+   [
+    "set_tag",
+    "mcp.session.id",
+    "session-golden"
+   ],
+   [
+    "annotate",
+    {
+     "input_data": "{\"q\": 1}",
+     "metadata": {
+      "mcp_client_name": "claude-code",
+      "mcp_client_version": "1.2.3",
+      "mcp_session_id": "session-golden",
+      "user_email": "carol@example.org"
+     },
+     "tags": {
+      "mcp_client_kind": "librechat",
+      "mcp_client_name": "claude-code",
+      "mcp_session_id": "session-golden",
+      "usr_id": "librechat-2"
+     }
+    }
+   ],
+   [
+    "annotate",
+    {
+     "output_data": "pong"
+    }
+   ],
+   [
+    "finish"
+   ],
+   [
+    "tool",
+    "mcp.tool.ping",
+    "session-golden"
+   ],
+   [
+    "set_tag",
+    "mcp.client_kind",
+    "librechat"
+   ],
+   [
+    "set_tag",
+    "usr.id",
+    "librechat-2"
+   ],
+   [
+    "set_tag",
+    "mcp.client.name",
+    "claude-code"
+   ],
+   [
+    "set_tag",
+    "mcp.session.id",
+    "session-golden"
+   ],
+   [
+    "annotate",
+    {
+     "input_data": "{\"q\": 1}",
+     "metadata": {
+      "mcp_client_name": "claude-code",
+      "mcp_client_version": "1.2.3",
+      "mcp_session_id": "session-golden",
+      "user_email": "carol@example.org"
+     },
+     "tags": {
+      "mcp_client_kind": "librechat",
+      "mcp_client_name": "claude-code",
+      "mcp_session_id": "session-golden",
+      "usr_id": "librechat-2"
+     }
+    }
+   ],
+   [
+    "set_exc_info",
+    "RuntimeError",
+    "boom"
+   ],
+   [
+    "annotate",
+    {
+     "output_data": "error"
+    }
+   ],
+   [
+    "finish"
+   ]
+  ],
+  "metrics": [
+   "cbioportal_mcp.tool.calls:1|c|#client_kind:librechat,client_name:claude-code,service:golden,success:true,tool:ping",
+   "cbioportal_mcp.tool.duration_ms:<v>|d|#client_kind:librechat,client_name:claude-code,service:golden,success:true,tool:ping",
+   "cbioportal_mcp.tool.calls:1|c|#client_kind:librechat,client_name:claude-code,service:golden,success:false,tool:ping",
+   "cbioportal_mcp.tool.duration_ms:<v>|d|#client_kind:librechat,client_name:claude-code,service:golden,success:false,tool:ping",
+   "cbioportal_mcp.tool.errors:1|c|#client_kind:librechat,client_name:claude-code,service:golden,success:false,tool:ping",
+   "cbioportal_mcp.db_query.calls:1|c|#query_label:golden.label,service:golden,success:true",
+   "cbioportal_mcp.db_query.duration_ms:<v>|d|#query_label:golden.label,service:golden,success:true"
+  ],
+  "spans": [
+   {
+    "attributes": {
+     "enduser.email": "carol@example.org",
+     "enduser.id": "librechat-2",
+     "mcp.client.name": "claude-code",
+     "mcp.client.version": "1.2.3",
+     "mcp.client_kind": "librechat",
+     "mcp.session.id": "session-golden",
+     "mcp.tool.name": "ping",
+     "mcp.tool.success": true
+    },
+    "name": "mcp.tool/ping"
+   },
+   {
+    "attributes": {
+     "enduser.email": "carol@example.org",
+     "enduser.id": "librechat-2",
+     "error.type": "RuntimeError",
+     "mcp.client.name": "claude-code",
+     "mcp.client.version": "1.2.3",
+     "mcp.client_kind": "librechat",
+     "mcp.session.id": "session-golden",
+     "mcp.tool.name": "ping",
+     "mcp.tool.success": false
+    },
+    "name": "mcp.tool/ping"
+   },
+   {
+    "attributes": {
+     "enduser.email": "carol@example.org",
+     "enduser.id": "librechat-2",
+     "mcp.client.name": "claude-code",
+     "mcp.client.version": "1.2.3",
+     "mcp.client_kind": "librechat",
+     "mcp.session.id": "session-golden"
+    },
+    "name": "mcp.discovery/tools_list"
+   },
+   {
+    "attributes": {
+     "db.query.label": "golden.label",
+     "db.query.success": true
+    },
+    "name": "db.query/golden.label"
+   }
+  ]
+ },
+ "librechat_headers": {
+  "llmobs": [
+   [
+    "tool",
+    "mcp.tool.ping",
+    "session-golden"
+   ],
+   [
+    "set_tag",
+    "mcp.client_kind",
+    "librechat"
+   ],
+   [
+    "set_tag",
+    "usr.id",
+    "librechat-1"
+   ],
+   [
+    "set_tag",
+    "mcp.client.name",
+    "claude-code"
+   ],
+   [
+    "set_tag",
+    "mcp.session.id",
+    "session-golden"
+   ],
+   [
+    "annotate",
+    {
+     "input_data": "{\"q\": 1}",
+     "metadata": {
+      "mcp_client_name": "claude-code",
+      "mcp_client_version": "1.2.3",
+      "mcp_session_id": "session-golden",
+      "user_email": "bob@example.org"
+     },
+     "tags": {
+      "mcp_client_kind": "librechat",
+      "mcp_client_name": "claude-code",
+      "mcp_session_id": "session-golden",
+      "usr_id": "librechat-1"
+     }
+    }
+   ],
+   [
+    "annotate",
+    {
+     "output_data": "pong"
+    }
+   ],
+   [
+    "finish"
+   ],
+   [
+    "tool",
+    "mcp.tool.ping",
+    "session-golden"
+   ],
+   [
+    "set_tag",
+    "mcp.client_kind",
+    "librechat"
+   ],
+   [
+    "set_tag",
+    "usr.id",
+    "librechat-1"
+   ],
+   [
+    "set_tag",
+    "mcp.client.name",
+    "claude-code"
+   ],
+   [
+    "set_tag",
+    "mcp.session.id",
+    "session-golden"
+   ],
+   [
+    "annotate",
+    {
+     "input_data": "{\"q\": 1}",
+     "metadata": {
+      "mcp_client_name": "claude-code",
+      "mcp_client_version": "1.2.3",
+      "mcp_session_id": "session-golden",
+      "user_email": "bob@example.org"
+     },
+     "tags": {
+      "mcp_client_kind": "librechat",
+      "mcp_client_name": "claude-code",
+      "mcp_session_id": "session-golden",
+      "usr_id": "librechat-1"
+     }
+    }
+   ],
+   [
+    "set_exc_info",
+    "RuntimeError",
+    "boom"
+   ],
+   [
+    "annotate",
+    {
+     "output_data": "error"
+    }
+   ],
+   [
+    "finish"
+   ]
+  ],
+  "metrics": [
+   "cbioportal_mcp.tool.calls:1|c|#client_kind:librechat,client_name:claude-code,service:golden,success:true,tool:ping",
+   "cbioportal_mcp.tool.duration_ms:<v>|d|#client_kind:librechat,client_name:claude-code,service:golden,success:true,tool:ping",
+   "cbioportal_mcp.tool.calls:1|c|#client_kind:librechat,client_name:claude-code,service:golden,success:false,tool:ping",
+   "cbioportal_mcp.tool.duration_ms:<v>|d|#client_kind:librechat,client_name:claude-code,service:golden,success:false,tool:ping",
+   "cbioportal_mcp.tool.errors:1|c|#client_kind:librechat,client_name:claude-code,service:golden,success:false,tool:ping",
+   "cbioportal_mcp.db_query.calls:1|c|#query_label:golden.label,service:golden,success:true",
+   "cbioportal_mcp.db_query.duration_ms:<v>|d|#query_label:golden.label,service:golden,success:true"
+  ],
+  "spans": [
+   {
+    "attributes": {
+     "enduser.email": "bob@example.org",
+     "enduser.id": "librechat-1",
+     "mcp.client.name": "claude-code",
+     "mcp.client.version": "1.2.3",
+     "mcp.client_kind": "librechat",
+     "mcp.session.id": "session-golden",
+     "mcp.tool.name": "ping",
+     "mcp.tool.success": true
+    },
+    "name": "mcp.tool/ping"
+   },
+   {
+    "attributes": {
+     "enduser.email": "bob@example.org",
+     "enduser.id": "librechat-1",
+     "error.type": "RuntimeError",
+     "mcp.client.name": "claude-code",
+     "mcp.client.version": "1.2.3",
+     "mcp.client_kind": "librechat",
+     "mcp.session.id": "session-golden",
+     "mcp.tool.name": "ping",
+     "mcp.tool.success": false
+    },
+    "name": "mcp.tool/ping"
+   },
+   {
+    "attributes": {
+     "enduser.email": "bob@example.org",
+     "enduser.id": "librechat-1",
+     "mcp.client.name": "claude-code",
+     "mcp.client.version": "1.2.3",
+     "mcp.client_kind": "librechat",
+     "mcp.session.id": "session-golden"
+    },
+    "name": "mcp.discovery/tools_list"
+   },
+   {
+    "attributes": {
+     "db.query.label": "golden.label",
+     "db.query.success": true
+    },
+    "name": "db.query/golden.label"
+   }
+  ]
+ }
+}

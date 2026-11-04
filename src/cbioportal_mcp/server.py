@@ -37,9 +37,27 @@ from fastmcp import FastMCP
 
 import mcp.types as mt
 
-from cbioportal_mcp.env import get_mcp_config, TransportType
+from cbioportal_mcp.env import AuthProvider, get_mcp_config, TransportType
 from cbioportal_mcp.authentication.permissions import ensure_db_permissions
-from cbioportal_mcp.auth import _build_auth_provider
+from cbioportal_mcp.authentication.study_access import (  # noqa: E402 - imported after LLMObs setup, like the rest
+    AuthorizationError,
+    StudyAccessConfigError,
+    authorize_study,
+    clickhouse_study_access_settings,
+    get_current_study_access as resolve_current_study_access,
+    guard_query_study_access,
+    study_access_cache_partition,
+    validate_study_access_startup_config,
+)
+from cbioportal_mcp.auth import PortalDatAuthMiddleware, _build_auth_provider
+from cbioportal_mcp.clickhouse_query_settings import (  # noqa: E402 - imported after LLMObs setup, like the rest
+    AllowlistLockdownError,
+    current_surface_problem,
+    run_query_with_settings,
+    start_surface_monitor,
+    verify_allowlist_lockdown,
+    verify_restricted_surface,
+)
 from cbioportal_mcp.telemetry import (
     TelemetryMiddleware,
     configure_telemetry,
@@ -328,10 +346,40 @@ def main():
     )
 
     try:
+        validate_study_access_startup_config(config=config)
+    except StudyAccessConfigError as e:
+        logger.critical("❌ Study access configuration is unsafe to start with: %s", e)
+        sys.exit(2)
+
+    try:
         ensure_db_permissions(config=config)
     except PermissionError as e:
         logger.critical("❌ ClickHouse permission check failed: %s", e)
         sys.exit(2)
+
+    if config.clickhouse_row_policy_enabled:
+        try:
+            recheck_seconds = config.row_policy_recheck_seconds
+        except ValueError as e:
+            logger.critical("❌ Invalid CBIOPORTAL_MCP_ROW_POLICY_RECHECK_SECONDS: %s", e)
+            sys.exit(2)
+        # acl source: the allowlist setting; authorities source: the identity
+        # setting (the only one its policies read).
+        policy_setting = config.clickhouse_row_policy_setting
+        identity_mode = config.study_authz_identity_mode
+        try:
+            verify_allowlist_lockdown(policy_setting)
+            verify_restricted_surface(policy_setting, identity_mode=identity_mode)
+            logger.info(
+                "✅ ClickHouse accepts the per-request %s, rejects in-query overrides, keeps the "
+                "query cache off, all views are SQL SECURITY INVOKER and the runtime role is "
+                "SELECT-only",
+                policy_setting,
+            )
+        except AllowlistLockdownError as e:
+            logger.critical("❌ ClickHouse study allowlist is not locked down: %s", e)
+            sys.exit(2)
+        start_surface_monitor(policy_setting, recheck_seconds, identity_mode=identity_mode)
 
     # Warm the list_studies cache immediately, without blocking server
     # startup on the ClickHouse round trip, then keep it proactively
@@ -343,7 +391,10 @@ def main():
         _refresh_studies_cache_once()
         _refresh_studies_cache_forever()
 
-    threading.Thread(target=_warm_then_keep_studies_cache_fresh, daemon=True).start()
+    # Authorities mode has no unrestricted snapshot (there is no '*' identity);
+    # list_studies reads cancer_study per request through the caller's policy.
+    if not config.study_authz_identity_mode:
+        threading.Thread(target=_warm_then_keep_studies_cache_fresh, daemon=True).start()
 
     # Set up OpenTelemetry → Datadog agent (no-op if env vars not set or agent unreachable).
     # DogStatsD tool metrics can still use the same middleware when only the
@@ -351,6 +402,9 @@ def main():
     provider = configure_telemetry()
     if provider is not None or dogstatsd_metrics_configured():
         mcp.add_middleware(TelemetryMiddleware())
+    # After telemetry, so calls the gate refuses are still traced.
+    if config.auth_provider == AuthProvider.PORTAL_DAT.value:
+        mcp.add_middleware(PortalDatAuthMiddleware())
 
     transport = config.mcp_server_transport
 
@@ -705,7 +759,36 @@ def _format_columns_response(response: dict) -> dict:
     }
 
 
-def run_select_query(query: str, *, query_label: str, max_rows: int | None = None) -> list[dict]:
+def _run_select_query_with_clickhouse_settings(query: str, *, all_studies: bool = False) -> dict:
+    """Execute a query with the request's study allowlist as a ClickHouse setting.
+
+    Goes through mcp-clickhouse's pooled, timeout-cancelling run_query (see
+    clickhouse_query_settings), with readonly=1 forced so the query itself
+    can't change the setting. Refused while the periodic safety re-check is
+    failing (a non-INVOKER view or an extra grant appeared after startup).
+    ``all_studies`` sends the unrestricted ``*``
+    allowlist instead of the current request's. Only for server-internal
+    queries whose results are filtered per request in Python afterwards (the
+    shared list_studies snapshot), which run on a background thread with no
+    request identity.
+    """
+    problem = current_surface_problem()
+    if problem:
+        raise RuntimeError(
+            "Study-data queries are disabled until the ClickHouse row-policy safety check "
+            f"passes again: {problem}"
+        )
+    return run_query_with_settings(query, clickhouse_study_access_settings(all_studies=all_studies))
+
+
+def run_select_query(
+    query: str,
+    *,
+    query_label: str,
+    max_rows: int | None = None,
+    enforce_study_access: bool = True,
+    all_studies: bool = False,
+) -> list[dict]:
     """
     Execute arbitrary ClickHouse SQL SELECT query.
 
@@ -726,6 +809,9 @@ def run_select_query(query: str, *, query_label: str, max_rows: int | None = Non
     Returns:
         list: A list of rows, where each row is a dictionary with column names as keys and corresponding values.
     """
+    if enforce_study_access and not all_studies:
+        guard_query_study_access(query)
+
     from mcp_clickhouse.mcp_server import run_query
 
     # DB-level read-only permissions (enforced on startup) prevent non-SELECT queries,
@@ -734,7 +820,14 @@ def run_select_query(query: str, *, query_label: str, max_rows: int | None = Non
         query = _with_row_cap(query, max_rows)
     logger.debug("run_select_query: delegate the query to run_query tool of ClickHouse MCP")
     with traced_db_query(query_label):
-        ch_query_result = json.loads(run_query(query))
+        if get_mcp_config().clickhouse_row_policy_enabled:
+            # Row-policy mode: the per-request settings transport (readonly=1,
+            # use_query_cache=0, the caller's identity/allowlist setting).
+            ch_query_result = _run_select_query_with_clickhouse_settings(
+                query, all_studies=all_studies
+            )
+        else:
+            ch_query_result = json.loads(run_query(query))
         result = zip_select_query_result(ch_query_result)
     return result
 
@@ -1039,6 +1132,22 @@ def get_study_guide(study_id: str) -> str:
     return _study_guide_text(study_id)
 
 
+def _cached_guide_denial(canonical_study_id: str) -> str | None:
+    """Why a cached dynamic guide must not be served right now, or None."""
+    if get_mcp_config().clickhouse_row_policy_enabled:
+        problem = current_surface_problem()
+        if problem:
+            return (
+                "Error: Study-data queries are disabled until the ClickHouse row-policy "
+                f"safety check passes again: {problem}"
+            )
+    try:
+        authorize_study(canonical_study_id)
+    except AuthorizationError as e:
+        return f"Error: {str(e)}"
+    return None
+
+
 def _submit_in_context(executor: ThreadPoolExecutor, fn, /, *args, **kwargs):
     """executor.submit(fn, ...) in a copy of the caller's contextvars.
 
@@ -1057,25 +1166,57 @@ def _study_guide_text(study_id: str) -> str:
         study_id = _validate_study_id(study_id)
     except ValueError as e:
         return f"Error: {str(e)}"
-    
-    # First, check for a pre-generated guide file. `_load_study_guide` returns
-    # None when no guide file exists (fall through to dynamic); it raises when
-    # a guide was resolved but couldn't be read — that's a real problem and
-    # we surface it rather than silently degrading.
-    try:
-        static_guide = _load_study_guide(study_id)
-    except Exception as e:
-        logger.error(f"Error reading resolved static guide for {study_id}: {e}")
-        return f"Error: A study guide was found for '{study_id}' but could not be read: {e}"
-    if static_guide:
-        logger.info(f"Loaded static study guide for {study_id}")
-        return static_guide
+
+    # Study access is always checked against the canonical identifier - the
+    # curated guide's file name, else the database's spelling - never the
+    # caller's spelling, and before any guide content is returned. Checking
+    # the caller's spelling would reject 'STUDY_ALPHA' for an ACL listing
+    # study_alpha, and let an ACL listing only 'STUDY_BETA' read study_beta.
+    canonical_guide = _resolve_study_guide_name(study_id)
+    if canonical_guide is not None:
+        try:
+            authorize_study(canonical_guide)
+        except AuthorizationError as e:
+            return f"Error: {str(e)}"
+
+        # `_load_study_guide` returns None when no guide file exists (fall
+        # through to dynamic); it raises when a guide was resolved but couldn't
+        # be read — that's a real problem and we surface it rather than
+        # silently degrading.
+        try:
+            static_guide = _load_study_guide(canonical_guide)
+        except Exception as e:
+            logger.error(f"Error reading resolved static guide for {canonical_guide}: {e}")
+            return (
+                f"Error: A study guide was found for '{canonical_guide}' but could not be read: {e}"
+            )
+        if static_guide:
+            logger.info(f"Loaded static study guide for {canonical_guide}")
+            return static_guide
 
     # Study ids match case-insensitively below, so key the cache the same way.
-    cache_key = study_id.lower()
+    # With study access restricted, a dynamic guide is built from rows the
+    # caller's row policies allowed and was authorized for that caller only,
+    # so the key also carries the caller's access partition (email, or
+    # resolved allowlist). Public mode keeps the plain key.
+    try:
+        partition = study_access_cache_partition()
+    except AuthorizationError as e:
+        return f"Error: {str(e)}"
+    cache_key = study_id.lower() if partition is None else (partition, study_id.lower())
     cached = _cache_get(_study_guide_cache, cache_key)
     if cached is not None:
-        return cached
+        canonical_study_id, cached_guide = cached
+        if partition is not None:
+            # A cache hit must never outlive the caller's access: re-check the
+            # row-policy safety gate and authorize the canonical study id against
+            # the caller's *current* entitlements (a live user_study read through
+            # ClickHouse in authorities mode, the current allowlist in acl mode)
+            # on every hit, exactly as a fresh build would.
+            denial = _cached_guide_denial(canonical_study_id)
+            if denial:
+                return denial
+        return cached_guide
 
     # Fall back to dynamic generation
     logger.info(f"Generating dynamic study guide for {study_id}")
@@ -1085,6 +1226,9 @@ def _study_guide_text(study_id: str) -> str:
         # 1. Basic study info
         # Match case-insensitively: identifiers are lowercase by convention, but a
         # user who types 'NBL_MSK_2023' must not be told the study is missing.
+        # The SQL guard can't verify a lower(...) comparison, so it is skipped
+        # here; nothing from this row is returned until the identifier the
+        # database matched has been authorized below.
         study_info = run_select_query(f"""
             SELECT
                 cancer_study_identifier,
@@ -1093,7 +1237,7 @@ def _study_guide_text(study_id: str) -> str:
                 type_of_cancer_id
             FROM cancer_study
             WHERE lower(cancer_study_identifier) = lower('{study_id}')
-        """, query_label="study_guide.study_info")
+        """, query_label="study_guide.study_info", enforce_study_access=False)
 
         if not study_info:
             return _study_not_in_deployment_message(study_id)
@@ -1102,6 +1246,10 @@ def _study_guide_text(study_id: str) -> str:
         # Adopt the identifier exactly as the database spells it, so every section
         # below queries the real study rather than the user's casing.
         study_id = info.get("cancer_study_identifier") or study_id
+        try:
+            authorize_study(study_id)
+        except AuthorizationError as e:
+            return f"Error: {str(e)}"
         guide_sections.append(f"""# Study Guide: {info.get('name', study_id)}
 
 **Study ID:** `{study_id}`
@@ -1117,6 +1265,9 @@ def _study_guide_text(study_id: str) -> str:
         # clock, while six concurrent ones cost roughly one. Results are
         # still consumed in the original section order below, so the guide's
         # output is unchanged regardless of which query finishes first.
+        # Each worker runs in its own copy of this request's context
+        # (_submit_in_context), so the study-access checks in run_select_query
+        # still see the caller's identity and the query span its tool span.
         with ThreadPoolExecutor(max_workers=6) as executor:
             counts_future = _submit_in_context(
                 executor,
@@ -1284,7 +1435,9 @@ WHERE cancer_study_identifier = '{study_id}'
 """)
         
         guide = "\n".join(guide_sections)
-        _cache_put(_study_guide_cache, cache_key, guide)
+        # Stored with the canonical id it was authorized for, so every later
+        # hit can re-authorize it (see _cached_guide_denial).
+        _cache_put(_study_guide_cache, cache_key, (study_id, guide))
         return guide
         
     except Exception as e:
@@ -1328,16 +1481,7 @@ def _clear_studies_cache() -> None:
         _studies_cache_fetched_at = 0.0
 
 
-def _fetch_and_store_studies() -> tuple[tuple[tuple[str, object], ...], ...]:
-    """Query ClickHouse for every study's full detail and store it as the
-    cache snapshot. Caller must hold _studies_cache_lock.
-
-    sample_count is precomputed onto cancer_study by
-    sql/6-add-study-data-type-counts.sql in the daily clone pipeline, so this
-    is a single-table scan with no joins or aggregation.
-    """
-    global _studies_cache_rows, _studies_cache_fetched_at
-    query = """
+_ALL_STUDIES_SQL = """
                 SELECT
                     cs.cancer_study_identifier,
                     cs.name,
@@ -1347,7 +1491,22 @@ def _fetch_and_store_studies() -> tuple[tuple[tuple[str, object], ...], ...]:
                 FROM cancer_study cs
                 ORDER BY cs.sample_count DESC
             """
-    rows = run_select_query(query, query_label="list_studies.all_studies")
+
+
+def _fetch_and_store_studies() -> tuple[tuple[tuple[str, object], ...], ...]:
+    """Query ClickHouse for every study's full detail and store it as the
+    cache snapshot. Caller must hold _studies_cache_lock.
+
+    sample_count is precomputed onto cancer_study by
+    sql/6-add-study-data-type-counts.sql in the daily clone pipeline, so this
+    is a single-table scan with no joins or aggregation.
+    """
+    global _studies_cache_rows, _studies_cache_fetched_at
+    query = _ALL_STUDIES_SQL
+    # This snapshot is shared across requests (and refreshed from a background
+    # thread with no request identity), so it is fetched unrestricted and
+    # filtered per request in _filter_studies() instead.
+    rows = run_select_query(query, query_label="list_studies.all_studies", all_studies=True)
     _studies_cache_rows = tuple(tuple(row.items()) for row in rows)
     _studies_cache_fetched_at = time.monotonic()
     return _studies_cache_rows
@@ -1405,9 +1564,26 @@ def _refresh_studies_cache_forever() -> None:
         _refresh_studies_cache_once()
 
 
+def _caller_studies_query() -> list[dict]:
+    """Authorities mode: the studies this caller's row policies let ClickHouse return.
+
+    Not cached across requests - the shared snapshot is fetched with the
+    unrestricted '*' allowlist, which authorities mode does not have.
+    """
+    return run_select_query(_ALL_STUDIES_SQL, query_label="list_studies.caller_studies")
+
+
 def _filter_studies(search: str | None, limit: int, verbose: bool) -> list[dict]:
     """Filter, limit, and shape the cached full study list for list_studies()."""
-    rows = [dict(row) for row in _all_studies_query()]
+    if get_mcp_config().study_authz_identity_mode:
+        rows = [dict(row) for row in _caller_studies_query()]
+    else:
+        access = resolve_current_study_access()
+        rows = [dict(row) for row in _all_studies_query()]
+        if not access.all_studies:
+            rows = [
+                row for row in rows if access.allows(str(row.get("cancer_study_identifier", "")))
+            ]
 
     if search:
         # Every word must appear somewhere ("TARGET neuroblastoma" matches "Pediatric
@@ -1490,7 +1666,30 @@ def list_study_guides() -> list[str]:
     Returns:
         List of study identifiers that have curated guides in resources/study-guides/
     """
-    return _list_available_study_guides()
+    guides = _list_available_study_guides()
+    try:
+        access = resolve_current_study_access()
+    except AuthorizationError as e:
+        return [f"Error: {str(e)}"]
+    if access.all_studies:
+        return guides
+    return [study_id for study_id in guides if study_id in access.studies]
+
+
+@mcp.tool()
+def get_current_study_access() -> dict[str, object]:
+    """Return the authenticated caller and the studies visible to this request."""
+    try:
+        access = resolve_current_study_access()
+        return {
+            "user_id": access.identity.user_id,
+            "user_email": access.identity.user_email,
+            "groups": sorted(access.identity.groups),
+            "all_studies": access.all_studies,
+            "studies": sorted(access.studies),
+        }
+    except AuthorizationError as e:
+        return {"error_message": str(e)}
 
 
 @mcp.tool()
