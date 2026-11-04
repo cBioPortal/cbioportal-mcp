@@ -41,6 +41,10 @@ export CLICKHOUSE_PASSWORD=your-password
 export CLICKHOUSE_DATABASE=your-cbioportal-database  # see "Preparing the database" below
 export CLICKHOUSE_SECURE=true  # or false for insecure connections
 export CBIOPORTAL_MCP_STUDY_FILTERING=off  # required; no default
+# Auth rollout switches: required in HTTP/SSE mode (no defaults).
+export CBIOPORTAL_MCP_AUTH_ENFORCEMENT=off   # off | enforce
+export CBIOPORTAL_MCP_AUTH_TEST_USERS=      # comma-separated emails; may be empty
+export CBIOPORTAL_MCP_PUBLIC_DB_CHECK=off    # off | enforce
 export CLICKHOUSE_MCP_SERVER_TRANSPORT=http # default; or sse
 # Local stdio only: set BOTH of these explicitly.
 # export CLICKHOUSE_MCP_SERVER_TRANSPORT=stdio
@@ -67,6 +71,18 @@ is ignored). Missing, blank, and other values refuse startup. This release also
 refuses `on`: filtering cannot be enabled until P11 in a later release. `off`
 preserves current behavior. These checks apply to alternate launchers too.
 HTTP is the default transport; stdio requires exactly `CBIOPORTAL_MCP_LOCAL_DEV=1`.
+
+The auth rollout switches are parsed once at startup and refuse startup when missing
+or invalid, naming the variable. `CBIOPORTAL_MCP_AUTH_ENFORCEMENT` and
+`CBIOPORTAL_MCP_PUBLIC_DB_CHECK` accept `off` or `enforce`.
+`CBIOPORTAL_MCP_AUTH_TEST_USERS` must be set but may be empty; entries are trimmed,
+lower-cased and de-duplicated, empty entries are dropped, and an entry that is not a
+plausible email refuses startup. It is ignored (with a warning) when enforcement is
+`enforce`. `CBIOPORTAL_MCP_STUDY_FILTERING=on` requires both switches at `enforce`.
+Only local stdio (`CBIOPORTAL_MCP_LOCAL_DEV=1`) defaults unset switches to
+`off` / empty / `off`. The startup log shows each value and the tester count, never
+tester emails. These switches are temporary and expire on 2027-06-30 (see
+`cbioportal_mcp.rollout.EXPIRES`). They do not change request handling yet.
 
 ### Datadog Tool Metrics
 
@@ -144,7 +160,9 @@ cbioportal-mcp
 ```bash
 # Build the image
 docker build -t cbioportal-mcp -f docker/Dockerfile .
-docker run -p 8000:8000 -e CBIOPORTAL_MCP_STUDY_FILTERING=off cbioportal-mcp
+docker run -p 8000:8000 -e CBIOPORTAL_MCP_STUDY_FILTERING=off \
+  -e CBIOPORTAL_MCP_AUTH_ENFORCEMENT=off -e CBIOPORTAL_MCP_AUTH_TEST_USERS= \
+  -e CBIOPORTAL_MCP_PUBLIC_DB_CHECK=off cbioportal-mcp
 ```
 
 ## License

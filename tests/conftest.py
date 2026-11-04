@@ -6,6 +6,10 @@ import pytest
 
 # Server imports during collection now require an explicit deployment choice.
 os.environ["CBIOPORTAL_MCP_STUDY_FILTERING"] = "off"
+# Rollout switches are required in HTTP mode too (see cbioportal_mcp.rollout).
+os.environ["CBIOPORTAL_MCP_AUTH_ENFORCEMENT"] = "off"
+os.environ["CBIOPORTAL_MCP_AUTH_TEST_USERS"] = ""
+os.environ["CBIOPORTAL_MCP_PUBLIC_DB_CHECK"] = "off"
 
 import cbioportal_mcp  # noqa: F401
 from cbioportal_mcp import result_format

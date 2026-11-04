@@ -238,4 +238,8 @@ def validate_startup(transport: Optional[str] = None) -> tuple[str, str]:
             raise ValueError(
                 "stdio requires the local-development opt-in CBIOPORTAL_MCP_LOCAL_DEV=1"
             )
+    from cbioportal_mcp import rollout  # rollout imports this module's parsers
+
+    # Rollout switches default to off only when actually serving local stdio.
+    rollout.initialize(filtering, local_dev=effective_transport == "stdio")
     return filtering, effective_transport
