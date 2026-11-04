@@ -37,7 +37,22 @@ class RolloutSettings:
     public_db_check: str
 
 
-_SETTINGS: Optional[RolloutSettings] = None
+@dataclass(frozen=True)
+class _Pin:
+    """Settings plus the context and raw env they were parsed from."""
+
+    filtering: str
+    local_dev: bool
+    raw_env: tuple[Optional[str], ...]
+    settings: RolloutSettings
+
+
+_SWITCH_VARS = (AUTH_ENFORCEMENT_ENV, AUTH_TEST_USERS_ENV, PUBLIC_DB_CHECK_ENV)
+_PIN: Optional[_Pin] = None
+
+
+def _context(local_dev: bool) -> str:
+    return "local stdio (defaults allowed)" if local_dev else "http/sse (no defaults)"
 
 
 def _mode(name: str, local_dev: bool) -> str:
@@ -83,18 +98,45 @@ def parse(filtering: str, local_dev: bool) -> RolloutSettings:
 
 
 def initialize(filtering: str, local_dev: bool) -> RolloutSettings:
-    """Validate on every startup check; the first successful parse is kept."""
-    global _SETTINGS
-    settings = parse(filtering, local_dev)
-    if _SETTINGS is None:
-        _SETTINGS = settings
-    return _SETTINGS
+    """Parse and pin once per process; later startup checks must match the pin.
+
+    A repeat in the same context with unchanged env is a no-op (no reparse).
+    A different context (e.g. local-stdio defaults then an HTTP launch) or
+    changed switch env raises rather than silently keeping stale values.
+    """
+    global _PIN
+    raw_env = tuple(os.getenv(name) for name in _SWITCH_VARS)
+    if _PIN is None:
+        _PIN = _Pin(filtering, local_dev, raw_env, parse(filtering, local_dev))
+        return _PIN.settings
+    if _PIN.local_dev != local_dev:
+        raise ValueError(
+            f"rollout switches were pinned for {_context(_PIN.local_dev)} but this "
+            f"launch is {_context(local_dev)}; restart with a consistent transport "
+            "(CLICKHOUSE_MCP_SERVER_TRANSPORT)"
+        )
+    if _PIN.filtering != filtering:
+        raise ValueError(
+            "CBIOPORTAL_MCP_STUDY_FILTERING changed after rollout switches were pinned; restart"
+        )
+    pairs = zip(_SWITCH_VARS, _PIN.raw_env, raw_env, strict=True)
+    changed = [name for name, old, new in pairs if old != new]
+    if changed:
+        # Name the variables only: values may contain tester emails.
+        raise ValueError(f"{', '.join(changed)} changed after startup pinned them; restart")
+    return _PIN.settings
+
+
+def _reset_for_tests() -> None:
+    """Forget the pin. Tests only; a real process pins exactly once."""
+    global _PIN
+    _PIN = None
 
 
 def get() -> RolloutSettings:
-    if _SETTINGS is None:
+    if _PIN is None:
         raise RuntimeError("rollout settings are read before startup validation")
-    return _SETTINGS
+    return _PIN.settings
 
 
 def auth_checks_apply(identity_email: Optional[str]) -> bool:

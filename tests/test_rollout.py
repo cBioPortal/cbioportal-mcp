@@ -2,7 +2,7 @@
 
 import dataclasses
 import logging
-from datetime import date
+from datetime import datetime, timezone
 
 import pytest
 
@@ -25,7 +25,7 @@ def fresh(monkeypatch):
     monkeypatch.setenv(ENFORCEMENT, "off")
     monkeypatch.setenv(TESTERS, "")
     monkeypatch.setenv(DB_CHECK, "off")
-    monkeypatch.setattr(rollout, "_SETTINGS", None)
+    rollout._reset_for_tests()  # conftest also resets; keep explicit here
 
 
 @pytest.mark.parametrize("name", [ENFORCEMENT, TESTERS, DB_CHECK])
@@ -85,9 +85,10 @@ def test_local_stdio_defaults_and_still_rejects_invalid(monkeypatch, name):
         monkeypatch.delenv(var)
     validate_startup()
     assert rollout.get() == rollout.RolloutSettings("off", frozenset(), "off")
-    # An HTTP launch of the same process gets no defaults.
+    rollout._reset_for_tests()  # a fresh process: HTTP gets no defaults
     with pytest.raises(ValueError, match=ENFORCEMENT):
         validate_startup("http")
+    rollout._reset_for_tests()
     monkeypatch.setenv(name, "bogus")
     with pytest.raises(ValueError, match=name):
         validate_startup()
@@ -151,18 +152,70 @@ def test_api_requires_startup():
         rollout.auth_checks_apply("alice@example.org")
 
 
-def test_settings_immutable_after_startup(monkeypatch):
+def test_settings_immutable_after_startup():
     validate_startup()
     settings = rollout.get()
     with pytest.raises(dataclasses.FrozenInstanceError):
         settings.auth_enforcement = "enforce"
     with pytest.raises(AttributeError):
         settings.auth_test_users.add("mallory@example.org")
+
+
+def test_same_context_repeat_is_a_no_op(monkeypatch):
+    validate_startup()
+    settings = rollout.get()
+    calls = []
+    monkeypatch.setattr(rollout, "parse", lambda *a, **k: calls.append(a))
+    validate_startup()  # e.g. construction, then run_async
+    validate_startup("sse")  # http and sse share the no-defaults context
+    assert rollout.get() is settings
+    assert calls == []  # parsed exactly once
+
+
+def test_stdio_defaults_never_carry_into_http(monkeypatch):
+    """Regression: local-stdio defaults pinned off, then an HTTP launch with
+    enforce requested used to succeed while staying off."""
+    monkeypatch.setenv("CLICKHOUSE_MCP_SERVER_TRANSPORT", "stdio")
+    monkeypatch.setenv("CBIOPORTAL_MCP_LOCAL_DEV", "1")
+    for var in (ENFORCEMENT, TESTERS, DB_CHECK):
+        monkeypatch.delenv(var)
+    validate_startup()
     monkeypatch.setenv(ENFORCEMENT, "enforce")
+    monkeypatch.setenv(TESTERS, "")
     monkeypatch.setenv(DB_CHECK, "enforce")
-    validate_startup()  # later launcher checks revalidate but do not re-pin
+    with pytest.raises(ValueError, match=r"pinned for local stdio .* http/sse"):
+        validate_startup("http")
+    assert rollout.get().auth_enforcement == "off"  # unchanged, but the launch failed
+
+
+def test_http_then_stdio_also_raises(monkeypatch):
+    validate_startup()
+    monkeypatch.setenv("CBIOPORTAL_MCP_LOCAL_DEV", "1")
+    with pytest.raises(ValueError, match=r"pinned for http/sse .* local stdio"):
+        validate_startup("stdio")
+
+
+@pytest.mark.parametrize(
+    "name, value", [(ENFORCEMENT, "enforce"), (DB_CHECK, "enforce"),
+                    (TESTERS, "secret@example.org"), (ENFORCEMENT, "bogus")],
+)
+def test_env_change_after_pin_raises_and_keeps_effective_settings(monkeypatch, name, value):
+    """Chosen behaviour: a changed switch fails loudly; it neither re-parses nor
+    silently keeps the pinned values as if the new request had been honoured."""
+    validate_startup()
+    settings = rollout.get()
+    monkeypatch.setenv(name, value)
+    with pytest.raises(ValueError, match=f"{name} changed after startup") as error:
+        validate_startup()
+    assert "secret" not in str(error.value)
     assert rollout.get() is settings
     assert rollout.auth_checks_apply("mallory@example.org") is False
+
+
+def test_study_filtering_change_after_pin_raises():
+    rollout.initialize("off", local_dev=False)
+    with pytest.raises(ValueError, match="STUDY_FILTERING changed"):
+        rollout.initialize("on", local_dev=False)
 
 
 def test_startup_log_lists_switches_and_count_only(monkeypatch, caplog):
@@ -181,7 +234,8 @@ def test_startup_log_lists_switches_and_count_only(monkeypatch, caplog):
 def test_rollout_switch_has_not_expired(switch):
     expires = rollout.EXPIRES[switch]
     action = "the tester list" if switch == "AUTH_TEST_USERS" else "the 'off' path"
-    assert date.today() <= expires, (
+    today_utc = datetime.now(timezone.utc).date()
+    assert today_utc <= expires, (
         f"CBIOPORTAL_MCP_{switch} expired on {expires}: remove {action} "
         f"from cbioportal_mcp.rollout (and its env var from deployments)"
     )

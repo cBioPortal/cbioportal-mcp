@@ -12,7 +12,7 @@ os.environ["CBIOPORTAL_MCP_AUTH_TEST_USERS"] = ""
 os.environ["CBIOPORTAL_MCP_PUBLIC_DB_CHECK"] = "off"
 
 import cbioportal_mcp  # noqa: F401
-from cbioportal_mcp import result_format
+from cbioportal_mcp import result_format, rollout
 
 
 @pytest.fixture(autouse=True)
@@ -24,6 +24,14 @@ def _default_result_format(monkeypatch):
         result_format.MAX_CELL_CHARS_ENV,
     ):
         monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _fresh_rollout_pin():
+    """Each test is its own "process" for the parse-once rollout pin."""
+    rollout._reset_for_tests()
+    yield
+    rollout._reset_for_tests()
 
 
 @pytest.fixture(autouse=True)
