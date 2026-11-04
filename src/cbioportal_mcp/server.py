@@ -37,7 +37,7 @@ from fastmcp import FastMCP
 
 import mcp.types as mt
 
-from cbioportal_mcp.env import get_mcp_config, TransportType
+from cbioportal_mcp.env import AuthProvider, get_mcp_config, TransportType
 from cbioportal_mcp.authentication.permissions import ensure_db_permissions
 from cbioportal_mcp.authentication.study_access import (  # noqa: E402 - imported after LLMObs setup, like the rest
     AuthorizationError,
@@ -49,7 +49,7 @@ from cbioportal_mcp.authentication.study_access import (  # noqa: E402 - importe
     study_access_cache_partition,
     validate_study_access_startup_config,
 )
-from cbioportal_mcp.auth import _build_auth_provider
+from cbioportal_mcp.auth import PortalDatAuthMiddleware, _build_auth_provider
 from cbioportal_mcp.clickhouse_query_settings import (  # noqa: E402 - imported after LLMObs setup, like the rest
     AllowlistLockdownError,
     current_surface_problem,
@@ -402,6 +402,9 @@ def main():
     provider = configure_telemetry()
     if provider is not None or dogstatsd_metrics_configured():
         mcp.add_middleware(TelemetryMiddleware())
+    # After telemetry, so calls the gate refuses are still traced.
+    if config.auth_provider == AuthProvider.PORTAL_DAT.value:
+        mcp.add_middleware(PortalDatAuthMiddleware())
 
     transport = config.mcp_server_transport
 

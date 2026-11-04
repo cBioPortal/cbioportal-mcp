@@ -80,6 +80,40 @@ self-only and the auth tables / refresh MV are denied, identity-override and
 empty/absent/disabled/unknown identities, the query cache, and that deleting
 an authority stops granting rows after one `user_study` refresh.
 
+### Login providers: OIDC (Keycloak and Okta-shaped) and portal DAT
+
+The `providers` profile adds three more MCP servers on the same ClickHouse
+fixture and acl row policies, each configured only through environment
+variables (see the README's "Login provider per deployment"):
+
+| Service | Provider | IdP / portal | Studies from |
+| --- | --- | --- | --- |
+| `mcp-oidc-keycloak` (`:18100`) | `oidc` | this Keycloak realm, client `mcp-oidc` | realm roles `cbioportal:<id>` |
+| `mcp-oidc-okta` (`:18101`) | `oidc` | `mock-okta` (`:18092`): Okta-shaped claims (`uid`, login in `sub`, `cbio_studies`, no `email_verified`) | `cbio_studies` |
+| `mcp-portal-dat` (`:18102`) | `portal_dat` | `fake-portal` (`:18091`) | the portal's `/api/studies` |
+
+```bash
+docker compose -f docker/local-e2e/docker-compose.yml --profile providers up -d --build --wait
+uv run python scripts/local_e2e_auth_providers.py
+```
+
+For both OIDC servers the verifier runs the real MCP OAuth flow (dynamic
+registration, `/authorize`, the IdP login - Keycloak's login form, or the
+mock issuer - the MCP's `/auth/callback`, `/token`) and checks that
+unauthenticated and forged bearer tokens get 401, that each user's studies
+and their `cancer_study` and `patient` rows match the token's claim, that a
+token without a studies claim (Okta `carol`) is denied, and that identity or
+allowlist headers change nothing. For `portal_dat` it checks the portal's
+list, that a revoked token is denied once the 5 s cache expires, that a
+portal outage denies, and that the MCP made only GET requests and never put
+a token in a URL. Expected output ends with `Local auth provider e2e passed.`
+
+Host ports are overridable when another copy of this stack is running
+(`COMPOSE_PROJECT_NAME`, `E2E_CLICKHOUSE_HTTP_PORT`, `E2E_CLICKHOUSE_TCP_PORT`,
+`E2E_KEYCLOAK_PORT`, `E2E_MCP_PORT`, `E2E_PROXY_PORT`, `E2E_OKTA_PORT`,
+`E2E_PORTAL_PORT`, `E2E_MCP_*_PORT`); pass the matching `--keycloak-url`,
+`--proxy-url` and `--clickhouse-url` to `local_e2e_keycloak_authz.py`.
+
 To reset the seeded ClickHouse/Keycloak state:
 
 ```bash

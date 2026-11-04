@@ -392,6 +392,218 @@ B. In row-policy mode (either source):
   remaining `lru_cache`s hold files baked into the image (guides, OncoTree,
   pitfalls) and the ACL file.
 
+### Login provider per deployment
+
+Each deployment picks exactly one login provider with
+`CBIOPORTAL_MCP_AUTH_PROVIDER` (default `google`). The provider decides who
+the caller is; `CBIOPORTAL_MCP_STUDY_ACCESS_SOURCE` decides which studies
+they may read. One resolver (`authentication/caller.py:resolve_caller_identity`)
+feeds authentication, study access and telemetry, so they never disagree.
+With every new setting at its default the server behaves, and tags Datadog
+spans, exactly as before (`tests/test_telemetry_golden.py`).
+
+| Deployment | `AUTH_PROVIDER` | `STUDY_ACCESS_MODE` | `STUDY_ACCESS_SOURCE` | ClickHouse policy set |
+| --- | --- | --- | --- | --- |
+| Public | `google` | `public` | – | none |
+| Private, IdP speaks OIDC | `oidc` | `restricted` | `jwt` (studies in a token claim), `authorities`, or `acl` | `jwt`/`acl`: `sql/study-authz/0-row-policies.sql`; `authorities`: `sql/study-authz/authorities/` |
+| Private, portal uses SAML | `portal_dat` | `restricted` | `portal_dat` | `sql/study-authz/0-row-policies.sql` |
+
+`jwt` and `portal_dat` resolve the study list in the MCP, validate every ID
+with `validate_study_ids()` and send it as the existing allowlist setting
+(`SQL_cbiomcp_allowed_studies`), so they use the **acl policy variant**:
+render and apply `sql/study-authz/0-row-policies.sql` exactly as for
+`acl` (see "Study-Level Access Control" above), with
+`CBIOPORTAL_MCP_CLICKHOUSE_ROW_POLICY_ENABLED=true` - the server refuses to
+start with either source otherwise. Neither source ever sends `*`, and
+neither merges in `CBIOPORTAL_MCP_STUDY_ACL_FILE`,
+`CBIOPORTAL_MCP_ALLOWED_STUDIES` or admin groups (startup refuses those
+combinations). Cache isolation is unchanged: every query carries the
+caller's allowlist setting with `use_query_cache=0`, and dynamic study guides
+are cached per resolved allowlist and re-authorized on every hit. Guide
+section queries run on worker threads in a copy of the request context, so
+they resolve the same caller (`tests/test_caller_context_threads.py`).
+
+The server refuses to start (exit 2) on any unsafe combination, for example
+`oidc` without an issuer, client, base URL or audience; `portal_dat` without
+a portal URL or HMAC secret; a non-https URL without the explicit local-test
+override; `oidc`/`portal_dat` on a public deployment; `jwt` without
+`oidc`; `portal_dat` with a source other than `portal_dat`; `authorities`
+with `portal_dat` (no verified email); and `jwt`/`portal_dat` without row
+policies. The full list is `tests/test_auth_provider_config.py::INVALID`.
+
+#### Public: Google (default, unchanged)
+
+```bash
+export CBIOPORTAL_MCP_GOOGLE_CLIENT_ID=123-abc.apps.googleusercontent.com
+export CBIOPORTAL_MCP_GOOGLE_CLIENT_SECRET=...
+export CBIOPORTAL_MCP_GOOGLE_BASE_URL=https://mcp.cbioportal.org
+export REDIS_URL=redis://:password@host:6379/1
+# study access stays off (CBIOPORTAL_MCP_STUDY_ACCESS_MODE=public)
+```
+
+#### Private: OIDC (any standards-based IdP)
+
+Generic OpenID Connect through FastMCP's `OIDCProxy`: discovery from
+`<issuer>/.well-known/openid-configuration` (or
+`CBIOPORTAL_MCP_OIDC_CONFIG_URL`), keys from the discovered JWKS. Every
+upstream access token must carry a valid signature (one pinned asymmetric
+algorithm, `CBIOPORTAL_MCP_OIDC_SIGNING_ALGORITHM`, default `RS256`), `iss`
+equal to the configured issuer, an `aud` containing
+`CBIOPORTAL_MCP_OIDC_AUDIENCE` (comma-separated list allowed), and an
+unexpired `exp`; anything else is rejected with 401. Clients then use the
+token the MCP itself issues after login, exactly as with Google. There is
+nothing IdP-specific in the code; Keycloak and Okta below differ only in
+configuration.
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `CBIOPORTAL_MCP_OIDC_ISSUER_URL` | – (required) | issuer, compared verbatim with `iss` |
+| `CBIOPORTAL_MCP_OIDC_CLIENT_ID` / `_CLIENT_SECRET` | – (required) | confidential client registered at the IdP |
+| `CBIOPORTAL_MCP_OIDC_BASE_URL` | – (required) | this server's public origin; register `<base>/auth/callback` at the IdP |
+| `CBIOPORTAL_MCP_OIDC_AUDIENCE` | – (required) | accepted `aud` value(s) of the IdP's access tokens |
+| `CBIOPORTAL_MCP_OIDC_SCOPES` | `openid email profile` | scopes requested and required |
+| `CBIOPORTAL_MCP_OIDC_USER_ID_CLAIM` | `sub` | `enduser.id` |
+| `CBIOPORTAL_MCP_OIDC_EMAIL_CLAIM` | `email` | email (authorities source, `enduser.email`) |
+| `CBIOPORTAL_MCP_OIDC_EMAIL_VERIFIED_CLAIM` | `email_verified` | must be JSON `true` for the email to count |
+| `CBIOPORTAL_MCP_OIDC_GROUPS_CLAIM` | – | groups (acl source) |
+| `CBIOPORTAL_MCP_OIDC_STUDIES_CLAIM` | – (required for `jwt`) | array of study IDs |
+| `CBIOPORTAL_MCP_OIDC_STUDIES_CLAIM_PREFIX` | – | keep only values with this prefix, prefix removed |
+| `CBIOPORTAL_MCP_OIDC_REQUIRE_CONSENT` | `true` | FastMCP's consent screen before the IdP login |
+
+Claim paths are an exact top-level claim name first (so namespaced claims
+such as `https://example.org/studies` work), otherwise dot-separated
+(`realm_access.roles`). With `STUDY_ACCESS_SOURCE=jwt` a token with no
+studies claim, a non-array claim or an invalid study ID is **denied**; it
+never falls back to ACL entries. An empty array means no studies.
+
+**Email verification.** For `oidc` an email counts only when the token's
+`email_verified` is exactly `true`. Missing, `false`, `"true"`, `1` or an
+error reading the token all fail closed (the authorities source denies;
+telemetry omits `enduser.email`). Some IdPs never emit `email_verified` in
+access tokens; `CBIOPORTAL_MCP_OIDC_TRUST_EMAIL_WITHOUT_VERIFIED_CLAIM=true`
+then accepts an email whose claim is *absent* (never one that says `false`).
+That is a trust decision: enable it only if the IdP itself only issues
+verified addresses (e.g. directory-managed accounts). Google deployments are
+unaffected: they still require Google's own `verified_email`.
+
+Keycloak (MSK's existing realm; studies as realm roles `cbioportal:<id>`):
+
+```bash
+export CBIOPORTAL_MCP_AUTH_PROVIDER=oidc
+export CBIOPORTAL_MCP_STUDY_ACCESS_MODE=restricted
+export CBIOPORTAL_MCP_STUDY_ACCESS_SOURCE=jwt
+export CBIOPORTAL_MCP_CLICKHOUSE_ROW_POLICY_ENABLED=true
+export CBIOPORTAL_MCP_OIDC_ISSUER_URL=https://keycloak.example.org/realms/cbioportal
+export CBIOPORTAL_MCP_OIDC_CLIENT_ID=cbioportal-mcp
+export CBIOPORTAL_MCP_OIDC_CLIENT_SECRET=...
+export CBIOPORTAL_MCP_OIDC_BASE_URL=https://mcp.example.org
+export CBIOPORTAL_MCP_OIDC_AUDIENCE=cbioportal-mcp   # add an audience mapper to the client
+export CBIOPORTAL_MCP_OIDC_STUDIES_CLAIM=realm_access.roles
+export CBIOPORTAL_MCP_OIDC_STUDIES_CLAIM_PREFIX=cbioportal:
+export CBIOPORTAL_MCP_OIDC_GROUPS_CLAIM=groups
+export REDIS_URL=redis://:password@host:6379/1
+```
+
+Okta (custom authorization server; login in `sub`, user id in `uid`, a
+custom `cbio_studies` claim, no `email_verified` in access tokens):
+
+```bash
+export CBIOPORTAL_MCP_AUTH_PROVIDER=oidc
+export CBIOPORTAL_MCP_STUDY_ACCESS_MODE=restricted
+export CBIOPORTAL_MCP_STUDY_ACCESS_SOURCE=jwt
+export CBIOPORTAL_MCP_CLICKHOUSE_ROW_POLICY_ENABLED=true
+export CBIOPORTAL_MCP_OIDC_ISSUER_URL=https://example.okta.com/oauth2/default
+export CBIOPORTAL_MCP_OIDC_CLIENT_ID=0oa...
+export CBIOPORTAL_MCP_OIDC_CLIENT_SECRET=...
+export CBIOPORTAL_MCP_OIDC_BASE_URL=https://mcp.example.org
+export CBIOPORTAL_MCP_OIDC_AUDIENCE=api://default
+export CBIOPORTAL_MCP_OIDC_USER_ID_CLAIM=uid
+export CBIOPORTAL_MCP_OIDC_STUDIES_CLAIM=cbio_studies
+export CBIOPORTAL_MCP_OIDC_GROUPS_CLAIM=groups
+```
+
+**Base URL behind Traefik / a path prefix.** No new setting is needed, but
+the OAuth routes FastMCP adds (`/authorize`, `/token`, `/register`,
+`/auth/callback`, `/consent`, `/.well-known/oauth-authorization-server`,
+`/.well-known/oauth-protected-resource...`) are mounted at the server's
+root, not under `CLICKHOUSE_MCP_HTTP_PATH`. Set
+`CBIOPORTAL_MCP_OIDC_BASE_URL` to the origin with no path
+(`https://mcp.example.org`) and route those paths to the pod as well as the
+MCP path; a base URL with a path prefix only works if the proxy strips that
+prefix before the pod. Behind a TLS-terminating proxy also set
+`CLICKHOUSE_MCP_FORWARDED_ALLOW_IPS`, as for Google. This is the same rule
+that applies to `CBIOPORTAL_MCP_GOOGLE_BASE_URL` today.
+
+**Redis.** OIDC uses the same `REDIS_URL` with its own key namespace
+(collections prefixed `cbioportal-mcp-oidc`, encrypted under a key derived
+from the OIDC client secret). Google's keys and paths are unchanged, so a
+deployment can switch provider and back without invalidating either set of
+sessions.
+
+#### Private: SAML portals, pasted Data Access Token (`portal_dat`)
+
+The MCP cannot perform a portal's SAML login, and nothing is changed on the
+portal side. Instead each user downloads a Data Access Token from the portal
+(`dat.method=uuid` or `oauth2`) and configures their MCP client to send it in
+an `x-auth-token` header. This is a deliberate manual step.
+
+```bash
+export CBIOPORTAL_MCP_AUTH_PROVIDER=portal_dat
+export CBIOPORTAL_MCP_STUDY_ACCESS_MODE=restricted
+export CBIOPORTAL_MCP_STUDY_ACCESS_SOURCE=portal_dat
+export CBIOPORTAL_MCP_CLICKHOUSE_ROW_POLICY_ENABLED=true
+export CBIOPORTAL_MCP_PORTAL_URL=https://portal.example.org         # https only
+export CBIOPORTAL_MCP_PORTAL_DAT_HMAC_SECRET=$(openssl rand -hex 32) # >= 32 chars, stable
+export CBIOPORTAL_MCP_PORTAL_CONFIRM_SHOW_UNAUTHORIZED_STUDIES_OFF=true
+# optional
+export CBIOPORTAL_MCP_PORTAL_DAT_CACHE_SECONDS=30     # 0..300
+export CBIOPORTAL_MCP_PORTAL_TIMEOUT_SECONDS=10
+export CBIOPORTAL_MCP_PORTAL_USERNAMES_ARE_EMAILS=false
+```
+
+What the MCP does, and nothing else (it only ever makes GET requests, to the
+configured portal URL, never one from the client):
+
+- **Studies**: `GET /api/studies?projection=SUMMARY` with
+  `Authorization: Bearer <DAT>`. The allowed studies are exactly the
+  returned list; `readPermission` is ignored. At cBioPortal 5677496 (and
+  v7.0.0 through v7.2.4) this route is filtered to studies the token can READ
+  (`@PostFilter`). Newer portals also list unreadable studies when
+  `skin.home_page.show_unauthorized_studies=true`, so the deployment must
+  confirm that is off. **Minimum portal version: v7.0.0.** Before trusting a
+  portal the MCP checks that it refuses an anonymous study list; a portal
+  with `authenticate=false` (or `optional_oauth2` without method
+  authorization) serves `/api` unfiltered and every token is denied.
+- **Owner (telemetry only, never access)**: `GET /api/data-access-tokens`
+  with the token in the header; only `username` is kept and the rest -
+  including every token secret in that response - is discarded at once.
+  `enduser.id` becomes `portal:<host>:<username>`. When that fails (a portal
+  that restricts token listing, or an oauth2 portal, which doesn't list
+  tokens), an oauth2 (JWT-shaped) token
+  yields its unverified `sub` as a hint (`portal:<host>:sub:<sub>`),
+  otherwise an HMAC fingerprint (`portal:<host>:fp:<hmac>`). `enduser.email`
+  is set only with `CBIOPORTAL_MCP_PORTAL_USERNAMES_ARE_EMAILS=true`. The MCP
+  never calls `/api/data-access-tokens/{token}` and never POSTs or DELETEs.
+- **Cache**: the lookup is cached per token for
+  `CBIOPORTAL_MCP_PORTAL_DAT_CACHE_SECONDS` (default 30), keyed by portal
+  plus an HMAC of the token, and never past the token's known expiry. A
+  revoked token stops working within that window; a portal error, timeout,
+  redirect or malformed response denies.
+- **Secrets**: the raw token never appears in logs, span tags, LLMObs
+  metadata, exception messages or cache keys (`tests/test_portal_dat.py`
+  checks success and failure paths with DEBUG logging on).
+
+**A DAT is a full portal credential.** Anyone holding it can read
+everything its owner can read in the portal, through the portal's own API,
+until it expires - not just through the MCP. Treat it like a password: keep
+it only in the MCP client's secret storage, never in a prompt or a shared
+config. If a token may have leaked, **revoke all of your tokens** in the
+portal (and download a new one), not just the one you think leaked: a uuid
+portal can hold several live tokens per user, and you cannot tell which copy
+was exposed. Note also that the portal itself may log rejected or invalid
+tokens on its side (e.g. failed-authentication logs); that is outside the
+MCP's control.
+
 ### Datadog Tool Metrics
 
 The server emits one OpenTelemetry span per MCP tool call and can also emit

@@ -1,6 +1,7 @@
 """Environment configuration for cBioPortal MCP server."""
 
 import os
+import re
 from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
@@ -40,10 +41,30 @@ class StudyAccessSource(str, Enum):
     # Option A: the MCP sends only the caller's verified email; ClickHouse
     # resolves the studies from cBioPortal's authorities table (user_study).
     AUTHORITIES = "authorities"
+    # A claim of the access token the OIDC provider verified (provider oidc).
+    JWT = "jwt"
+    # The studies a cBioPortal Data Access Token can read, as the portal
+    # itself lists them (provider portal_dat).
+    PORTAL_DAT = "portal_dat"
 
     @classmethod
     def values(cls) -> list[str]:
         return [source.value for source in cls]
+
+
+class AuthProvider(str, Enum):
+    """How callers log in to this deployment (CBIOPORTAL_MCP_AUTH_PROVIDER)."""
+
+    # FastMCP's GoogleProvider (the public deployment; unchanged default).
+    GOOGLE = "google"
+    # Any standards-based OIDC issuer (Keycloak, Okta, Entra ID, ...).
+    OIDC = "oidc"
+    # The caller pastes a cBioPortal Data Access Token (x-auth-token header).
+    PORTAL_DAT = "portal_dat"
+
+    @classmethod
+    def values(cls) -> list[str]:
+        return [provider.value for provider in cls]
 
 
 class StudyAccessIdentity(str, Enum):
@@ -70,6 +91,28 @@ def _parse_bool_env(name: str, default: bool) -> bool:
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "t", "yes", "y", "on"}
+
+
+def _optional_env(name: str) -> Optional[str]:
+    value = os.getenv(name)
+    if value is None:
+        return None
+    value = value.strip()
+    return value or None
+
+
+def _bounded_float_env(name: str, default: float, low: float, high: float) -> float:
+    """A float setting in [low, high]; anything else raises ValueError (fail closed)."""
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a number, got {raw!r}") from exc
+    if not (low <= value <= high):  # also rejects NaN
+        raise ValueError(f"{name} must be between {low:g} and {high:g}, got {raw!r}")
+    return value
 
 
 @dataclass
@@ -370,6 +413,159 @@ class McpConfig:
         """
         value = os.getenv("CBIOPORTAL_MCP_GOOGLE_BASE_URL")
         return value if value else None
+
+    # --- login provider (CBIOPORTAL_MCP_AUTH_PROVIDER) -----------------------
+
+    @property
+    def auth_provider(self) -> str:
+        """CBIOPORTAL_MCP_AUTH_PROVIDER: ``google`` (default), ``oidc`` or ``portal_dat``.
+
+        One provider per deployment. ``google`` is exactly the pre-existing
+        behavior (OAuth on only when all three CBIOPORTAL_MCP_GOOGLE_* are set).
+        """
+        provider = (
+            os.getenv("CBIOPORTAL_MCP_AUTH_PROVIDER", AuthProvider.GOOGLE.value).strip().lower()
+        )
+        if provider not in AuthProvider.values():
+            valid = ", ".join(f'"{p}"' for p in AuthProvider.values())
+            raise ValueError(f"Invalid auth provider '{provider}'. Valid options: {valid}")
+        return provider
+
+    @property
+    def google_oauth_configured(self) -> bool:
+        return bool(self.google_client_id and self.google_client_secret and self.google_base_url)
+
+    # OIDC (provider oidc). Generic: nothing here is specific to one IdP.
+
+    @property
+    def oidc_issuer_url(self) -> Optional[str]:
+        """The IdP's issuer, exactly as it appears in tokens' ``iss`` claim."""
+        return _optional_env("CBIOPORTAL_MCP_OIDC_ISSUER_URL")
+
+    @property
+    def oidc_config_url(self) -> Optional[str]:
+        """Discovery document URL; default ``<issuer>/.well-known/openid-configuration``."""
+        explicit = _optional_env("CBIOPORTAL_MCP_OIDC_CONFIG_URL")
+        if explicit:
+            return explicit
+        issuer = self.oidc_issuer_url
+        return issuer.rstrip("/") + "/.well-known/openid-configuration" if issuer else None
+
+    @property
+    def oidc_client_id(self) -> Optional[str]:
+        return _optional_env("CBIOPORTAL_MCP_OIDC_CLIENT_ID")
+
+    @property
+    def oidc_client_secret(self) -> Optional[str]:
+        return _optional_env("CBIOPORTAL_MCP_OIDC_CLIENT_SECRET")
+
+    @property
+    def oidc_base_url(self) -> Optional[str]:
+        """This server's public URL (OAuth callback = base URL + /auth/callback)."""
+        return _optional_env("CBIOPORTAL_MCP_OIDC_BASE_URL")
+
+    @property
+    def oidc_audience(self) -> Optional[str]:
+        """Required ``aud`` of access tokens; comma-separated values are all accepted."""
+        return _optional_env("CBIOPORTAL_MCP_OIDC_AUDIENCE")
+
+    @property
+    def oidc_audiences(self) -> list[str]:
+        raw = self.oidc_audience or ""
+        return [part.strip() for part in raw.split(",") if part.strip()]
+
+    @property
+    def oidc_scopes(self) -> list[str]:
+        raw = os.getenv("CBIOPORTAL_MCP_OIDC_SCOPES") or "openid email profile"
+        return [part for part in re.split(r"[\s,]+", raw) if part]
+
+    @property
+    def oidc_signing_algorithm(self) -> str:
+        return (_optional_env("CBIOPORTAL_MCP_OIDC_SIGNING_ALGORITHM") or "RS256").upper()
+
+    @property
+    def oidc_user_id_claim(self) -> str:
+        return _optional_env("CBIOPORTAL_MCP_OIDC_USER_ID_CLAIM") or "sub"
+
+    @property
+    def oidc_email_claim(self) -> str:
+        return _optional_env("CBIOPORTAL_MCP_OIDC_EMAIL_CLAIM") or "email"
+
+    @property
+    def oidc_groups_claim(self) -> Optional[str]:
+        """Claim path holding the caller's groups (used by acl group entries)."""
+        return _optional_env("CBIOPORTAL_MCP_OIDC_GROUPS_CLAIM")
+
+    @property
+    def oidc_email_verified_claim(self) -> str:
+        return _optional_env("CBIOPORTAL_MCP_OIDC_EMAIL_VERIFIED_CLAIM") or "email_verified"
+
+    @property
+    def oidc_trust_email_without_verified_claim(self) -> bool:
+        """Trust decision for IdPs that never emit ``email_verified``.
+
+        Off by default. When on, a token *without* the verified claim is
+        accepted (the IdP is trusted to only issue verified addresses); a
+        token whose claim is present but not exactly ``true`` is still refused.
+        """
+        return _parse_bool_env("CBIOPORTAL_MCP_OIDC_TRUST_EMAIL_WITHOUT_VERIFIED_CLAIM", False)
+
+    @property
+    def oidc_studies_claim(self) -> Optional[str]:
+        """Claim path the ``jwt`` study source reads, e.g. ``realm_access.roles``."""
+        return _optional_env("CBIOPORTAL_MCP_OIDC_STUDIES_CLAIM")
+
+    @property
+    def oidc_studies_claim_prefix(self) -> Optional[str]:
+        """Only values starting with this are studies; the prefix is stripped."""
+        return _optional_env("CBIOPORTAL_MCP_OIDC_STUDIES_CLAIM_PREFIX")
+
+    @property
+    def oidc_require_consent(self) -> bool:
+        return _parse_bool_env("CBIOPORTAL_MCP_OIDC_REQUIRE_CONSENT", True)
+
+    @property
+    def oidc_allow_insecure_http_for_local_testing(self) -> bool:
+        return _parse_bool_env("CBIOPORTAL_MCP_OIDC_ALLOW_INSECURE_HTTP_FOR_LOCAL_TESTING", False)
+
+    # cBioPortal Data Access Tokens (provider portal_dat).
+
+    @property
+    def portal_url(self) -> Optional[str]:
+        """The portal the DAT is checked against. Deployment config only, never the client."""
+        return _optional_env("CBIOPORTAL_MCP_PORTAL_URL")
+
+    @property
+    def portal_allow_insecure_http_for_local_testing(self) -> bool:
+        return _parse_bool_env("CBIOPORTAL_MCP_PORTAL_ALLOW_INSECURE_HTTP_FOR_LOCAL_TESTING", False)
+
+    @property
+    def portal_dat_cache_seconds(self) -> float:
+        return _bounded_float_env("CBIOPORTAL_MCP_PORTAL_DAT_CACHE_SECONDS", 30.0, 0.0, 300.0)
+
+    @property
+    def portal_timeout_seconds(self) -> float:
+        return _bounded_float_env("CBIOPORTAL_MCP_PORTAL_TIMEOUT_SECONDS", 10.0, 0.5, 60.0)
+
+    @property
+    def portal_dat_hmac_secret(self) -> Optional[str]:
+        """Deployment secret keying DAT cache keys and telemetry fingerprints."""
+        return _optional_env("CBIOPORTAL_MCP_PORTAL_DAT_HMAC_SECRET")
+
+    @property
+    def portal_usernames_are_emails(self) -> bool:
+        """Set only when the portal's usernames are email addresses (telemetry only)."""
+        return _parse_bool_env("CBIOPORTAL_MCP_PORTAL_USERNAMES_ARE_EMAILS", False)
+
+    @property
+    def portal_confirm_show_unauthorized_studies_off(self) -> bool:
+        """Operator confirmation that the portal lists only readable studies.
+
+        With ``skin.home_page.show_unauthorized_studies=true`` newer portals
+        add unreadable studies to ``GET /api/studies``; the MCP cannot see
+        that property, so portal_dat refuses to start without this.
+        """
+        return _parse_bool_env("CBIOPORTAL_MCP_PORTAL_CONFIRM_SHOW_UNAUTHORIZED_STUDIES_OFF", False)
 
     @property
     def redis_url(self) -> Optional[str]:

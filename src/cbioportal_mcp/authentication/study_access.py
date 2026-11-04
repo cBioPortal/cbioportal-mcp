@@ -30,6 +30,7 @@ from cbioportal_mcp.authentication.row_policy_catalog import (
     STUDY_AGNOSTIC_REFERENCE_TABLES as _CATALOG_REFERENCE_TABLES,
 )
 from cbioportal_mcp.env import (
+    AuthProvider,
     McpConfig,
     StudyAccessIdentity,
     StudyAccessMode,
@@ -356,26 +357,48 @@ def _google_email_verified(claims: dict, email: str) -> bool:
     return False
 
 
-def verified_oauth_identity() -> tuple[str | None, str]:
-    """(sub, email) from the access token FastMCP validated for this request.
+def verified_oauth_identity(config: McpConfig | None = None) -> tuple[str | None, str]:
+    """(user id, email) from the access token FastMCP validated for this request.
 
-    Identity and verification are read from the same token object. Fails
-    closed: no token, a token that can't be read, a missing/non-string email,
-    or no positive Google verification for that email all raise
-    AuthorizationError.
+    Identity and verification are read from the same token object, the way
+    the deployment's provider defines it:
+
+    - ``google``: ``sub``/``email`` with positive Google verification
+      (``verified_email`` exactly True in a Google record for that email).
+    - ``oidc``: the configured user-id/email claims, with the standard
+      ``email_verified`` exactly ``true`` (or absent, only under the explicit
+      CBIOPORTAL_MCP_OIDC_TRUST_EMAIL_WITHOUT_VERIFIED_CLAIM opt-out).
+    - ``portal_dat``: never - a DAT owner is not a verified email.
+
+    Fails closed: no token, a token that can't be read, a missing/non-string
+    email, or no positive verification all raise AuthorizationError.
     """
+    config = config or get_mcp_config()
     try:
         from fastmcp.server.dependencies import get_access_token
 
         token = get_access_token()
     except Exception as exc:
-        logger.warning("Could not read the validated access token: %s", exc)
-        raise AuthorizationError(_UNVERIFIED_MESSAGE) from exc
+        logger.warning("Could not read the validated access token: %s", type(exc).__name__)
+        raise AuthorizationError(_UNVERIFIED_MESSAGE) from None
     if token is None:
         raise AuthorizationError(_UNVERIFIED_MESSAGE)
     claims = getattr(token, "claims", None)
     if not isinstance(claims, dict):
         raise AuthorizationError(_UNVERIFIED_MESSAGE)
+
+    provider = config.auth_provider
+    if provider == AuthProvider.OIDC.value:
+        from cbioportal_mcp.authentication.caller import claim_value, oidc_email_verified
+
+        email = claim_value(claims, config.oidc_email_claim)
+        if not isinstance(email, str) or not email or not oidc_email_verified(claims, config):
+            raise AuthorizationError(_UNVERIFIED_MESSAGE)
+        sub = claim_value(claims, config.oidc_user_id_claim)
+        return (sub if isinstance(sub, str) and sub else None), email
+    if provider != AuthProvider.GOOGLE.value:
+        raise AuthorizationError(_UNVERIFIED_MESSAGE)
+
     email = claims.get("email")
     if not isinstance(email, str) or not email or not _google_email_verified(claims, email):
         raise AuthorizationError(_UNVERIFIED_MESSAGE)
@@ -405,7 +428,7 @@ def verified_caller_identity(config: McpConfig | None = None) -> RequestIdentity
         user_id, raw_email = headers_identity.user_id, headers_identity.user_email
         client = "authenticated-proxy"
     else:
-        user_id, raw_email = verified_oauth_identity()
+        user_id, raw_email = verified_oauth_identity(config)
         client = "oauth"
     email = normalize_email(raw_email)
     if not email:
@@ -480,9 +503,32 @@ def study_access_cache_partition(config: McpConfig | None = None) -> str | None:
     if config.study_access_mode == StudyAccessMode.PUBLIC.value:
         return None
     access = get_current_study_access(config)
+    if token_sourced_studies(config):
+        # Per caller as well as per allowlist: the identity is the provider's
+        # (namespaced) user id, never something the client chose.
+        studies = ",".join(sorted(access.studies))
+        return f"caller:{config.auth_provider}:{access.identity.user_id or ''}|studies:{studies}"
     if access.all_studies:
         return "studies:*"
     return "studies:" + ",".join(sorted(access.studies))
+
+
+def token_sourced_studies(config: McpConfig) -> bool:
+    """Restricted mode with studies from the login token (jwt) or the portal (portal_dat)."""
+    return config.study_access_mode == StudyAccessMode.RESTRICTED.value and (
+        config.study_access_source
+        in (StudyAccessSource.JWT.value, StudyAccessSource.PORTAL_DAT.value)
+    )
+
+
+def _oidc_acl_identity(config: McpConfig) -> RequestIdentity:
+    from cbioportal_mcp.authentication.caller import resolve_caller_identity
+
+    caller = resolve_caller_identity(config, strict=True)
+    email = normalize_email(caller.email) if caller.email_verified else None
+    return RequestIdentity(
+        user_id=caller.user_id, user_email=email, groups=caller.groups, client=caller.client_kind
+    )
 
 
 def get_current_study_access(config: McpConfig | None = None) -> StudyAccess:
@@ -504,25 +550,50 @@ def get_current_study_access(config: McpConfig | None = None) -> StudyAccess:
             studies=entitled_studies(identity.user_email or "", config),
         )
 
-    identity = extract_request_identity(config)
+    if token_sourced_studies(config):
+        # jwt / portal_dat: the studies come only from the verified token or
+        # the portal's own list - never the ACL file, allowlist headers, admin
+        # groups or CBIOPORTAL_MCP_ALLOWED_STUDIES (startup refuses those).
+        from cbioportal_mcp.authentication.caller import resolve_caller_identity
+
+        caller = resolve_caller_identity(config, include_studies=True)
+        identity = RequestIdentity(
+            user_id=caller.user_id,
+            user_email=caller.email if caller.email_verified else None,
+            groups=caller.groups,
+            client=caller.client_kind,
+        )
+        return StudyAccess(
+            identity=identity, all_studies=False, studies=frozenset(caller.studies or ())
+        )
 
     if config.study_access_mode == StudyAccessMode.PUBLIC.value:
-        return StudyAccess(identity=identity, all_studies=True, studies=frozenset())
+        return StudyAccess(
+            identity=extract_request_identity(config), all_studies=True, studies=frozenset()
+        )
 
-    _verify_proxy_secret(config)
+    oidc_acl = config.auth_provider == AuthProvider.OIDC.value
+    if oidc_acl:
+        # acl with OIDC login: users/groups come from the verified token; the
+        # email is an ACL key only when verified. No proxy headers are read.
+        identity = _oidc_acl_identity(config)
+    else:
+        identity = extract_request_identity(config)
+        _verify_proxy_secret(config)
 
     if config.auth_required and not identity.present:
         raise AuthorizationError("Authentication is required for this cBioPortal MCP deployment.")
 
     allowed: set[str] = set(parse_list_value(config.global_allowed_studies))
 
-    try:
-        from fastmcp.server.dependencies import get_http_headers
+    if not oidc_acl:
+        try:
+            from fastmcp.server.dependencies import get_http_headers
 
-        headers = _normalise_headers(get_http_headers(include_all=True))
-    except Exception:
-        headers = {}
-    allowed.update(parse_list_value(headers.get(config.allowed_studies_header)))
+            headers = _normalise_headers(get_http_headers(include_all=True))
+        except Exception:
+            headers = {}
+        allowed.update(parse_list_value(headers.get(config.allowed_studies_header)))
 
     admin_groups = set(parse_list_value(config.auth_admin_groups))
     if admin_groups.intersection(identity.groups):
@@ -550,16 +621,36 @@ def validate_study_access_startup_config(config: McpConfig | None = None) -> Non
     that.
     """
     config = config or get_mcp_config()
+    try:
+        _validate_auth_provider_startup_config(config)
+    except ValueError as exc:  # unparseable settings are unsafe too
+        if isinstance(exc, StudyAccessConfigError):
+            raise
+        raise StudyAccessConfigError(str(exc)) from None
+
     if config.study_access_mode != StudyAccessMode.RESTRICTED.value:
-        if config.study_access_source == StudyAccessSource.AUTHORITIES.value:
+        if config.study_access_source != StudyAccessSource.ACL.value:
             logger.warning(
-                "CBIOPORTAL_MCP_STUDY_ACCESS_SOURCE=authorities is ignored because "
-                "CBIOPORTAL_MCP_STUDY_ACCESS_MODE is not restricted."
+                "CBIOPORTAL_MCP_STUDY_ACCESS_SOURCE=%s is ignored because "
+                "CBIOPORTAL_MCP_STUDY_ACCESS_MODE is not restricted.",
+                config.study_access_source,
             )
         return
 
     if config.study_access_source == StudyAccessSource.AUTHORITIES.value:
         _validate_authorities_startup_config(config)
+        return
+
+    if token_sourced_studies(config):
+        return  # fully checked in _validate_auth_provider_startup_config
+
+    if config.auth_provider == AuthProvider.OIDC.value:
+        # acl with OIDC login: identity is the verified token, no proxy headers.
+        if not config.clickhouse_row_policy_enabled:
+            logger.warning(
+                "CBIOPORTAL_MCP_STUDY_ACCESS_MODE=restricted is running without "
+                "CBIOPORTAL_MCP_CLICKHOUSE_ROW_POLICY_ENABLED=true (app-level SQL guard only)."
+            )
         return
 
     if not config.auth_proxy_secret:
@@ -606,7 +697,13 @@ def _validate_authorities_startup_config(config: McpConfig) -> None:
                 "CBIOPORTAL_MCP_AUTH_PROXY_SECRET: without it anyone who can reach the server "
                 "could set the email header themselves."
             )
-    elif not (config.google_client_id and config.google_client_secret and config.google_base_url):
+    elif config.auth_provider == AuthProvider.PORTAL_DAT.value:
+        raise StudyAccessConfigError(
+            "CBIOPORTAL_MCP_STUDY_ACCESS_SOURCE=authorities needs a verified email, which "
+            "CBIOPORTAL_MCP_AUTH_PROVIDER=portal_dat cannot supply; use "
+            "CBIOPORTAL_MCP_STUDY_ACCESS_SOURCE=portal_dat."
+        )
+    elif config.auth_provider == AuthProvider.GOOGLE.value and not config.google_oauth_configured:
         raise StudyAccessConfigError(
             "CBIOPORTAL_MCP_STUDY_ACCESS_IDENTITY=oauth requires the MCP's own OAuth login "
             "(CBIOPORTAL_MCP_GOOGLE_CLIENT_ID, _CLIENT_SECRET and _BASE_URL); otherwise no "
@@ -628,6 +725,142 @@ def _validate_authorities_startup_config(config: McpConfig) -> None:
             "only from cBioPortal's authorities table via ClickHouse.",
             ", ".join(ignored),
         )
+
+
+_ASYMMETRIC_JWT_ALGORITHMS = frozenset(
+    {"RS256", "RS384", "RS512", "PS256", "PS384", "PS512", "ES256", "ES384", "ES512"}
+)
+
+
+def _require_https(name: str, value: str, allow_http: bool, override_name: str) -> None:
+    from urllib.parse import urlparse
+
+    parsed = urlparse(value)
+    if parsed.scheme not in {"https", "http"} or not parsed.hostname:
+        raise StudyAccessConfigError(f"{name} must be an absolute https:// URL.")
+    if parsed.scheme == "http" and not allow_http:
+        raise StudyAccessConfigError(
+            f"{name} must use https; {override_name}=true allows http for local tests only."
+        )
+
+
+def _validate_auth_provider_startup_config(config: McpConfig) -> None:
+    """Refuse provider/source combinations that can't authenticate or authorize safely."""
+    provider = config.auth_provider  # ValueError on an unknown provider
+    restricted = config.study_access_mode == StudyAccessMode.RESTRICTED.value
+    source = config.study_access_source
+
+    if provider == AuthProvider.OIDC.value:
+        missing = [
+            name
+            for name, value in (
+                ("CBIOPORTAL_MCP_OIDC_ISSUER_URL", config.oidc_issuer_url),
+                ("CBIOPORTAL_MCP_OIDC_CLIENT_ID", config.oidc_client_id),
+                ("CBIOPORTAL_MCP_OIDC_CLIENT_SECRET", config.oidc_client_secret),
+                ("CBIOPORTAL_MCP_OIDC_BASE_URL", config.oidc_base_url),
+                ("CBIOPORTAL_MCP_OIDC_AUDIENCE", config.oidc_audiences),
+            )
+            if not value
+        ]
+        if missing:
+            raise StudyAccessConfigError(
+                "CBIOPORTAL_MCP_AUTH_PROVIDER=oidc requires " + ", ".join(missing) + "."
+            )
+        allow_http = config.oidc_allow_insecure_http_for_local_testing
+        override = "CBIOPORTAL_MCP_OIDC_ALLOW_INSECURE_HTTP_FOR_LOCAL_TESTING"
+        for name, value in (
+            ("CBIOPORTAL_MCP_OIDC_ISSUER_URL", config.oidc_issuer_url),
+            ("CBIOPORTAL_MCP_OIDC_CONFIG_URL", config.oidc_config_url),
+            ("CBIOPORTAL_MCP_OIDC_BASE_URL", config.oidc_base_url),
+        ):
+            _require_https(name, value or "", allow_http, override)
+        if config.oidc_signing_algorithm not in _ASYMMETRIC_JWT_ALGORITHMS:
+            raise StudyAccessConfigError(
+                "CBIOPORTAL_MCP_OIDC_SIGNING_ALGORITHM must be an asymmetric JWS algorithm "
+                "verifiable against the issuer's JWKS (e.g. RS256, ES256)."
+            )
+        if not restricted:
+            raise StudyAccessConfigError(
+                "CBIOPORTAL_MCP_AUTH_PROVIDER=oidc is for private deployments: set "
+                "CBIOPORTAL_MCP_STUDY_ACCESS_MODE=restricted (public deployments use Google)."
+            )
+
+    if provider == AuthProvider.PORTAL_DAT.value:
+        from cbioportal_mcp.authentication.portal_dat import portal_base_url
+
+        try:
+            portal_base_url(config)
+        except ValueError as exc:
+            raise StudyAccessConfigError(str(exc)) from None
+        secret = config.portal_dat_hmac_secret
+        if not secret or len(secret) < 32:
+            raise StudyAccessConfigError(
+                "CBIOPORTAL_MCP_AUTH_PROVIDER=portal_dat requires "
+                "CBIOPORTAL_MCP_PORTAL_DAT_HMAC_SECRET (at least 32 characters): it keys the "
+                "token cache and telemetry fingerprints so no raw token is ever stored."
+            )
+        config.portal_dat_cache_seconds  # noqa: B018 - raises ValueError when invalid
+        config.portal_timeout_seconds  # noqa: B018
+        if not config.portal_confirm_show_unauthorized_studies_off:
+            raise StudyAccessConfigError(
+                "CBIOPORTAL_MCP_AUTH_PROVIDER=portal_dat requires "
+                "CBIOPORTAL_MCP_PORTAL_CONFIRM_SHOW_UNAUTHORIZED_STUDIES_OFF=true: confirm the "
+                "portal runs with skin.home_page.show_unauthorized_studies=false, otherwise "
+                "newer portals list studies the token cannot read."
+            )
+        if not restricted:
+            raise StudyAccessConfigError(
+                "CBIOPORTAL_MCP_AUTH_PROVIDER=portal_dat is for private deployments: set "
+                "CBIOPORTAL_MCP_STUDY_ACCESS_MODE=restricted."
+            )
+        if source != StudyAccessSource.PORTAL_DAT.value:
+            raise StudyAccessConfigError(
+                "CBIOPORTAL_MCP_AUTH_PROVIDER=portal_dat supplies no identity for "
+                f"CBIOPORTAL_MCP_STUDY_ACCESS_SOURCE={source}; use "
+                "CBIOPORTAL_MCP_STUDY_ACCESS_SOURCE=portal_dat."
+            )
+
+    if not restricted:
+        return
+    if source == StudyAccessSource.JWT.value:
+        if provider != AuthProvider.OIDC.value:
+            raise StudyAccessConfigError(
+                "CBIOPORTAL_MCP_STUDY_ACCESS_SOURCE=jwt reads a claim of an OIDC access token "
+                "the MCP verified itself; it requires CBIOPORTAL_MCP_AUTH_PROVIDER=oidc."
+            )
+        if not config.oidc_studies_claim:
+            raise StudyAccessConfigError(
+                "CBIOPORTAL_MCP_STUDY_ACCESS_SOURCE=jwt requires CBIOPORTAL_MCP_OIDC_STUDIES_CLAIM."
+            )
+    if source == StudyAccessSource.PORTAL_DAT.value and provider != AuthProvider.PORTAL_DAT.value:
+        raise StudyAccessConfigError(
+            "CBIOPORTAL_MCP_STUDY_ACCESS_SOURCE=portal_dat requires "
+            "CBIOPORTAL_MCP_AUTH_PROVIDER=portal_dat (the token is the login)."
+        )
+    if token_sourced_studies(config):
+        if not config.clickhouse_row_policy_enabled:
+            raise StudyAccessConfigError(
+                f"CBIOPORTAL_MCP_STUDY_ACCESS_SOURCE={source} requires "
+                "CBIOPORTAL_MCP_CLICKHOUSE_ROW_POLICY_ENABLED=true and the acl policy set "
+                "(sql/study-authz/0-row-policies.sql): restricted access must be enforced "
+                "by ClickHouse, not only the app-level SQL guard."
+            )
+        merged = [
+            name
+            for name, value in (
+                ("CBIOPORTAL_MCP_STUDY_ACL_FILE", config.study_acl_file),
+                ("CBIOPORTAL_MCP_ALLOWED_STUDIES", config.global_allowed_studies),
+                ("CBIOPORTAL_MCP_AUTH_ADMIN_GROUPS", config.auth_admin_groups),
+            )
+            if value
+        ]
+        if merged:
+            raise StudyAccessConfigError(
+                f"CBIOPORTAL_MCP_STUDY_ACCESS_SOURCE={source} takes studies only from "
+                f"{'the verified token' if source == 'jwt' else 'the portal'}; unset "
+                + ", ".join(merged)
+                + " (they are never merged in)."
+            )
 
 
 def clickhouse_user_setting_name(config: McpConfig) -> str:
