@@ -28,7 +28,7 @@ from __future__ import annotations
 import re
 
 # Group / app names end up inside generated SQL string literals.
-NAME_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+NAME_RE = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
 
 
 def validate_name(kind: str, value: str) -> str:

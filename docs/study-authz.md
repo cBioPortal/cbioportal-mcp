@@ -41,6 +41,46 @@ after every policy. Everyone except the target gets `USING 1`. The policies
 are scoped to this one database, so the target's access to its other
 databases is unchanged.
 
+### Policy ownership: the tool owns every row policy on the target database
+
+ClickHouse ORs PERMISSIVE row policies together. The catch-all
+`USING 1 TO ALL EXCEPT <target>` (needed so admins and the refresh view still
+see every row) is therefore OR-ed with any policy someone else already has on
+these tables. Without a guard, that would silently **widen** them.
+
+For example, a user `outsider` limited by `USING cancer_study_id = 1` would
+see every study after `apply`. A foreign policy `TO <target>` would also widen
+the target itself.
+
+The tool therefore treats every row policy on the target database as its own,
+and identifies its policies by the name prefix `cbioportal_mcp_`:
+
+- **`apply` refuses** if the database has any row policy not named
+  `cbioportal_mcp_*`, and lists the conflicting policies. It checks before
+  making any change.
+- **`apply` also refuses to switch targets.** It refuses if the existing
+  `cbioportal_mcp_*` policies are attached to a different target. Switching
+  would move the old target into `ALL EXCEPT <new target>`, unfiltered. To
+  switch, drop the old policies first (see Rollback in the generated SQL).
+- **Re-applying to the same target is allowed.** Policies use
+  `CREATE ... OR REPLACE`.
+- **`check` fails in both situations**, so a foreign policy added after
+  `apply` is caught too.
+
+If some other principal must be restricted inside a study-authz database,
+express that restriction with this tool. Do not add a separate row policy.
+
+### Input validation
+
+- **Identifiers.** Every identifier that comes from configuration or the CLI
+  goes through one validator (`sqlgen.validate_identifier`:
+  `^[A-Za-z_][A-Za-z0-9_]{0,127}$`). That covers the target database, the
+  `make-test-db` source database, the policy role or user, and the `user-sql`
+  user. Every such identifier is always emitted back-quoted.
+- **Values.** The public group, app name, study ids and private groups are
+  values. They must match `^[A-Za-z0-9_.-]{1,128}$`, and are emitted as
+  escaped string literals. Hostile inputs are rejected before any query runs.
+
 | Object | Policy |
 |---|---|
 | every table in the DB (`db.*`) | `USING 0`: default-deny, so an unclassified or new table fails closed. Everyone except the target gets `USING 1`. |
@@ -224,10 +264,17 @@ uv run python -m cbioportal_mcp.study_authz apply --database cbio_restricted_gre
 uv run python -m cbioportal_mcp.study_authz check --database cbio_restricted_green
 
 # 3. The MCP runtime user. It reads ONLY through the role: no direct grants,
-#    no settings profile forcing readonly.
+#    no settings profile forcing readonly. --policy-role must match the role
+#    used for apply (default cbioportal_mcp_study_restricted).
 CBIOPORTAL_MCP_RESTRICTED_PASSWORD=... uv run python -m cbioportal_mcp.study_authz \
-    user-sql --user mcp_restricted --database cbio_restricted_green [--apply]
+    user-sql --user mcp_restricted --database cbio_restricted_green \
+    [--policy-role <role>] [--apply]
 ```
+
+- `user-sql --user-target` creates a user that will be the policy target
+  itself (`apply --policy-user`). It emits no role grant, and uses a plain
+  `CREATE USER`, so it fails rather than replace an existing user and that
+  user's grants.
 
 - `render` (same flags as `apply`) prints the SQL for `clickhouse-client`.
 - After changing `catalog.py`, run `generate` to rewrite
