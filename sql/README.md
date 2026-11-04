@@ -94,3 +94,10 @@ separate review: ClickHouse explicitly disallows `SQL SECURITY INVOKER` for them
 
 `tests/test_sql_view_security.py` checks every `*.sql` recursively, including
 portal-specific files, to prevent ordinary views from losing the explicit clause.
+
+## Study-level access control (not applied here)
+
+Row policies for a *restricted* deployment (public studies + per-email
+grants) live in `src/cbioportal_mcp/study_authz/`, not in this directory, so
+neither `apply_sql.sh` nor the daily public clone ever applies them. See
+[`docs/study-authz.md`](../docs/study-authz.md).
