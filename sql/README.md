@@ -73,3 +73,31 @@ Two options for adding your own preferences:
 - The agent discovers available preferences via
   `SELECT DISTINCT preference_name FROM cancer_study_query_preferences` —
   no hardcoded list anywhere outside SQL.
+
+## View execution privileges
+
+Every ordinary view (including parameterized views) explicitly declares
+`SQL SECURITY INVOKER`. Create the views with the admin account as usual;
+callers need `SELECT` on both the view and its underlying tables. The public
+MCP user's direct `GRANT SELECT ON <database>.*` covers both, so the next daily
+clone preserves query results while ensuring views execute with the caller's
+privileges and any applicable row policies.
+
+The clause requires **ClickHouse 24.2 or newer** (see the
+[24.2 release presentation](https://presentations.clickhouse.com/2024-release-24.2/)).
+This is the minimum for the security clause, not a compatibility guarantee for
+all other SQL in this directory. Parameterized views keep their existing
+arguments and table-function call syntax. There are currently no materialized
+views under `sql/` and no conversion exceptions. Future materialized views need
+separate review: ClickHouse explicitly disallows `SQL SECURITY INVOKER` for them
+(see [view security semantics](https://clickhouse.com/docs/sql-reference/statements/create/view#sql_security)).
+
+`tests/test_sql_view_security.py` checks every `*.sql` recursively, including
+portal-specific files, to prevent ordinary views from losing the explicit clause.
+
+## Study-level access control (not applied here)
+
+Row policies for a *restricted* deployment (public studies + per-email
+grants) live in `src/cbioportal_mcp/study_authz/`, not in this directory, so
+neither `apply_sql.sh` nor the daily public clone ever applies them. See
+[`docs/study-authz.md`](../docs/study-authz.md).

@@ -546,16 +546,16 @@ FROM resource_definition
 WHERE display_name ILIKE '%Minerva%' OR description ILIKE '%Minerva%';
 
 -- Step 3: Check sample-level resource links for matching studies
-SELECT rs.url, rd.display_name as resource_name, s.stable_id as sample_id
-FROM resource_sample rs
-JOIN resource_definition rd ON rs.resource_id = rd.resource_id
-JOIN sample s ON rs.internal_id = s.internal_id
-JOIN patient p ON s.patient_id = p.internal_id
+SELECT r.url, rd.display_name as resource_name, s.stable_id as sample_id
+FROM resource r
+JOIN resource_definition rd ON r.resource_id = rd.resource_id AND r.cancer_study_id = rd.cancer_study_id
+JOIN sample s ON r.sample_id = s.stable_id
+JOIN patient p ON s.patient_id = p.internal_id AND p.cancer_study_id = r.cancer_study_id
 JOIN cancer_study cs ON p.cancer_study_id = cs.cancer_study_id
-WHERE cs.cancer_study_identifier ILIKE '%htan%';
+WHERE r.resource_scope = 'SAMPLE' AND cs.cancer_study_identifier ILIKE '%htan%';
 ```
 
-**Key rule:** cBioPortal stores external resource links in `resource_sample`, `resource_patient`, `resource_study`, and `resource_definition` tables. Always check these before saying something is out of scope.
+**Key rule:** cBioPortal stores external resource links in `resource` (with `resource_scope` values `SAMPLE`, `PATIENT`, or `STUDY`) and `resource_definition` tables. Always check these before saying something is out of scope.
 
 ### 15. 🚨 HALLUCINATED TABLES OR COLUMNS
 
@@ -802,7 +802,7 @@ Example:
 12. **Use numeric values for CNA** (2=AMP, -2=HOMDEL)
 13. **Use correct column names** (`mutation_variant` not `protein_change`)
 14. **Use subqueries instead of CTEs** for complex aggregations in ClickHouse
-15. **Check resource tables before saying "out of scope"** — `resource_sample`, `resource_patient`, `resource_study`, `resource_definition` may have external links
+15. **Check resource tables before saying "out of scope"** — `resource`, `resource_definition` may have external links
 16. **Always verify schema** — never assume tables or columns exist without checking first
 17. **Never fabricate OncoKB/driver annotations** — check for driver columns first
 18. **Never silently rewrite the user's query** — if "point mutation" or "V600V" is ambiguous or unusual, surface the normalization or ask, don't substitute. See pitfall #16.
@@ -864,7 +864,7 @@ Before trusting your results, ask:
 - [ ] Am I using the correct column names (mutation_variant, not protein_change)?
 - [ ] When asked about specific sample types (primary, metastatic, etc.), did I filter by SAMPLE_TYPE?
 - [ ] Did I avoid fabricating OncoKB/driver annotations without checking driver columns first?
-- [ ] Before saying "out of scope", did I check `resource_sample`, `resource_patient`, `resource_study`, and `resource_definition` for external links?
+- [ ] Before saying "out of scope", did I check `resource` (with `resource_scope` values `SAMPLE`, `PATIENT`, or `STUDY`) and `resource_definition` for external links?
 - [ ] Did I verify all tables and columns exist before querying them?
 - [ ] Did I answer the literal question, or did I silently rewrite it? If I normalized a term ("point mutation" → SNV set, "V600V" → V600E), did I surface that to the user?
 - [ ] Did I validate the user's premise before querying adjacent data?
