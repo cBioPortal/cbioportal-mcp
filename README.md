@@ -40,7 +40,11 @@ export CLICKHOUSE_USER=your-username
 export CLICKHOUSE_PASSWORD=your-password
 export CLICKHOUSE_DATABASE=your-cbioportal-database  # see "Preparing the database" below
 export CLICKHOUSE_SECURE=true  # or false for insecure connections
-export CLICKHOUSE_MCP_SERVER_TRANSPORT=stdio # or http or sse
+export CBIOPORTAL_MCP_STUDY_FILTERING=off  # required; no default
+export CLICKHOUSE_MCP_SERVER_TRANSPORT=http # default; or sse
+# Local stdio only: set BOTH of these explicitly.
+# export CLICKHOUSE_MCP_SERVER_TRANSPORT=stdio
+# export CBIOPORTAL_MCP_LOCAL_DEV=1
 # Optional: mount the HTTP endpoint under a sub-path (default: /mcp).
 # Set when reverse-proxied behind a prefix so trailing-slash redirects
 # include it, e.g. /db/mcp when served at https://host/db/mcp.
@@ -57,6 +61,12 @@ export CLICKHOUSE_MCP_SERVER_TRANSPORT=stdio # or http or sse
 # cbioportal_mcp with a different pool size, the server refuses to start.
 # export CBIOPORTAL_MCP_MAX_CONCURRENT_QUERIES=4
 ```
+
+Study filtering accepts only `on` or `off` (case-insensitive, surrounding whitespace
+is ignored). Missing, blank, and other values refuse startup. This release also
+refuses `on`: filtering cannot be enabled until P11 in a later release. `off`
+preserves current behavior. These checks apply to alternate launchers too.
+HTTP is the default transport; stdio requires exactly `CBIOPORTAL_MCP_LOCAL_DEV=1`.
 
 ### Datadog Tool Metrics
 
@@ -117,7 +127,8 @@ For an end-to-end reference deployment (Kubernetes CronJob that handles the clon
 To connect to the MCP server and see requests and replies, use MCP Inspector.
 You can run it with:
 ```bash
-fastmcp dev inspector src/cbioportal_mcp/server.py
+CBIOPORTAL_MCP_STUDY_FILTERING=off CBIOPORTAL_MCP_LOCAL_DEV=1 \
+  CLICKHOUSE_MCP_SERVER_TRANSPORT=stdio fastmcp dev inspector src/cbioportal_mcp/server.py
 ```
 
 ### Running the Server
@@ -133,7 +144,7 @@ cbioportal-mcp
 ```bash
 # Build the image
 docker build -t cbioportal-mcp -f docker/Dockerfile .
-docker run -i -p 8000:8000 cbioportal-mcp
+docker run -p 8000:8000 -e CBIOPORTAL_MCP_STUDY_FILTERING=off cbioportal-mcp
 ```
 
 ## License
