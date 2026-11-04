@@ -308,6 +308,28 @@ mcp = FastMCP(
 )
 
 
+def enforce_study_policy_coverage(database: str) -> None:
+    """With CBIOPORTAL_MCP_STUDY_FILTERING=on, refuse to start (exit 2) unless
+    the connected ClickHouse user is covered by the study row policies
+    (study_authz/startup_check.py). With filtering off this does nothing."""
+    from cbioportal_mcp.study_authz import startup_check
+
+    try:
+        result = startup_check.run_startup_check(database)
+    except startup_check.PolicyCoverageError as e:
+        logger.critical("❌ study filtering startup check failed: %s", e)
+        sys.exit(2)
+    if result is not None:
+        logger.info(
+            "Study filtering: %s is covered by the row policies on %s (%s %s, %d objects)",
+            result.user,
+            database,
+            "user" if result.target_is_user else "role",
+            result.target,
+            result.objects,
+        )
+
+
 def main():
     """Main entry point for the server."""
     logging.basicConfig(level=logging.INFO)
@@ -332,6 +354,8 @@ def main():
     except PermissionError as e:
         logger.critical("❌ ClickHouse permission check failed: %s", e)
         sys.exit(2)
+
+    enforce_study_policy_coverage(config.mcp_database)
 
     # Warm the list_studies cache immediately, without blocking server
     # startup on the ClickHouse round trip, then keep it proactively
