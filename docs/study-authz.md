@@ -390,16 +390,34 @@ as `currentUser()`, and never logs an email:
   also refuse startup. The self-scoped SHOW commands avoid exposing other
   users' grants and email-named console identities to agent SQL.
 - Every other database selectable through FINAL is inspected using
-  `system.tables`. A View must explicitly use `SQL SECURITY INVOKER`;
-  DEFINER/NONE views and Dictionaries are always refused. Merge, Distributed,
-  Buffer, MaterializedView and other indirect/table-function engines refuse
-  startup if their definitions name **any** policy database, or their
-  definitions cannot be read. All policy database names come from
-  `system.row_policies`. These refusals have **no public-database override**.
-- A database containing the catalog study table `cancer_study` must have an
-  applicable `cbioportal_mcp_*` database-wide default-deny, or be explicitly
-  declared public using the setting below. This prevents an unfiltered copy
-  of the protected study data from being silently accepted.
+  `system.tables` and `system.columns`. Only plain storage engines are allowed:
+  the enumerated MergeTree families (including Shared/Replicated variants),
+  Memory, Log/TinyLog/StripeLog, Null, Set and Join. Merge, Distributed,
+  Buffer, MaterializedView, Dictionary and **all external/integration engines**
+  (including URL and MySQL) always refuse. Definitions, URL encoding and
+  embedded credentials do not affect that decision. There is **no
+  public-database override** for a non-plain engine.
+- Views must use INVOKER security. The shared startup/admin checker strips
+  backtick/double-quoted identifiers, string literals with escapes, and
+  comments before recognizing SQL SECURITY; malformed or ambiguous clauses
+  fail closed. A stored normal-view query with no clause is accepted as
+  implicit INVOKER: live tests on 25.8.33.6 and 26.6.8.7 verified caller row
+  filtering under both `default_normal_view_sql_security` defaults, including
+  DEFINER. Neither version exposes a structured security field in
+  `system.tables`. Explicit DEFINER/NONE views always refuse.
+- Any database with a table/view name classified in `catalog.py`, or a table
+  with `cancer_study_identifier`/`cancer_study_id`, is treated as study data.
+  Catalog-defined linkage columns (such as `genetic_profile_id` on renamed
+  mutation copies) also identify study data; generic `internal_id` alone does
+  not. Such a database must have an applicable `cbioportal_mcp_*` database-wide
+  default-deny or be explicitly declared public. This is metadata detection,
+  not a data-lineage proof: copies that rename both the table and every
+  recognized linkage column can evade classification. Operators must ensure
+  no other readable database contains gated data under disguised names.
+- **Startup snapshot:** grants, roles, policies, columns and engines are
+  inspected only when the MCP starts. Grant or DDL changes after startup are
+  not rechecked. Restart the MCP after any grant, policy or DDL change so the
+  gate runs against the new configuration.
 - As a random `@startup-probe.invalid` caller: visible `cancer_study` counts
   and identifiers equal public studies in `user_study` (`email = ''`), with
   no other caller's `user_study` rows and no `user_study_manual` rows.
@@ -445,6 +463,12 @@ redundant with database-wide SELECT). These are deliberate fail-closed
 limits of the parser/allow list. Use plain names and the documented
 database-wide grant shape rather than widening the runtime permissions.
 Docker 25.8 and 26.6 exercise these rules without system-table SELECT grants.
+A read-only Cloud 26.6.1.2455 metadata inspection observed `SharedMergeTree`.
+The allow list also includes `SharedReplacingMergeTree` and the other known
+Shared/Replicated MergeTree families. Docker does not register Shared engines,
+so these names have metadata/unit coverage; its live tests use the matching
+ordinary MergeTree families. The available Cloud credential could not verify
+`SharedReplacingMergeTree` tables or the full `llm_user` configuration.
 A full policy-enabled startup on Cloud 26.6.1 remains unverified.
 
 ## Security notes and caveats

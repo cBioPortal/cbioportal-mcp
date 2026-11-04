@@ -19,7 +19,7 @@ the study row policies of its database. Using that same connection:
 3. Fail-closed SHOW GRANTS / SHOW GRANTS FINAL parsing audits every held
    privilege, including dormant and nested roles, without system-table grants.
 4. Other readable databases must not contain privileged views, dictionaries,
-   or indirect objects referring to policy databases. Unfiltered study copies
+   or engines outside the plain-storage allow list. Unfiltered study copies
    require an explicit operator declaration that they contain only public data.
 5. A reserved non-existent caller sees exactly public studies and own rows.
 
@@ -49,6 +49,7 @@ from cbioportal_mcp.study_authz.coverage import (
     fetch_policy_rows,
 )
 from cbioportal_mcp.study_authz.grants import (
+    STUDY_LINK_COLUMNS,
     audit_grants,
     audit_other_database,
     collect_grants,
@@ -267,26 +268,25 @@ def _check(
             )
             for db in others
         }
-        policy_databases = {database} | {
-            row[0]
-            for row in step(
-                "policy database inventory",
-                lambda: s.rows(
-                    "SELECT DISTINCT database FROM system.row_policies",
-                ),
-            )
-        }
         for db in others:
             other_objects = step(
                 f"system.tables for {db}",
                 lambda db=db: fetch_objects(_SessionClient(s), db, dictionaries=False),
+            )
+            study_column_tables = step(
+                f"system.columns for {db}",
+                lambda db=db: s.rows(
+                    "SELECT DISTINCT table FROM system.columns WHERE database = {db:String} "
+                    "AND name IN {columns:Array(String)}",
+                    {"db": db, "columns": sorted(STUDY_LINK_COLUMNS)},
+                ),
             )
             reasons += audit_other_database(
                 db,
                 [(name, engine, create) for name, (engine, create) in other_objects.items()],
                 other_policies[db],
                 principals,
-                policy_databases,
+                {row[0] for row in study_column_tables},
                 public_databases,
             )
 

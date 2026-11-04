@@ -1034,8 +1034,17 @@ def test_startup_check_user_target_with_five_other_databases_passes(server):
         "SELECT count() FROM system.role_grants WHERE user_name = {u:String}",
         parameters={"u": user},
     ).result_rows == [(0,)]
-    for other in others:
-        admin.command(f"CREATE TABLE {other}.cancer_study (id Int64) ENGINE=Memory")
+    # Docker does not register Shared* engines; exercise the corresponding
+    # MergeTree families here and Shared* metadata in the unit/Cloud checks.
+    engines = [
+        "MergeTree",
+        "ReplacingMergeTree",
+        "SummingMergeTree",
+        "AggregatingMergeTree",
+        "CoalescingMergeTree",
+    ]
+    for other, engine in zip(others, engines, strict=True):
+        admin.command(f"CREATE TABLE {other}.cancer_study (id Int64) ENGINE={engine} ORDER BY id")
     _refused(server, user, "not declared public", db)
     # A public declaration permits study copies, never privileged objects.
     result = _startup_check(server, user, db, frozenset(others))
@@ -1072,13 +1081,13 @@ def test_startup_check_unsafe_other_database_even_when_public(server, kind):
             f"USER 'admin' PASSWORD 'admin' DB '{db}' TABLE 'cancer_study')) "
             "LAYOUT(FLAT()) LIFETIME(0)"
         )
-        needle = "Dictionary is not allowed"
+        needle = "Dictionary engine is not allowed"
     else:
         admin.command(
             f"CREATE TABLE {other}.leak AS {db}.cancer_study "
             f"ENGINE=Merge('{db}', '^cancer_study$')"
         )
-        needle = "definition names a policy database"
+        needle = "Merge engine is not allowed"
     admin.command(f"GRANT SELECT ON {other}.* TO {user}")
     if kind == "definer":
         assert server.http(f"SELECT count() FROM {other}.leak", user) == "2"
@@ -1093,3 +1102,96 @@ def test_startup_check_system_grants_refused(server, scope):
     _p6_user_target_db(admin, db, user)
     admin.command(f"GRANT SELECT ON {scope} TO {user}")
     _refused(server, user, "grants on system are not allowed", db)
+
+
+@pytest.mark.parametrize("kind", ["url_source", "url_encoded_policy", "mysql_source"])
+def test_startup_check_credentials_in_external_engine_refused(server, kind):
+    admin = server.admin
+    db, user, other = f"authz_r3_{kind}", f"r3_{kind}_user", f"other_r3_{kind}"
+    _p6_user_target_db(admin, db, user)
+    admin.command(f"CREATE DATABASE {other}")
+    if kind.startswith("url"):
+        source = db if kind == "url_encoded_policy" else db + "_source"
+        query = f"SELECT cancer_study_identifier FROM {source}.cancer_study FORMAT TSV"
+        encoded = urllib.parse.quote(query, safe="")
+        if kind == "url_encoded_policy":
+            encoded = encoded.replace(db, "".join(f"%{ord(c):02X}" for c in db))
+        url = f"http://127.0.0.1:8123/?user=admin&password=admin&query={encoded}"
+        engine = f"URL('{url}', TSV)"
+        expected = "2" if kind == "url_encoded_policy" else "9"
+        needle = "URL engine is not allowed"
+    else:
+        engine = f"MySQL('127.0.0.1:9004', '{db}_source', 'cancer_study', 'admin', 'admin')"
+        expected, needle = "9", "MySQL engine is not allowed"
+    admin.command(
+        f"CREATE TABLE {other}.leak (cancer_study_identifier Nullable(String)) ENGINE={engine}"
+    )
+    admin.command(f"GRANT SELECT ON {other}.* TO {user}")
+    assert server.http(f"SELECT count() FROM {other}.leak", user) == expected
+    _refused(server, user, needle, db)
+    _refused(server, user, needle, db, frozenset({other}))
+
+
+def test_startup_and_admin_check_reject_view_security_alias_spoof(server):
+    admin = server.admin
+    db, user, other = "authz_r3_spoof", "r3_spoof_user", "other_r3_spoof"
+    _p6_user_target_db(admin, db, user)
+    admin.command(f"CREATE DATABASE {other}")
+    select = f"SELECT cancer_study_identifier AS `a SQL SECURITY INVOKER b` FROM {db}.cancer_study"
+    admin.command(f"CREATE VIEW {other}.leak DEFINER=admin SQL SECURITY DEFINER AS {select}")
+    admin.command(f"GRANT SELECT ON {other}.* TO {user}")
+    assert server.http(f"SELECT count() FROM {other}.leak", user) == "2"
+    _refused(server, user, "SQL SECURITY INVOKER", db)
+    _refused(server, user, "SQL SECURITY INVOKER", db, frozenset({other}))
+    admin.command(
+        f"CREATE OR REPLACE VIEW {db}.clinical_attribute_counts "
+        f"DEFINER=admin SQL SECURITY DEFINER AS {select}"
+    )
+    report = fetch_and_evaluate(admin, db, user)
+    assert any("view is SQL SECURITY DEFINER" in error for error in report.errors)
+
+
+@pytest.mark.parametrize("source_table", ["sample_derived", "mutation"])
+def test_startup_check_renamed_study_copy_refused(server, source_table):
+    admin = server.admin
+    db, user, other = (
+        f"authz_r3_copy_{source_table}",
+        f"r3_copy_{source_table}",
+        f"other_r3_{source_table}",
+    )
+    _p6_user_target_db(admin, db, user)
+    admin.command(f"CREATE DATABASE {other}")
+    admin.command(
+        f"CREATE TABLE {other}.renamed ENGINE=Memory AS SELECT * FROM {db}_source.{source_table}"
+    )
+    admin.command(f"GRANT SELECT ON {other}.* TO {user}")
+    assert int(server.http(f"SELECT count() FROM {other}.renamed", user)) >= 9
+    _refused(server, user, "not declared public", db)
+    assert _startup_check(server, user, db, frozenset({other})).public_studies == 1
+
+
+@pytest.mark.parametrize("default_security", ["INVOKER", "DEFINER"])
+def test_clauseless_stored_view_is_invoker_under_both_defaults(server, default_security):
+    from cbioportal_mcp.study_authz.coverage import view_sql_security
+
+    admin = server.admin
+    db, user, other = (
+        f"authz_r3_implicit_{default_security.lower()}",
+        f"r3_implicit_{default_security.lower()}",
+        f"other_r3_implicit_{default_security.lower()}",
+    )
+    _p6_user_target_db(admin, db, user)
+    admin.command(f"CREATE DATABASE {other}")
+    admin.command(
+        f"CREATE VIEW {other}.v AS SELECT count() AS n FROM {db}.cancer_study",
+        settings={"default_normal_view_sql_security": default_security},
+    )
+    create = admin.query(
+        "SELECT create_table_query FROM system.tables WHERE database={db:String} AND name='v'",
+        parameters={"db": other},
+    ).result_rows[0][0]
+    assert "SQL SECURITY" not in create
+    assert view_sql_security(create) == "INVOKER"
+    admin.command(f"GRANT SELECT ON {other}.* TO {user}")
+    assert server.http(f"SELECT n FROM {other}.v", user) == "1"
+    assert _startup_check(server, user, db).public_studies == 1

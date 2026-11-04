@@ -614,3 +614,62 @@ def test_trailing_control_characters_rejected(suffix):
             sqlgen.Params(**{**base, field: base.get(field, "r") + suffix})
     with pytest.raises(ValueError):
         sqlgen.restricted_user_sql("u" + suffix, "pw", "db")
+
+
+@pytest.mark.parametrize(
+    "quoted",
+    [
+        "`a SQL SECURITY INVOKER b`",
+        '"a SQL SECURITY INVOKER b"',
+        "'a SQL SECURITY INVOKER b'",
+        r"`a\` SQL SECURITY INVOKER b`",
+        r"'a\' SQL SECURITY INVOKER b'",
+        "`a`` SQL SECURITY INVOKER b`",
+        '"a"" SQL SECURITY INVOKER b"',
+        "'a'' SQL SECURITY INVOKER b'",
+    ],
+)
+def test_view_security_ignores_quoted_spoofs(quoted):
+    from cbioportal_mcp.study_authz.coverage import view_sql_security
+
+    assert (
+        view_sql_security(f"CREATE VIEW d.v ({quoted} String) SQL SECURITY DEFINER AS SELECT 1")
+        == "DEFINER"
+    )
+
+
+@pytest.mark.parametrize(
+    "sql,expected",
+    [
+        ("CREATE VIEW d.v AS SELECT 1", "INVOKER"),
+        ("CREATE VIEW d.v SQL SECURITY INVOKER AS SELECT 1", "INVOKER"),
+        ("CREATE VIEW d.v SQL SECURITY NONE AS SELECT 1", "NONE"),
+        ("CREATE VIEW d.v SQL SECURITY INVOKER SQL SECURITY DEFINER AS SELECT 1", None),
+        ("CREATE VIEW d.v SQL SECURITY UNKNOWN AS SELECT 1", None),
+        ("CREATE VIEW d.v AS SELECT 'unterminated", None),
+        ("CREATE VIEW d.v /* SQL SECURITY INVOKER", None),
+        ("CREATE VIEW d.v AS", None),
+        ("", None),
+        ("CREATE VIEW d.v /* SQL SECURITY INVOKER */ SQL SECURITY DEFINER AS SELECT 1", "DEFINER"),
+        ("CREATE VIEW d.v -- SQL SECURITY INVOKER\n SQL SECURITY DEFINER AS SELECT 1", "DEFINER"),
+        (
+            "CREATE VIEW d.v /* outer /* SQL SECURITY INVOKER */ inner */ "
+            "SQL SECURITY DEFINER AS SELECT 1",
+            "DEFINER",
+        ),
+    ],
+)
+def test_view_security_fails_closed_on_ambiguity(sql, expected):
+    from cbioportal_mcp.study_authz.coverage import view_sql_security
+
+    assert view_sql_security(sql) == expected
+
+
+def test_admin_coverage_rejects_view_security_alias_spoof():
+    objects, policies = _good_objects_and_policies()
+    objects["top_mutated_genes_in_study"] = (
+        "View",
+        "CREATE VIEW d.v (`a SQL SECURITY INVOKER b` UInt64) " "SQL SECURITY DEFINER AS SELECT 1",
+    )
+    report = evaluate(objects, policies, "d")
+    assert any("view is SQL SECURITY DEFINER" in error for error in report.errors)

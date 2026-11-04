@@ -55,6 +55,7 @@ class FakeClickHouse:
     can_read_policies: bool = True
     can_read_grants: bool = True
     other_objects: dict = field(default_factory=dict)
+    other_study_columns: dict = field(default_factory=dict)
     other_policies: dict = field(default_factory=dict)
     settings_seen: list = field(default_factory=list)
 
@@ -122,6 +123,8 @@ class FakeClickHouse:
                 return [list(p) for p in self.policies]
             # sqlgen.policy_conflicts: name, table, apply_to_all/list/except.
             return [[p[0], p[1], p[4], p[5], p[6]] for p in self.policies]
+        if "system.columns" in sql:
+            return [(name,) for name in self.other_study_columns.get(parameters["db"], [])]
         if "system.tables" in sql:
             if parameters["db"] != DB:
                 return self.other_objects.get(parameters["db"], [])
@@ -600,7 +603,7 @@ def test_indirect_engine_cannot_name_another_policy_database():
     fake.other_objects["other_pub"] = [
         ("leak", "Distributed", "CREATE TABLE t ENGINE=Distributed('c', 'hidden_policy_db', 't')")
     ]
-    with pytest.raises(PolicyCoverageError, match="definition names a policy database"):
+    with pytest.raises(PolicyCoverageError, match="Distributed engine is not allowed"):
         check(fake, DB, EMAIL, public_databases=frozenset({"other_pub"}))
 
 
@@ -619,3 +622,74 @@ def test_parser_accepts_combined_scopes_and_column_lists():
         ("d", "*", True),
         ("o", "t", False),
     ]
+
+
+@pytest.mark.parametrize(
+    "engine",
+    [
+        "MergeTree",
+        "ReplacingMergeTree",
+        "CoalescingMergeTree",
+        "ReplicatedMergeTree",
+        "ReplicatedReplacingMergeTree",
+        "SharedMergeTree",
+        "SharedReplacingMergeTree",
+        "SharedAggregatingMergeTree",
+        "Memory",
+        "Log",
+        "TinyLog",
+        "StripeLog",
+        "Null",
+        "Set",
+        "Join",
+    ],
+)
+def test_plain_storage_engine_allow_list_accepts_cloud_variants(engine):
+    fake = user_target()
+    fake.other_objects["other_pub"] = [("t", engine, "")]
+    assert check(fake, DB, EMAIL).target_is_user
+
+
+@pytest.mark.parametrize(
+    "engine",
+    [
+        "URL",
+        "MySQL",
+        "PostgreSQL",
+        "S3",
+        "File",
+        "Distributed",
+        "Merge",
+        "Buffer",
+        "MaterializedView",
+        "Dictionary",
+        "UnknownMergeTree",
+    ],
+)
+@pytest.mark.parametrize("listed", [False, True])
+def test_non_plain_engines_always_refused_without_reading_definition(engine, listed):
+    fake = user_target()
+    fake.other_objects["other_pub"] = [("t", engine, "no policy database name here")]
+    with pytest.raises(PolicyCoverageError, match="engine is not allowed"):
+        check(fake, DB, EMAIL, public_databases=frozenset({"other_pub"}) if listed else frozenset())
+
+
+@pytest.mark.parametrize("name", ["sample_derived", "mutation", "gene", "user_study"])
+def test_every_catalog_classified_table_marks_another_database_as_study_data(name):
+    fake = user_target()
+    fake.other_objects["other_pub"] = [(name, "Memory", "")]
+    refused(fake, "not declared public")
+
+
+@pytest.mark.parametrize(
+    "column", ["cancer_study_identifier", "cancer_study_id", "genetic_profile_id"]
+)
+def test_renamed_study_tables_detected_by_columns(column):
+    from cbioportal_mcp.study_authz.grants import STUDY_LINK_COLUMNS
+
+    assert column in STUDY_LINK_COLUMNS
+    fake = user_target()
+    fake.other_objects["other_pub"] = [("renamed", "Memory", "")]
+    fake.other_study_columns["other_pub"] = ["renamed"]
+    refused(fake, "not declared public")
+    assert check(fake, DB, EMAIL, public_databases=frozenset({"other_pub"})).target_is_user

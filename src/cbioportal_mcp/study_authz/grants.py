@@ -10,6 +10,13 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
+from cbioportal_mcp.study_authz.catalog import (
+    STUDY_SCOPED_TABLE_PATHS,
+    StudyId,
+    StudyIdentifier,
+    Via,
+    classified_names,
+)
 from cbioportal_mcp.study_authz.coverage import PolicyRow, _squash, view_sql_security
 from cbioportal_mcp.study_authz.sqlgen import OWNED_POLICY_PREFIX, validate_identifier
 
@@ -226,10 +233,33 @@ def selected_databases(held: HeldGrants) -> set[str]:
     return {g.database for g in held.final.grants if "SELECT" in g.privileges}
 
 
-def _references(sql: str, databases: set[str]) -> bool:
-    return any(
-        re.search(rf"(?<![A-Za-z0-9_]){re.escape(db)}(?![A-Za-z0-9_])", sql) for db in databases
+# Enumerated storage families, not an arbitrary '*MergeTree' suffix. The
+# Shared variants are used by Cloud (including SharedReplacingMergeTree).
+PLAIN_STORAGE_ENGINES = frozenset(
+    {"Memory", "Log", "TinyLog", "StripeLog", "Null", "Set", "Join"}
+) | frozenset(
+    prefix + family + "MergeTree"
+    for prefix in ("", "Replicated", "Shared")
+    for family in (
+        "",
+        "Replacing",
+        "Summing",
+        "Aggregating",
+        "Collapsing",
+        "VersionedCollapsing",
+        "Graphite",
+        "Coalescing",
     )
+)
+CATALOG_NAMES = frozenset(classified_names())
+# Include catalog linkage columns: renamed mutation copies retain
+# genetic_profile_id rather than a direct study ID. Generic internal_id alone
+# cannot identify study data. Renaming all linkage columns remains undetectable.
+STUDY_LINK_COLUMNS = frozenset({"cancer_study_identifier", "cancer_study_id"}) | frozenset(
+    path.column
+    for path in STUDY_SCOPED_TABLE_PATHS.values()
+    if isinstance(path, (StudyId, StudyIdentifier, Via)) and path.column != "internal_id"
+)
 
 
 def audit_other_database(
@@ -237,7 +267,7 @@ def audit_other_database(
     objects: list[tuple[str, str, str]],
     policies: list[PolicyRow],
     principals: set[str],
-    policy_databases: set[str],
+    study_column_tables: set[str],
     public_databases: frozenset[str],
 ) -> list[str]:
     reasons = []
@@ -252,24 +282,12 @@ def audit_other_database(
         where = f"{database}.{name}"
         if engine == "View" and view_sql_security(create) != "INVOKER":
             reasons.append(f"{where}: View must use SQL SECURITY INVOKER")
-        elif engine == "Dictionary":
-            reasons.append(f"{where}: Dictionary is not allowed")
-        elif engine not in {
-            "View",
-            "Memory",
-            "Null",
-            "Set",
-            "Join",
-            "Log",
-            "TinyLog",
-            "StripeLog",
-        } and not re.fullmatch(r"\w*MergeTree", engine):
-            # Anything indirect (including new table-function engines) needs a
-            # readable definition. Listing a database never overrides this.
-            if not create:
-                reasons.append(f"{where}: cannot read definition of {engine}")
-            elif _references(create, policy_databases):
-                reasons.append(f"{where}: {engine} definition names a policy database")
-        if name == "cancer_study" and not has_deny and database not in public_databases:
+        elif engine != "View" and engine not in PLAIN_STORAGE_ENGINES:
+            reasons.append(f"{where}: {engine} engine is not allowed")
+        if (
+            (name in CATALOG_NAMES or name in study_column_tables)
+            and not has_deny
+            and database not in public_databases
+        ):
             reasons.append(f"{database}: unfiltered study database is not declared public")
     return reasons

@@ -7,8 +7,8 @@ For the policy target (the restricted role, or a user), against ``catalog.py``:
 - every study-scoped table has its own policy that reads ``user_study`` with
   the caller-email predicate (never ``USING 1``);
 - ``user_study`` has exactly the identity predicate;
-- every reference table and view has a policy, and every view is explicitly
-  ``SQL SECURITY INVOKER`` (DEFINER / NONE views leak every study);
+- every reference table and view has a policy, and every view uses
+  ``SQL SECURITY INVOKER`` (explicitly or implicitly) (DEFINER / NONE views leak every study);
 - denied tables have no policy; the only materialized view is
   ``user_study_refresh``, and its last refresh succeeded; no dictionaries
   (dictGet bypasses row policies);
@@ -74,9 +74,74 @@ def _squash(text: str) -> str:
 _MATCH = _squash(USER_STUDY_MATCH)
 
 
+def _unquoted_sql(sql: str) -> str | None:
+    """Mask SQL literals, quoted identifiers and comments; reject unterminated tokens."""
+    out, i = [], 0
+    while i < len(sql):
+        ch = sql[i]
+        if ch in "'\"`":
+            quote = ch
+            i += 1
+            while i < len(sql):
+                if sql[i] == "\\":
+                    i += 2
+                elif sql[i] == quote:
+                    if i + 1 < len(sql) and sql[i + 1] == quote:
+                        i += 2
+                    else:
+                        i += 1
+                        break
+                else:
+                    i += 1
+            else:
+                return None
+            out.append(" ")
+        elif sql.startswith("--", i) or ch == "#":
+            end = sql.find("\n", i)
+            i = len(sql) if end < 0 else end + 1
+            out.append(" ")
+        elif sql.startswith("/*", i):
+            depth = 1
+            i += 2
+            while i < len(sql) and depth:
+                if sql.startswith("/*", i):
+                    depth += 1
+                    i += 2
+                elif sql.startswith("*/", i):
+                    depth -= 1
+                    i += 2
+                else:
+                    i += 1
+            if depth:
+                return None
+            out.append(" ")
+        else:
+            out.append(ch)
+            i += 1
+    return "".join(out)
+
+
 def view_sql_security(create_query: str) -> str | None:
-    match = re.search(r"\bSQL\s+SECURITY\s+(INVOKER|DEFINER|NONE)\b", create_query, re.I)
-    return match.group(1).upper() if match else None
+    """Security of a stored CREATE VIEW, shared by startup and the admin check.
+
+    Neither 25.8 nor 26.6 exposes a structured security field in system.tables.
+    Both execute a stored clause-less normal view as INVOKER, even with
+    default_normal_view_sql_security=DEFINER (live regression tested).
+    """
+    sql = _unquoted_sql(create_query)
+    if sql is None:
+        return None
+    clauses = list(re.finditer(r"\bSQL\s+SECURITY\b", sql, re.I))
+    if len(clauses) > 1:
+        return None
+    if clauses:
+        mode = re.match(r"\s+(INVOKER|DEFINER|NONE)\b", sql[clauses[0].end() :], re.I)
+        return mode.group(1).upper() if mode else None
+    if re.match(r"\s*CREATE\s+(?:OR\s+REPLACE\s+)?VIEW\b", sql, re.I) and re.search(
+        r"\bAS\s+\(*\s*(SELECT|WITH)\b", sql, re.I
+    ):
+        return "INVOKER"
+    return None
 
 
 def _foreign_databases(select_filter: str, database: str) -> set[str]:
