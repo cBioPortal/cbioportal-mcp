@@ -136,13 +136,19 @@ def test_io_tools_are_registered_as_async(name):
 
 
 def test_two_concurrent_slow_calls_take_about_the_slowest(slow_clickhouse):
+    # peak == 2 proves the queries overlapped; wall-clock also includes MCP
+    # client and runner scheduling overhead, which is noisy on a loaded CI
+    # machine, so only bound it loosely to catch a hang.
+    slow_clickhouse.delay = 1.0
     elapsed, results = asyncio.run(
         _timed_batch(server.mcp, [_select("SELECT 1"), ("clickhouse_list_tables", {})])
     )
     assert all(not r.is_error for r in results)
     assert results[0].structured_content == {"columns": ["n"], "rows": [[1]], "row_count": 1}
     assert slow_clickhouse.peak == 2
-    assert elapsed < 1.5 * DELAY, f"batch took {elapsed:.2f}s; calls did not overlap"
+    assert elapsed < 5 * slow_clickhouse.delay, (
+        f"batch took {elapsed:.2f}s; calls did not overlap"
+    )
 
 
 def test_each_query_sees_its_own_request_context(slow_clickhouse):
@@ -154,6 +160,10 @@ def test_each_query_sees_its_own_request_context(slow_clickhouse):
 
 
 def test_a_failing_call_does_not_affect_the_others(slow_clickhouse):
+    # See test_two_concurrent_slow_calls_take_about_the_slowest. peak == 3
+    # proves all three calls were in flight together (serial execution would
+    # never exceed 1); wall-clock is only a loose hang guard under CI load.
+    slow_clickhouse.delay = 1.0
     slow_clickhouse.fail_on = "boom"
     elapsed, results = asyncio.run(
         _timed_batch(
@@ -164,7 +174,8 @@ def test_a_failing_call_does_not_affect_the_others(slow_clickhouse):
     ok_1, failed, ok_2 = (r.structured_content for r in results)
     assert ok_1 == COMPACT_ONE and ok_2 == COMPACT_ONE
     assert "boom from ClickHouse" in failed["error_message"]
-    assert elapsed < 1.5 * DELAY
+    assert slow_clickhouse.peak == 3
+    assert elapsed < 5 * slow_clickhouse.delay
 
 
 def test_a_raising_tool_fails_alone(slow_clickhouse, monkeypatch):
