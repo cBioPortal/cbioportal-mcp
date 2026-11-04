@@ -33,7 +33,7 @@ from cbioportal_mcp.study_authz.catalog import (
     Via,
     describe,
 )
-from cbioportal_mcp.study_authz.groups import validate_name
+from cbioportal_mcp.study_authz.groups import PLACEHOLDER_RE, validate_name
 
 TEMPLATES = Path(__file__).resolve().parent / "templates"
 USER_STUDY_TEMPLATE = TEMPLATES / "0-user-study.sql.tmpl"
@@ -53,12 +53,15 @@ USER_STUDY_MATCH = (
 _PAD = "    "
 # The ONE validator for identifiers that come from config/CLI (databases,
 # roles, users). Validated names are also always emitted back-quoted.
-IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
+# Always fullmatch: with .match(), `$` would accept a trailing newline.
+IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}")
 
 
 def validate_identifier(kind: str, value: str) -> str:
-    if not isinstance(value, str) or not IDENTIFIER_RE.match(value):
+    if not isinstance(value, str) or not IDENTIFIER_RE.fullmatch(value):
         raise ValueError(f"{kind} must match {IDENTIFIER_RE.pattern}, got {value!r}")
+    if PLACEHOLDER_RE.search(value):
+        raise ValueError(f"{kind} must not contain a template placeholder, got {value!r}")
     return value
 
 
@@ -241,6 +244,10 @@ class Params:
     target_is_user: bool = False
 
     def __post_init__(self):
+        self.validate()
+
+    def validate(self) -> None:
+        """Raise ValueError on any bad value (also re-run by apply)."""
         validate_identifier("database", self.database)
         validate_identifier("policy target", self.policy_target)
         validate_name("public group", self.public_group)
@@ -260,18 +267,41 @@ def render(template: str, params: Params) -> str:
     The templates put __PUBLIC_GROUP__ / __APP_NAME__ only inside '...'
     literals, so they get the escaped literal body.
     """
-    rendered = (
-        template.replace(DB, quote_identifier("database", params.database))
-        .replace(TARGET, quote_identifier("policy target", params.policy_target))
-        .replace("__PUBLIC_GROUP__", escape_string(params.public_group))
-        .replace("__APP_NAME__", escape_string(params.app_name))
-        .replace("__REFRESH_MINUTES__", str(int(params.refresh_minutes)))
-        .replace("__PRIVATE_GRACE_MINUTES__", str(int(params.private_grace_minutes)))
-    )
-    leftover = re.findall(r"__[A-Z_]+__", rendered)
-    if leftover:
-        raise ValueError(f"unrendered placeholders: {sorted(set(leftover))}")
-    return rendered
+    values = {
+        DB: quote_identifier("database", params.database),
+        TARGET: quote_identifier("policy target", params.policy_target),
+        "__PUBLIC_GROUP__": escape_string(params.public_group),
+        "__APP_NAME__": escape_string(params.app_name),
+        "__REFRESH_MINUTES__": str(int(params.refresh_minutes)),
+        "__PRIVATE_GRACE_MINUTES__": str(int(params.private_grace_minutes)),
+    }
+    unknown = sorted(set(PLACEHOLDER_RE.findall(template)) - set(values))
+    if unknown:
+        raise ValueError(f"unrendered placeholders: {unknown}")
+    # One pass: an inserted value is never rescanned for further tokens.
+    return PLACEHOLDER_RE.sub(lambda m: values[m.group(0)], template)
+
+
+_COMMENT_RE = re.compile(r"--[^\n]*")
+_STRING_RE = re.compile(r"'(?:[^'\\]|\\.)*'")
+_QUALIFIER_RE = re.compile(r"`([^`]*)`\s*\.")
+_UNQUOTED_QUALIFIED_RE = re.compile(
+    r"\b(?:FROM|JOIN|TABLE|VIEW|INTO|EXISTS)\s+([A-Za-z_][A-Za-z0-9_]*)\s*\.", re.I
+)
+
+
+def assert_only_database(sql: str, database: str) -> None:
+    """Defence in depth: rendered SQL may only qualify objects with ``database``.
+
+    Every database qualifier the templates emit is back-quoted; an unquoted
+    ``db.table`` after FROM/JOIN/TABLE/VIEW/INTO/EXISTS is refused too.
+    Comments and string literals are ignored.
+    """
+    code = _STRING_RE.sub("''", _COMMENT_RE.sub("", sql))
+    found = set(_QUALIFIER_RE.findall(code)) | set(_UNQUOTED_QUALIFIED_RE.findall(code))
+    others = sorted(found - {database})
+    if others:
+        raise ValueError(f"rendered SQL references databases other than {database}: {others}")
 
 
 def rendered_files(params: Params) -> list[tuple[str, str]]:
@@ -281,10 +311,13 @@ def rendered_files(params: Params) -> list[tuple[str, str]]:
     if not params.target_is_user:
         role = quote_identifier("policy role", params.policy_target)
         policies = f"CREATE ROLE IF NOT EXISTS {role};\n\n{policies}"
-    return [
+    files = [
         (USER_STUDY_TEMPLATE.name, render(USER_STUDY_TEMPLATE.read_text(), params)),
         (ROW_POLICIES_TEMPLATE.name, policies),
     ]
+    for _, sql in files:
+        assert_only_database(sql, params.database)
+    return files
 
 
 def statements(sql: str) -> list[str]:
@@ -335,9 +368,14 @@ def policy_conflicts(client, database: str, target: str) -> list[str]:
 def apply(client, params: Params, log=print) -> None:
     """Run both rendered files, statement by statement, with an admin client.
 
-    Refuses, before changing anything, if the database has row policies this
-    tool does not own (policy_conflicts).
+    Before any query: re-validates the parameters and renders every file
+    (single-pass substitution, then assert_only_database). Then refuses,
+    before changing anything, if the database has row policies this tool does
+    not own (policy_conflicts). Policy administration on the database must be
+    serialized with apply; run `check` afterwards (docs/study-authz.md).
     """
+    params.validate()
+    files = rendered_files(params)
     if (
         params.target_is_user
         and not client.query(
@@ -353,7 +391,7 @@ def apply(client, params: Params, log=print) -> None:
             "the database, and its catch-all USING 1 for non-targets would widen these "
             "(drop or move them first): " + "; ".join(conflicts)
         )
-    for name, sql in rendered_files(params):
+    for name, sql in files:
         log(f"apply  {name} -> {params.database}")
         for statement in statements(sql):
             client.command(statement)

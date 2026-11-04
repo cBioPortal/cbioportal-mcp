@@ -520,3 +520,95 @@ def test_policy_target_validated_and_cli_flags_exclusive():
     base = ["render", "--database", "d", "--public-group", "P", "--app-name", "a"]
     with pytest.raises(SystemExit):
         main(base + ["--policy-role", "r", "--policy-user", "u"])
+
+
+def _bypass(params: sqlgen.Params, **fields) -> sqlgen.Params:
+    """A Params whose fields skipped __post_init__ validation (simulates a bug)."""
+    for name, value in fields.items():
+        object.__setattr__(params, name, value)
+    return params
+
+
+def test_review_repro_placeholder_database_is_rejected():
+    # Round-2 repro: database '__PUBLIC_GROUP__' + public_group 'review_victim'
+    # used to render SQL against review_victim.
+    with pytest.raises(ValueError, match="placeholder"):
+        sqlgen.Params(
+            database="__PUBLIC_GROUP__", public_group="review_victim", app_name="cbioportal"
+        )
+
+
+@pytest.mark.parametrize("token", ["__PUBLIC_GROUP__", "__CLICKHOUSE_DATABASE__", "x__APP_NAME__y"])
+@pytest.mark.parametrize("field", ["database", "policy_target", "public_group", "app_name"])
+def test_placeholder_tokens_rejected_in_every_parameter(field, token):
+    base = {"database": "db", "public_group": "PUBLIC", "app_name": "cbioportal"}
+    with pytest.raises(ValueError, match="placeholder"):
+        sqlgen.Params(**{**base, field: token})
+
+
+def test_render_is_single_pass():
+    params = _bypass(
+        sqlgen.Params(database="cbio_green", public_group="PUBLIC", app_name="cbioportal"),
+        public_group="__CLICKHOUSE_DATABASE__",
+        app_name="__POLICY_TARGET__",
+    )
+    template = "upperUTF8('__PUBLIC_GROUP__') '__APP_NAME__' FROM __CLICKHOUSE_DATABASE__.t"
+    assert sqlgen.render(template, params) == (
+        "upperUTF8('__CLICKHOUSE_DATABASE__') '__POLICY_TARGET__' FROM `cbio_green`.t"
+    )
+    with pytest.raises(ValueError, match="unrendered"):
+        sqlgen.render("SELECT __NOT_A_PLACEHOLDER__", PARAMS)
+
+
+def test_apply_with_bypassed_review_repro_params_runs_nothing():
+    params = _bypass(
+        sqlgen.Params(database="db", public_group="PUBLIC", app_name="cbioportal"),
+        database="__PUBLIC_GROUP__",
+        public_group="review_victim",
+    )
+    client = _RecordingClient()
+    with pytest.raises(ValueError, match="placeholder"):
+        sqlgen.apply(client, params, log=lambda *_: None)
+    assert client.calls == []
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT 1 FROM `review_victim`.cancer_study",
+        "CREATE ROW POLICY p ON `review_victim`.* USING 1 TO r",
+        "SELECT 1 FROM review_victim.cancer_study",
+        "INSERT INTO review_victim.t SELECT 1",
+        "CREATE TABLE IF NOT EXISTS review_victim.t (x Int8) ENGINE = Memory",
+    ],
+)
+def test_assert_only_database_refuses_other_databases(sql):
+    with pytest.raises(ValueError, match="review_victim"):
+        sqlgen.assert_only_database(sql, "cbio_green")
+
+
+def test_assert_only_database_accepts_rendered_files_and_ignores_comments_strings():
+    for _, sql in sqlgen.rendered_files(PARAMS):
+        sqlgen.assert_only_database(sql, "cbio_green")
+    sqlgen.assert_only_database(
+        "-- FROM other.t\nSELECT 'FROM other.t', g.x FROM `cbio_green`.t AS g JOIN s ON g.a = s.a",
+        "cbio_green",
+    )
+    with pytest.raises(ValueError):
+        sqlgen.assert_only_database(sqlgen.rendered_files(PARAMS)[1][1], "cbio_blue")
+
+
+@pytest.mark.parametrize("suffix", ["\n", "\r", "\x00", "\r\n"])
+def test_trailing_control_characters_rejected(suffix):
+    from cbioportal_mcp.study_authz.groups import validate_name
+
+    with pytest.raises(ValueError):
+        sqlgen.validate_identifier("database", "db" + suffix)
+    with pytest.raises(ValueError):
+        validate_name("public group", "PUBLIC" + suffix)
+    base = {"database": "db", "public_group": "PUBLIC", "app_name": "cbioportal"}
+    for field in ("database", "policy_target", "public_group", "app_name"):
+        with pytest.raises(ValueError):
+            sqlgen.Params(**{**base, field: base.get(field, "r") + suffix})
+    with pytest.raises(ValueError):
+        sqlgen.restricted_user_sql("u" + suffix, "pw", "db")

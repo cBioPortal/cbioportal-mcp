@@ -660,3 +660,39 @@ def test_user_sql_with_custom_policy_role(server):
     q = f"SELECT cancer_study_identifier FROM {db}.cancer_study"
     assert server.studies_seen(q, "team_member") == PUBLIC
     assert fetch_and_evaluate(admin, db, "team_role").ok
+
+
+def test_review_repro_placeholder_database_cannot_redirect_apply(server):
+    """Round-2 repro: database '__PUBLIC_GROUP__' + public_group 'review_victim'."""
+    admin = server.admin
+    victim = "review_victim"
+    _load_fixture(admin, victim)
+    admin.command("CREATE DATABASE `__PUBLIC_GROUP__`")
+    admin.command("CREATE USER review_outsider IDENTIFIED BY 'pw'")
+    admin.command(f"GRANT SELECT ON {victim}.* TO review_outsider")
+    admin.command(
+        f"CREATE ROW POLICY review_outsider_only ON {victim}.cancer_study "
+        "USING cancer_study_id = 1 TO review_outsider"
+    )
+    q = f"SELECT cancer_study_identifier FROM {victim}.cancer_study"
+    assert server.studies_seen(q, "review_outsider") == {"pub_a"}
+
+    with pytest.raises(ValueError, match="placeholder"):
+        sqlgen.Params(database="__PUBLIC_GROUP__", public_group=victim, app_name="cbioportal")
+    # Even with validation bypassed, apply refuses before touching the server.
+    bypassed = sqlgen.Params(database="db", public_group="PUBLIC", app_name="cbioportal")
+    object.__setattr__(bypassed, "database", "__PUBLIC_GROUP__")
+    object.__setattr__(bypassed, "public_group", victim)
+    with pytest.raises(ValueError, match="placeholder"):
+        sqlgen.apply(admin, bypassed, log=lambda *_: None)
+
+    assert server.studies_seen(q, "review_outsider") == {"pub_a"}
+    policies = admin.query(
+        "SELECT database, short_name FROM system.row_policies "
+        "WHERE database IN ('review_victim', '__PUBLIC_GROUP__')"
+    ).result_rows
+    assert policies == [(victim, "review_outsider_only")]
+    assert not admin.query(
+        "SELECT 1 FROM system.tables WHERE database IN ('review_victim', '__PUBLIC_GROUP__') "
+        "AND name LIKE 'user_study%'"
+    ).result_rows

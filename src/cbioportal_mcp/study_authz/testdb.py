@@ -55,7 +55,7 @@ def read_grants_csv(path: Path, now: datetime | None = None) -> list[Grant]:
         for line, row in enumerate(csv.DictReader(fh), start=2):
             email = (row.get("email") or "").strip().lower()
             key = (row.get("grant_key") or "").strip()
-            if "@" not in email or not NAME_RE.match(key):
+            if "@" not in email or not NAME_RE.fullmatch(key):
                 raise ValueError(f"{path}:{line}: need an email and a grant_key ({row})")
             raw = (row.get("valid_until") or "").strip()
             if raw:

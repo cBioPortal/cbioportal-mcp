@@ -70,6 +70,13 @@ and identifies its policies by the name prefix `cbioportal_mcp_`:
 If some other principal must be restricted inside a study-authz database,
 express that restriction with this tool. Do not add a separate row policy.
 
+**Serialize policy administration, and run `check` after every `apply`.**
+The conflict check is a preflight. A foreign policy created between the
+preflight and the policy statements would still be widened. Only one person
+or job at a time should create or drop row policies on a study-authz database.
+Run `check` after `apply`: it re-reads `system.row_policies` and catches
+anything that slipped in.
+
 ### Input validation
 
 - **Identifiers.** Every identifier that comes from configuration or the CLI
@@ -80,6 +87,16 @@ express that restriction with this tool. Do not add a separate row policy.
 - **Values.** The public group, app name, study ids and private groups are
   values. They must match `^[A-Za-z0-9_.-]{1,128}$`, and are emitted as
   escaped string literals. Hostile inputs are rejected before any query runs.
+- **Exact matching.** Both validators use `fullmatch`, so a trailing `\n`,
+  `\r` or NUL is rejected.
+- **No placeholder tokens.** Both validators also refuse any value containing
+  a template placeholder token (`__[A-Z_]+__`). Without this, a database
+  named `__PUBLIC_GROUP__` combined with a public group `review_victim`
+  rendered SQL against `review_victim`.
+- **Rendering.** Placeholders are filled in one pass, so an inserted value is
+  never rescanned. `apply` renders and checks everything before its first
+  query, and the rendered SQL may only qualify objects with the validated
+  target database (`sqlgen.assert_only_database`).
 
 | Object | Policy |
 |---|---|
