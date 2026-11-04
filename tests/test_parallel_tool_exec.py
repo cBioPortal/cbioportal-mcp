@@ -147,7 +147,7 @@ def test_two_concurrent_slow_calls_take_about_the_slowest(slow_clickhouse):
     assert results[0].structured_content == {"columns": ["n"], "rows": [[1]], "row_count": 1}
     assert slow_clickhouse.peak == 2
     assert elapsed < 5 * slow_clickhouse.delay, (
-        f"batch took {elapsed:.2f}s; calls did not overlap"
+        f"batch took {elapsed:.2f}s; exceeded time budget (possible hang)"
     )
 
 

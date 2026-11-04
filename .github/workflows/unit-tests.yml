@@ -9,6 +9,9 @@ on:
     branches:
       - beta
 
+permissions:
+  contents: read
+
 concurrency:
   group: unit-tests-${{ github.ref }}
   cancel-in-progress: true
