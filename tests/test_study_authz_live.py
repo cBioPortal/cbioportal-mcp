@@ -568,8 +568,12 @@ def test_p7_user_tools_and_cache_isolation(server, monkeypatch):
     import mcp_clickhouse.mcp_server as upstream
     from clickhouse_connect import common
 
-    from cbioportal_mcp import identity
+    from cbioportal_mcp import identity, rollout
     from cbioportal_mcp import server as mcp_server
+
+    # A first server import validates filtering=off and pins it after fixtures
+    # have reset rollout. Unlock only this test's direct wiring after import.
+    monkeypatch.setattr(rollout, "_PIN", None)
 
     # The P4 minimal fixture omits list_studies' deployment metadata columns.
     for column in ("description String", "type_of_cancer_id String", "sample_count UInt64"):

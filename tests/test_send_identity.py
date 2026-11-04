@@ -97,6 +97,10 @@ def test_no_identity_and_off(monkeypatch, filtering):
 async def test_concurrent_requests_real_pool(filtering, monkeypatch):
     import mcp_clickhouse.mcp_server as upstream
 
+    monkeypatch.setenv("CLICKHOUSE_HOST", "localhost")
+    monkeypatch.setenv("CLICKHOUSE_USER", "test")
+    monkeypatch.setenv("CLICKHOUSE_PASSWORD", "test")
+
     barrier = threading.Barrier(2)
     seen = []
 
@@ -172,6 +176,10 @@ def test_logs_redact_email(filtering, caplog):
 
 def test_off_settings_unchanged_and_schema_exempt(filtering, monkeypatch):
     import mcp_clickhouse.mcp_server as upstream
+
+    monkeypatch.setenv("CLICKHOUSE_HOST", "localhost")
+    monkeypatch.setenv("CLICKHOUSE_USER", "test")
+    monkeypatch.setenv("CLICKHOUSE_PASSWORD", "test")
 
     client = SimpleNamespace(server_settings={})
     # Schema queries never enter the user-query scope, even with filtering on.
