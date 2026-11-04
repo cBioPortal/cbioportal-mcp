@@ -1,6 +1,11 @@
 # Import the package before test modules import mcp_clickhouse: the package
 # sizes mcp-clickhouse's query pool before it is created (see query_concurrency).
+import os
+
 import pytest
+
+# Server imports during collection now require an explicit deployment choice.
+os.environ["CBIOPORTAL_MCP_STUDY_FILTERING"] = "off"
 
 import cbioportal_mcp  # noqa: F401
 from cbioportal_mcp import result_format
@@ -15,3 +20,9 @@ def _default_result_format(monkeypatch):
         result_format.MAX_CELL_CHARS_ENV,
     ):
         monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _mock_startup_db_permissions(monkeypatch):
+    """Unit tests use fake data; exercise the real permission gate separately."""
+    monkeypatch.setattr("cbioportal_mcp.server.ensure_db_permissions", lambda config: None)
