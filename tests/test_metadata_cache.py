@@ -77,7 +77,7 @@ def test_columns_keyed_by_table(monkeypatch):
 def test_dynamic_guide_hit_expiry_keys_and_clear(monkeypatch, cache_clock):
     monkeypatch.setattr(server, "_load_study_guide", lambda _: None)
 
-    def result(query, *, query_label):
+    def result(query, *, query_label, **_kwargs):
         return [{"name": "Test"}] if query_label == "study_guide.study_info" else []
 
     query = Mock(side_effect=result)
@@ -100,7 +100,7 @@ def test_dynamic_guide_errors_not_cached(monkeypatch, failing_label):
     monkeypatch.setattr(server, "_load_study_guide", lambda _: None)
     fail = [True]
 
-    def result(query, *, query_label):
+    def result(query, *, query_label, **_kwargs):
         if fail[0] and query_label == failing_label:
             raise RuntimeError("offline")
         return [{"name": "Test"}] if query_label == "study_guide.study_info" else []
@@ -160,7 +160,7 @@ def test_cache_failure_never_changes_tool_answer(monkeypatch):
     monkeypatch.setattr(
         server,
         "run_select_query",
-        lambda q, *, query_label: (
+        lambda q, *, query_label, **_kwargs: (
             [{"name": "T"}] if query_label == "study_guide.study_info" else []
         ),
     )

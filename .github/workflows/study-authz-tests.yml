@@ -1,0 +1,110 @@
+# Study-permission (row-policy / authorities) tests against a real ClickHouse.
+#
+# The native tests start a throwaway ClickHouse server from the pinned
+# official static binary and run the rendered sql/study-authz/ SQL against it.
+# CBIOPORTAL_MCP_REQUIRE_CLICKHOUSE=1 makes a missing binary or a server that
+# won't start FAIL the job instead of skipping (tests/native_clickhouse.py).
+#
+# The job name "study-authz / clickhouse" is kept stable so it can be made a
+# required status check in branch protection.
+name: study-authz
+
+on:
+  pull_request:
+    branches: [beta, main]
+  push:
+    branches: [beta, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: study-authz-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  # ClickHouse version used by the local e2e (docker/local-e2e uses the 25.8
+  # image, which resolved to 25.8.33.6). The repo does not record the version
+  # deployments run; update this together with docker/local-e2e.
+  CLICKHOUSE_VERSION: 25.8.33.6
+  CLICKHOUSE_SHA512: dcbf1046526a95f20fb5e176d03e975fe1f00ec30d803cbb61f6878a15bbda54259dc028951fd3815f81862b15e6e221c98d323591fddb9c8bca521e057db602
+
+jobs:
+  clickhouse:
+    name: study-authz / clickhouse
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Cache the ClickHouse download
+        id: clickhouse-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/clickhouse-tgz
+          key: clickhouse-common-static-${{ env.CLICKHOUSE_VERSION }}-amd64
+
+      - name: Download ClickHouse ${{ env.CLICKHOUSE_VERSION }}
+        if: steps.clickhouse-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/.cache/clickhouse-tgz
+          curl -fsSL --retry 3 -o ~/.cache/clickhouse-tgz/clickhouse.tgz \
+            "https://packages.clickhouse.com/tgz/lts/clickhouse-common-static-${CLICKHOUSE_VERSION}-amd64.tgz"
+
+      - name: Verify and install ClickHouse
+        run: |
+          echo "${CLICKHOUSE_SHA512}  $HOME/.cache/clickhouse-tgz/clickhouse.tgz" | sha512sum -c -
+          mkdir -p "$RUNNER_TEMP/clickhouse"
+          tar -xzf ~/.cache/clickhouse-tgz/clickhouse.tgz -C "$RUNNER_TEMP/clickhouse" \
+            "clickhouse-common-static-${CLICKHOUSE_VERSION}/usr/bin/clickhouse"
+          bin="$RUNNER_TEMP/clickhouse/clickhouse-common-static-${CLICKHOUSE_VERSION}/usr/bin/clickhouse"
+          chmod +x "$bin"
+          "$bin" --version
+          echo "CBIOPORTAL_MCP_CLICKHOUSE_BIN=$bin" >> "$GITHUB_ENV"
+
+      - name: Install dependencies
+        run: uv sync --frozen --extra dev
+
+      - name: Generated policy SQL is in sync
+        run: uv run python scripts/generate_row_policy_sql.py --check
+
+      # Scope: the study-permission tests only, not the whole suite.
+      #   test_user_study_clickhouse.py         real ClickHouse: user_study expansion, row
+      #                                         policies, freshness, exact refresh-MV check
+      #   test_native_clickhouse_requirement.py the REQUIRE switch (no silent skips)
+      #   test_study_access.py                  ACL resolution, guard
+      #   test_study_access_authorities.py      identity, email verification, spoofing,
+      #                                         cache isolation, cached-guide re-authorization
+      #   test_study_access_server.py           server-level enforcement
+      #   test_study_access_sql_lexer.py        SQL lexer guard, SETTINGS/SET overrides
+      #   test_auth_header_spoofing.py          proxy header spoofing / proxy secret
+      #   test_clickhouse_query_settings.py     readonly=1 settings transport, privilege
+      #                                         probes, surface check, refresh-MV validator
+      #   test_verify_row_policy_coverage.py    row-policy coverage verifier
+      #   test_row_policy_sql.py                catalog <-> generated policy SQL drift
+      #   test_study_authz_default_off.py       flags at defaults == beta behavior
+      #   test_oauth_identity_integration.py    OAuth identity through the real GoogleProvider
+      - name: Study-permission tests
+        env:
+          CBIOPORTAL_MCP_REQUIRE_CLICKHOUSE: "1"
+        run: >-
+          uv run --extra dev pytest -q -rs
+          tests/test_user_study_clickhouse.py
+          tests/test_native_clickhouse_requirement.py
+          tests/test_study_access.py
+          tests/test_study_access_authorities.py
+          tests/test_study_access_server.py
+          tests/test_study_access_sql_lexer.py
+          tests/test_auth_header_spoofing.py
+          tests/test_clickhouse_query_settings.py
+          tests/test_verify_row_policy_coverage.py
+          tests/test_row_policy_sql.py
+          tests/test_study_authz_default_off.py
+          tests/test_oauth_identity_integration.py

@@ -7,7 +7,7 @@ def test_list_studies_adds_clickable_study_urls(monkeypatch):
     monkeypatch.setattr(
         server,
         "run_select_query",
-        lambda query, query_label=None: [
+        lambda query, query_label=None, **kwargs: [
             {
                 "cancer_study_identifier": "brca_test_2026",
                 "name": "Breast Test Study",
