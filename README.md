@@ -82,7 +82,48 @@ plausible email refuses startup. It is ignored (with a warning) when enforcement
 Only local stdio (`CBIOPORTAL_MCP_LOCAL_DEV=1`) defaults unset switches to
 `off` / empty / `off`. The startup log shows each value and the tester count, never
 tester emails. These switches are temporary and expire on 2027-06-30 (see
-`cbioportal_mcp.rollout.EXPIRES`). They do not change request handling yet.
+`cbioportal_mcp.rollout.EXPIRES`). Authentication enforcement is described below;
+the public-database check is reserved for a later release.
+
+### Required login (P2)
+
+`CBIOPORTAL_MCP_AUTH_ENFORCEMENT=enforce` requires verified login on every
+HTTP/SSE request, including tool/resource/prompt discovery and reads. With `off`,
+only emails in `CBIOPORTAL_MCP_AUTH_TEST_USERS` receive these checks; other
+requests retain anonymous access. A claimed tester email adds checks even if
+its credentials fail. Decisions log only the route and admission booleans.
+Legacy `AUTH_REQUIRED` / `ALLOW_UNAUTHENTICATED` settings have no effect.
+
+Two login routes can coexist on the same endpoint:
+
+- **Google OAuth connectors:** set all three `CBIOPORTAL_MCP_GOOGLE_CLIENT_ID`,
+  `CBIOPORTAL_MCP_GOOGLE_CLIENT_SECRET`, and `CBIOPORTAL_MCP_GOOGLE_BASE_URL`.
+  Register `<base-url>/auth/callback` in the Google OAuth client, enable
+  `openid email profile` scopes, and publish the consent configuration or add
+  your testers there. Verification must be positively reported by Google's
+  userinfo/tokeninfo response. Partial Google configuration refuses startup,
+  including when a bridge is configured.
+- **LibreChat bridge:** configure a non-empty `CBIOPORTAL_MCP_BRIDGE_SECRET`
+  in both services using secret storage. LibreChat must send `x-user-email`,
+  `x-user-id`, `x-cbioportal-mcp-bridge-secret`, and `x-user-email-verified`
+  on every request. The verified flag must be `true` (case-insensitive), derived
+  from trusted account verification rather than a user-editable field. Secret
+  comparison is timing-safe; unexpanded `${...}` / `{{...}}` placeholders fail.
+  Configure the ingress/proxy to strip client-supplied bridge headers before
+  LibreChat injects its own values. Use TLS between services.
+
+Enforcement requires at least one configured route. A presented invalid
+credential cannot fall back to the other route. Bridge headers are stripped
+before handlers and telemetry; only the adapter's verified identity is trusted.
+OAuth client/token storage should use `REDIS_URL` with persistent Redis; otherwise
+registrations are stored on local disk and are lost on pod replacement.
+
+FastMCP remains locked at 2.13.3, matching the frozen Docker build. A small
+adapter mounts the existing Google provider's OAuth/discovery endpoints and
+shares admission with the bridge; it avoids a FastMCP 3 upgrade (and conflicts
+with the current mcp-clickhouse dependency). Local stdio still requires
+`CBIOPORTAL_MCP_LOCAL_DEV=1`, carries no user identity, and must satisfy startup
+configuration checks even with enforcement enabled.
 
 ### Datadog Tool Metrics
 

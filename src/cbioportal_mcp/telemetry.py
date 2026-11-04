@@ -337,6 +337,14 @@ def _resolve_caller_identity() -> tuple[str | None, str | None, str]:
     token is present — e.g. this deployment has OAuth disabled, or the caller
     is LibreChat, which does not yet forward an OAuth token of its own.
     """
+    from cbioportal_mcp.identity import request_decision
+
+    decision = request_decision()
+    if decision is not None:
+        identity = decision.identity
+        if identity:
+            return identity.user_id, identity.email, identity.route
+        return None, None, "direct"
     user_id, user_email = _extract_oauth_identity()
     if user_id is not None:
         return user_id, user_email, "oauth"
