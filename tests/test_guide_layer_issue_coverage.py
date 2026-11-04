@@ -81,7 +81,7 @@ def test_common_pitfalls_cover_ambiguous_acc_scope():
 
 
 def test_search_oncotree_matches_site_plus_histology_terms():
-    results = server.search_oncotree.fn("salivary adenoid cystic carcinoma")
+    results = server.search_oncotree.fn.__wrapped__("salivary adenoid cystic carcinoma")
 
     assert results[0]["code"] == "ACYC"
     assert results[0]["mainType"] == "Salivary Gland Cancer"

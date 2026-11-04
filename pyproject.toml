@@ -18,6 +18,8 @@ dependencies = [
     # https://github.com/ClickHouse/mcp-clickhouse/pull/152) so cbioportal_mcp no
     # longer needs its own pooling patch. Stay off 0.6.0, which moves to FastMCP 4.
     "mcp-clickhouse==0.5.0",
+    # Read directly to find the .env mcp-clickhouse loads (query_concurrency).
+    "python-dotenv",
     "clickhouse-driver>=0.2.0",
     "opentelemetry-sdk>=1.27.0",
     "opentelemetry-exporter-otlp-proto-http>=1.27.0",

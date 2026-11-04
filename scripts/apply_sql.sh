@@ -37,7 +37,9 @@ if ! command -v clickhouse-client >/dev/null 2>&1; then
     exit 1
 fi
 
-# clickhouse-client TLS flag is a bare --secure (no value)
+# clickhouse-client TLS flag is a bare --secure (no value). It is expanded as
+# ${secure_flag[@]+...} because bash < 4.4 (macOS /bin/bash) treats an empty
+# array as unbound under `set -u`.
 secure_flag=()
 if [[ "$CLICKHOUSE_SECURE" == "true" || "$CLICKHOUSE_SECURE" == "1" ]]; then
     secure_flag+=(--secure)
@@ -64,7 +66,7 @@ apply_one() {
     clickhouse-client \
         --host "$CLICKHOUSE_HOST" \
         --port "$CLICKHOUSE_PORT" \
-        "${secure_flag[@]}" \
+        ${secure_flag[@]+"${secure_flag[@]}"} \
         --user "$CLICKHOUSE_ADMIN_USER" \
         --password "$CLICKHOUSE_ADMIN_PASSWORD" \
         --database "$CLICKHOUSE_DATABASE" \

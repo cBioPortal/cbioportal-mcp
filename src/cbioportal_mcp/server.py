@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
 """cBioPortal MCP Server - FastMCP implementation."""
 
+import contextvars
+import functools
 import os
+import typing
 
+import anyio.to_thread
 from ddtrace.llmobs import LLMObs
+
+from cbioportal_mcp import MAX_CONCURRENT_QUERIES, query_concurrency
 
 _dd_api_key = os.getenv("DD_API_KEY")
 if _dd_api_key:
@@ -25,7 +31,7 @@ from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 from importlib import resources as importlib_resources
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 from fastmcp import FastMCP
 
 
@@ -40,8 +46,79 @@ from cbioportal_mcp.telemetry import (
     dogstatsd_metrics_configured,
     traced_db_query,
 )
+from cbioportal_mcp.metadata_cache import MetadataCache  # noqa: E402 (after LLMObs.enable)
+from cbioportal_mcp import result_format  # noqa: E402 (after LLMObs.enable)
 
 logger = logging.getLogger(__name__)
+
+# Schema listings and generated study guides only change when the database is
+# refreshed; see metadata_cache for the TTL knob. Only successes are stored.
+_schema_cache = MetadataCache()
+_study_guide_cache = MetadataCache()
+
+
+def _clear_schema_cache() -> None:
+    """Reset cached table lists and column descriptions. Test hook; not used at runtime."""
+    _schema_cache.clear()
+
+
+def _clear_study_guide_cache() -> None:
+    """Reset cached dynamic study guides. Test hook; not used at runtime."""
+    _study_guide_cache.clear()
+
+
+def _cache_get(cache: MetadataCache, key):
+    """Return a cached value, or None on a miss or any cache failure.
+
+    The cache is only an optimization: a failure inside it must never turn an
+    otherwise successful tool call into an error, so it is logged and bypassed.
+    """
+    try:
+        value = cache.get(key)
+    except Exception:
+        logger.debug("metadata cache get failed for %r; bypassing", key, exc_info=True)
+        return None
+    if value is not None:
+        logger.debug("metadata cache hit: %r", key)
+    return value
+
+
+def _cache_put(cache: MetadataCache, key, value) -> None:
+    """Store a successful result; a cache failure is logged and ignored."""
+    try:
+        cache.put(key, value)
+    except Exception:
+        logger.debug("metadata cache put failed for %r; bypassing", key, exc_info=True)
+
+
+# FastMCP 2.x calls a sync tool function directly on the event loop, so a
+# batch of tool calls the client sends concurrently would otherwise run one
+# after another. Every tool that does I/O (ClickHouse or the filesystem) is
+# wrapped with run_off_event_loop so each call runs on a worker thread and a
+# batch costs roughly its slowest call. How many ClickHouse queries run at
+# once is bounded separately, by mcp-clickhouse's query pool (see
+# query_concurrency).
+
+
+def run_off_event_loop(fn):
+    """Make a blocking tool function async by running it on a worker thread.
+
+    Apply below @mcp.tool so FastMCP registers the async wrapper; the tool's
+    schema still comes from fn's signature. The worker thread gets a copy of
+    the caller's contextvars, so telemetry spans and the FastMCP request
+    context still belong to the right tool call. The undecorated function is
+    available as `.fn.__wrapped__` on the registered tool.
+    """
+
+    @functools.wraps(fn)
+    async def wrapper(*args, **kwargs):
+        return await anyio.to_thread.run_sync(functools.partial(fn, *args, **kwargs))
+
+    # Resolve hints against fn itself: on Python 3.10, get_type_hints() turns
+    # `x: str = None` into Optional[str] using the function's defaults, which
+    # the *args/**kwargs wrapper doesn't have, so the schema would change.
+    wrapper.__annotations__ = typing.get_type_hints(fn, include_extras=True)
+    return wrapper
 
 # Regex pattern for valid cBioPortal study identifiers
 # Allows alphanumeric characters, underscores, and hyphens
@@ -238,6 +315,17 @@ def main():
 
     # Get config
     config = get_mcp_config()
+
+    # Refuse to serve if mcp-clickhouse's query pool doesn't match the cap
+    # (see query_concurrency); report the pool's actual size, not the env.
+    try:
+        query_concurrency.verify_query_pool(MAX_CONCURRENT_QUERIES)
+    except RuntimeError as e:
+        logger.critical("❌ %s", e)
+        sys.exit(2)
+    logger.info(
+        "ClickHouse query pool: %d workers", query_concurrency.query_pool_size()
+    )
 
     try:
         ensure_db_permissions(config=config)
@@ -443,8 +531,9 @@ def germline_guide() -> str:
 # Default and maximum rows clickhouse_run_select_query will return. A missing
 # or overly broad LIMIT in agent-written SQL should not be able to flood the
 # agent's context with an unbounded result set (mirrors MAX_LIST_LIMIT below).
-DEFAULT_SELECT_MAX_ROWS = 100
+# The default is CBIOPORTAL_MCP_MAX_RESULT_ROWS (100 when unset).
 MAX_SELECT_MAX_ROWS = 10000
+DEFAULT_SELECT_MAX_ROWS = min(result_format.default_max_rows(), MAX_SELECT_MAX_ROWS)
 
 
 @mcp.tool(
@@ -466,15 +555,21 @@ MAX_SELECT_MAX_ROWS = 10000
             Prefer narrowing the query itself (add a LIMIT, aggregate, or filter) over raising this.
 
     Returns:
-        - On success: an object with field "rows" containing an array of result rows. If the
-          query produced more rows than max_rows, "rows" is truncated and "truncated": true,
-          "returned_rows", and a "note" are included.
+        - On success: {{"columns": [names], "rows": [[values in column order], ...],
+          "row_count": n}}.
+          Each row is an array aligned with "columns"; null is SQL NULL. If more rows matched
+          than max_rows, "truncated": true and a "note" are added and row_count is the number
+          returned (the exact total is not computed) — aggregate or filter instead of paging.
+          Text cells over {result_format.max_cell_chars() or "unlimited"} chars end in
+          "…[+N chars]"; "cut_cells" counts them per column and "cell_note" gives the
+          substringUTF8 offsets that fetch the rest. Numbers and arrays are never cut.
         - On failure: an object with a single field "error_message" containing a string describing the error.
 """
 )
+@run_off_event_loop
 def clickhouse_run_select_query(
     query: str, max_rows: int = DEFAULT_SELECT_MAX_ROWS
-) -> dict[str, list[dict] | str | bool | int]:
+) -> dict[str, Any]:
     try:
         safe_max_rows = max(1, min(int(max_rows), MAX_SELECT_MAX_ROWS))
         # run_select_query returns at most safe_max_rows + 1 rows (capped in
@@ -482,7 +577,12 @@ def clickhouse_run_select_query(
         result = run_select_query(
             query, query_label="clickhouse_run_select_query", max_rows=safe_max_rows
         )
-        logger.debug(f"clickhouse_run_select_query returns {result}")
+        logger.debug("clickhouse_run_select_query returns %s", result)
+        if result_format.is_compact():
+            columns, rows = _select_table(result)
+            return result_format.select_result(
+                columns, rows, max_rows=safe_max_rows, hard_max_rows=MAX_SELECT_MAX_ROWS
+            )
         if len(result) > safe_max_rows:
             return {
                 "rows": result[:safe_max_rows],
@@ -510,21 +610,26 @@ def clickhouse_run_select_query(
     Retrieve a list of all tables in the current database.
 
     Returns:
-        - On success: an object with a single field "tables" containing an array of objects with the following fields:
-            - name: Table name.
+        - On success: {"tables": [table names]}.
         - On failure: an object with a single field "error_message" containing a string describing the error.
 """
 )
-def clickhouse_list_tables() -> dict[str, list[dict] | str]:
+@run_off_event_loop
+def clickhouse_list_tables() -> dict[str, Any]:
     logger.info(f"clickhouse_list_tables: called")
 
     try:
+        cached = _cache_get(_schema_cache, ("tables",))
+        if cached is not None:
+            return _format_tables_response(cached)
         from mcp_clickhouse.mcp_server import run_query
         raw = json.loads(run_query("SHOW TABLES"))
         rows = raw.get("rows", [])
         result = [{"name": row[0]} for row in rows if row]
-        logger.debug(f"clickhouse_list_tables result: {result}")
-        return {"tables": result}
+        logger.debug("clickhouse_list_tables result: %s", result)
+        response = {"tables": result}
+        _cache_put(_schema_cache, ("tables",), response)
+        return _format_tables_response(response)
     except Exception as e:
         error_message = str(e)
         logger.error(f"clickhouse_list_tables: {error_message}")
@@ -536,18 +641,22 @@ def clickhouse_list_tables() -> dict[str, list[dict] | str]:
     Retrieve a list of all columns for the table in the current database.
 
     Returns:
-        - On success: an object with a single field "columns" containing an array of objects with the following fields:
-            - name: Column name.
-            - type: ClickHouse data type of the column.
-            - comment: Column description, if available.
+        - On success: {"fields": ["name", "type", "comment"],
+          "columns": [[name, type, comment], ...]}:
+          one array per column, aligned with "fields". type is the ClickHouse data type;
+          comment is the column description ("" when there is none).
         - On failure: an object with a single field "error_message" containing a string describing the error.
 """
 )
-def clickhouse_list_table_columns(table: str) -> dict[str, list[dict] | str]:
+@run_off_event_loop
+def clickhouse_list_table_columns(table: str) -> dict[str, Any]:
     logger.info(f"clickhouse_list_table_columns: called")
 
     try:
         table = _validate_table_name(table)
+        cached = _cache_get(_schema_cache, ("columns", table))
+        if cached is not None:
+            return _format_columns_response(cached)
         from mcp_clickhouse.mcp_server import run_query
         raw = json.loads(run_query(f"DESCRIBE TABLE {table}"))
         columns_list = raw.get("columns", [])
@@ -566,12 +675,34 @@ def clickhouse_list_table_columns(table: str) -> dict[str, list[dict] | str]:
             if len(row) > comment_idx and row[comment_idx]:
                 entry["comment"] = row[comment_idx]
             result.append(entry)
-        logger.debug(f"clickhouse_list_table_columns result: {result}")
-        return {"columns": result}
+        logger.debug("clickhouse_list_table_columns result: %s", result)
+        response = {"columns": result}
+        _cache_put(_schema_cache, ("columns", table), response)
+        return _format_columns_response(response)
     except Exception as e:
         error_message = str(e)
         logger.error(f"clickhouse_list_table_columns: {error_message}")
         return {"error_message": error_message}
+
+
+# The schema cache stores the legacy shapes; these convert on the way out so
+# CBIOPORTAL_MCP_RESULT_FORMAT never has to be part of a cache key.
+_COLUMN_FIELDS = ("name", "type", "comment")
+
+
+def _format_tables_response(response: dict) -> dict:
+    if not result_format.is_compact():
+        return response
+    return {"tables": [t["name"] for t in response["tables"]]}
+
+
+def _format_columns_response(response: dict) -> dict:
+    if not result_format.is_compact():
+        return response
+    return {
+        "fields": list(_COLUMN_FIELDS),
+        "columns": [[c.get(f, "") for f in _COLUMN_FIELDS] for c in response["columns"]],
+    }
 
 
 def run_select_query(query: str, *, query_label: str, max_rows: int | None = None) -> list[dict]:
@@ -622,7 +753,21 @@ def _with_row_cap(query: str, max_rows: int) -> str:
     return f"SELECT * FROM (\n{inner}\n) LIMIT {int(max_rows) + 1}"
 
 
-def zip_select_query_result(ch_query_result) -> list[dict]:
+class SelectRows(list):
+    """run_select_query's list of row dicts, plus the positional result it came from.
+
+    The dicts drop empty and NULL values, so they lose the column order and
+    any all-empty column; the compact tool format needs both. Carrying them
+    here keeps run_select_query's signature (and its callers) unchanged.
+    """
+
+    def __init__(self, records, columns, raw_rows):
+        super().__init__(records)
+        self.columns = list(columns)
+        self.raw_rows = raw_rows
+
+
+def zip_select_query_result(ch_query_result) -> SelectRows:
     """
     Join columns and corresponding row values into dictionaries skipping dictionary entries if value is emtpy or None
     """
@@ -631,7 +776,16 @@ def zip_select_query_result(ch_query_result) -> list[dict]:
     result = []
     for row in rows:
         result.append({k: v for k, v in zip(columns, row) if v not in ("", None)})
-    return result
+    return SelectRows(result, columns, rows)
+
+
+def _select_table(result: list[dict]) -> tuple[list[str], list]:
+    """(columns, positional rows) for a run_select_query result."""
+    if isinstance(result, SelectRows):
+        return result.columns, result.raw_rows
+    # A plain list of dicts (e.g. a test double): best-effort column order.
+    table = result_format.records_to_table(result)
+    return table["columns"], table["rows"]
 
 
 # Resource Access Tools for AI Agents
@@ -640,6 +794,7 @@ STUDY_GUIDE_URI_PREFIX = "cbioportal://study-guide/"
 
 
 @mcp.tool()
+@run_off_event_loop
 def list_guides() -> list[dict]:
     """List all available query guides with their URIs and descriptions.
 
@@ -717,6 +872,7 @@ def list_guides() -> list[dict]:
 
 
 @mcp.tool()
+@run_off_event_loop
 def read_guide(uri: str) -> str:
     """Read the content of a specific guide by URI.
 
@@ -771,6 +927,7 @@ def read_guide(uri: str) -> str:
 
 
 @mcp.tool()
+@run_off_event_loop
 def get_general_guide(name: str) -> str:
     """Get a deployment-specific general guide by name.
 
@@ -864,6 +1021,7 @@ def _study_not_in_deployment_message(study_id: str) -> str:
 
 
 @mcp.tool()
+@run_off_event_loop
 def get_study_guide(study_id: str) -> str:
     """Get a guide for a specific cBioPortal study.
     
@@ -879,6 +1037,17 @@ def get_study_guide(study_id: str) -> str:
         A markdown-formatted guide specific to the requested study
     """
     return _study_guide_text(study_id)
+
+
+def _submit_in_context(executor: ThreadPoolExecutor, fn, /, *args, **kwargs):
+    """executor.submit(fn, ...) in a copy of the caller's contextvars.
+
+    Pool threads don't inherit contextvars, so without this the query's
+    db.query span loses its enclosing tool span (and the FastMCP request
+    context). Each submission gets its own copy: a Context can't be entered
+    by two threads at once.
+    """
+    return executor.submit(contextvars.copy_context().run, fn, *args, **kwargs)
 
 
 def _study_guide_text(study_id: str) -> str:
@@ -901,6 +1070,12 @@ def _study_guide_text(study_id: str) -> str:
     if static_guide:
         logger.info(f"Loaded static study guide for {study_id}")
         return static_guide
+
+    # Study ids match case-insensitively below, so key the cache the same way.
+    cache_key = study_id.lower()
+    cached = _cache_get(_study_guide_cache, cache_key)
+    if cached is not None:
+        return cached
 
     # Fall back to dynamic generation
     logger.info(f"Generating dynamic study guide for {study_id}")
@@ -943,7 +1118,8 @@ def _study_guide_text(study_id: str) -> str:
         # still consumed in the original section order below, so the guide's
         # output is unchanged regardless of which query finishes first.
         with ThreadPoolExecutor(max_workers=6) as executor:
-            counts_future = executor.submit(
+            counts_future = _submit_in_context(
+                executor,
                 run_select_query,
                 f"""
                     SELECT
@@ -954,7 +1130,8 @@ def _study_guide_text(study_id: str) -> str:
                 """,
                 query_label="study_guide.counts",
             )
-            profiles_future = executor.submit(
+            profiles_future = _submit_in_context(
+                executor,
                 run_select_query,
                 f"""
                     SELECT DISTINCT
@@ -967,7 +1144,8 @@ def _study_guide_text(study_id: str) -> str:
                 """,
                 query_label="study_guide.profiles",
             )
-            panels_future = executor.submit(
+            panels_future = _submit_in_context(
+                executor,
                 run_select_query,
                 f"""
                     SELECT DISTINCT gene_panel_id, COUNT(DISTINCT sample_unique_id) as sample_count
@@ -979,7 +1157,8 @@ def _study_guide_text(study_id: str) -> str:
                 """,
                 query_label="study_guide.panels",
             )
-            attrs_future = executor.submit(
+            attrs_future = _submit_in_context(
+                executor,
                 run_select_query,
                 f"""
                     SELECT DISTINCT attribute_name, COUNT(DISTINCT sample_unique_id) as coverage
@@ -991,7 +1170,8 @@ def _study_guide_text(study_id: str) -> str:
                 """,
                 query_label="study_guide.attrs",
             )
-            top_genes_future = executor.submit(
+            top_genes_future = _submit_in_context(
+                executor,
                 run_select_query,
                 f"""
                     SELECT
@@ -1007,7 +1187,8 @@ def _study_guide_text(study_id: str) -> str:
                 """,
                 query_label="study_guide.top_genes",
             )
-            sample_types_future = executor.submit(
+            sample_types_future = _submit_in_context(
+                executor,
                 run_select_query,
                 f"""
                     SELECT attribute_value as sample_type, COUNT(DISTINCT sample_unique_id) as count
@@ -1102,7 +1283,9 @@ WHERE cancer_study_identifier = '{study_id}'
 ```
 """)
         
-        return "\n".join(guide_sections)
+        guide = "\n".join(guide_sections)
+        _cache_put(_study_guide_cache, cache_key, guide)
+        return guide
         
     except Exception as e:
         logger.error(f"get_study_guide error: {e}")
@@ -1259,6 +1442,7 @@ NO_STUDY_MATCH_NOTE = (
 
 
 @mcp.tool()
+@run_off_event_loop
 def list_studies(search: str = None, limit: int = 20, verbose: bool = False) -> list[dict]:
     """List available cBioPortal studies.
 
@@ -1299,6 +1483,7 @@ def list_studies(search: str = None, limit: int = 20, verbose: bool = False) -> 
 
 
 @mcp.tool()
+@run_off_event_loop
 def list_study_guides() -> list[str]:
     """List all studies that have pre-generated guides available.
 
@@ -1309,6 +1494,7 @@ def list_study_guides() -> list[str]:
 
 
 @mcp.tool()
+@run_off_event_loop
 def search_oncotree(search_term: str) -> list[dict]:
     """Search OncoTree cancer types by code, name, or tissue.
 
@@ -1406,6 +1592,10 @@ def search_oncotree(search_term: str) -> list[dict]:
     scored.sort(key=lambda x: (-x[0], x[1]["code"]))
     return [item for _, item in scored[:25]]
 
+
+# Registers the purpose-built frequency tools (get_alteration_frequency, ...) on `mcp`.
+# Imported last because domain_tools uses the helpers defined above.
+from cbioportal_mcp import domain_tools  # noqa: E402,F401
 
 if __name__ == "__main__":
     main()

@@ -38,14 +38,14 @@ def test_no_match_points_to_study_resolution_guide(monkeypatch):
     server._clear_studies_cache()
     monkeypatch.setattr(server, "_all_studies_query", _rows)
     monkeypatch.setattr(server, "_list_available_study_guides", lambda: [])
-    (note,) = server.list_studies.fn(search="OHSU HTAN")
+    (note,) = server.list_studies.fn.__wrapped__(search="OHSU HTAN")
     assert "cbioportal://study-resolution-guide" in note["note"] and "hta9" in note["note"]
-    assert "note" not in server.list_studies.fn(search="osteosarcoma")[0]
-    assert all("note" not in s for s in server.list_studies.fn())
+    assert "note" not in server.list_studies.fn.__wrapped__(search="osteosarcoma")[0]
+    assert all("note" not in s for s in server.list_studies.fn.__wrapped__())
 
 
 def test_guide_listing_and_query_tool_route_to_the_right_guides():
-    guides = {g["uri"]: g["description"] for g in server.list_guides.fn()}
+    guides = {g["uri"]: g["description"] for g in server.list_guides.fn.__wrapped__()}
     assert "OHSU" in guides["cbioportal://study-resolution-guide"]
     assert "cancer types" in guides["cbioportal://faq-guide"]
     assert "ONCOTREE_CODE" in guides["cbioportal://sample-filtering-guide"]

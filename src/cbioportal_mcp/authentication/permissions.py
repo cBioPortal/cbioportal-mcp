@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from typing import Any, Dict, List
+from typing import Dict, List
 
 from cbioportal_mcp.env import McpConfig
 from mcp_clickhouse.mcp_server import run_query

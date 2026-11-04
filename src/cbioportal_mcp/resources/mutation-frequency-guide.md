@@ -194,7 +194,7 @@ Numerator and denominator both switch on the `alteration` parameter:
 | `mutation`           | `variant_type='mutation'` AND `mutation_status != 'UNCALLED'` | `MUTATION_EXTENDED`                     |
 | `amplification`      | `variant_type='cna'` AND `cna_alteration = 2`   | `COPY_NUMBER_ALTERATION`                |
 | `deep_deletion`      | `variant_type='cna'` AND `cna_alteration = -2`  | `COPY_NUMBER_ALTERATION`                |
-| `structural_variant` | `variant_type='structural_variant'`             | `STRUCTURAL_VARIANT`                    |
+| `structural_variant` | `variant_type='structural_variant'` AND `mutation_status != 'UNCALLED'` | `STRUCTURAL_VARIANT`                    |
 
 For `alteration='mutation'` the result equals `gene_mutation_frequency_by_cancer_type` (which is kept as the cleaner shorthand for that case).
 

@@ -49,6 +49,14 @@ Use the guides for full details; this is a quick reminder:
 - `clinical_event_derived` columns: `key`, `value` (NOT `attr_id`/`attr_value`)
 - Treatment data is in `clinical_event_derived`, NOT `clinical_data_derived`
 
+## One-Call Frequency Tools
+
+For the most common frequency questions, call these before writing SQL: `get_alteration_frequency(gene, study_id, alteration_type)`, `get_top_altered_genes(study_id, alteration_type, top_n)`, `get_gene_frequency_by_cancer_type(gene, alteration_type, top_n, preference)`, and `get_profiled_counts(study_id)` (study-wide profile counts, not gene denominators). They apply the same filters and denominators as the mutation-frequency guide's views. Report their numbers as-is.
+
+## Reading Tool Results
+
+`clickhouse_run_select_query` results normally come as "columns", "rows" and "row_count": the column names once, each row an array in that column order (null = SQL NULL), and the number of rows returned. The `get_*` frequency tools pair "columns" with array "rows" the same way. "truncated": true means more rows matched than were returned (exact total not computed) — aggregate or filter in SQL instead of paging or raising max_rows. A text cell ending in "…[+N chars]" was cut; the result's "cell_note" gives the offsets that fetch the rest.
+
 ## User-Facing Code Samples
 
 When the user asks for code they can run, default to public cBioPortal interfaces:

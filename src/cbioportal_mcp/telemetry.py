@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import socket
+import threading
 import time
 from contextlib import contextmanager
 from typing import Any, NamedTuple
@@ -27,6 +28,8 @@ logger = logging.getLogger(__name__)
 
 _tracer_provider: TracerProvider | None = None
 _dogstatsd_client: "_DogStatsDClient | None" = None
+# Tool calls run on worker threads, so the first few can race to build the client.
+_dogstatsd_client_lock = threading.Lock()
 
 
 def _env_flag(name: str, default: bool) -> bool:
@@ -116,11 +119,13 @@ def dogstatsd_metrics_configured() -> bool:
 def _get_dogstatsd_client() -> _DogStatsDClient | None:
     global _dogstatsd_client
     if _dogstatsd_client is None:
-        try:
-            _dogstatsd_client = _build_dogstatsd_client()
-        except Exception as exc:
-            logger.debug("DogStatsD client setup failed: %s", exc)
-            _dogstatsd_client = None
+        with _dogstatsd_client_lock:
+            if _dogstatsd_client is None:
+                try:
+                    _dogstatsd_client = _build_dogstatsd_client()
+                except Exception as exc:
+                    logger.debug("DogStatsD client setup failed: %s", exc)
+                    _dogstatsd_client = None
     return _dogstatsd_client
 
 

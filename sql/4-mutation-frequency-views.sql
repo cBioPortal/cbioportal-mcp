@@ -57,7 +57,7 @@
 
 DROP VIEW IF EXISTS mutation_panel_gene_coverage;
 
-CREATE VIEW mutation_panel_gene_coverage AS
+CREATE VIEW mutation_panel_gene_coverage SQL SECURITY INVOKER AS
 SELECT
     stgp.sample_unique_id,
     stgp.cancer_study_identifier,
@@ -71,7 +71,7 @@ WHERE stgp.alteration_type = 'MUTATION_EXTENDED';
 
 DROP VIEW IF EXISTS mutation_wes_coverage;
 
-CREATE VIEW mutation_wes_coverage AS
+CREATE VIEW mutation_wes_coverage SQL SECURITY INVOKER AS
 SELECT
     sample_unique_id,
     cancer_study_identifier
@@ -117,7 +117,7 @@ WHERE alteration_type = 'MUTATION_EXTENDED'
 
 DROP VIEW IF EXISTS gene_mutation_frequency_by_cancer_type;
 
-CREATE VIEW gene_mutation_frequency_by_cancer_type AS
+CREATE VIEW gene_mutation_frequency_by_cancer_type SQL SECURITY INVOKER AS
 WITH cohort AS (
     SELECT cancer_study_identifier
     FROM cancer_study_query_preferences
@@ -195,7 +195,7 @@ WHERE p.profiled_samples >= 50;
 
 DROP VIEW IF EXISTS gene_mutation_frequency_in_study;
 
-CREATE VIEW gene_mutation_frequency_in_study AS
+CREATE VIEW gene_mutation_frequency_in_study SQL SECURITY INVOKER AS
 WITH sample_cancer_type AS (
     SELECT cd.sample_unique_id, cd.attribute_value AS cancer_type
     FROM clinical_data_derived cd
@@ -270,7 +270,7 @@ WHERE p.profiled_samples >= 50;
 
 DROP VIEW IF EXISTS gene_mutation_frequency_in_studies;
 
-CREATE VIEW gene_mutation_frequency_in_studies AS
+CREATE VIEW gene_mutation_frequency_in_studies SQL SECURITY INVOKER AS
 WITH sample_cancer_type AS (
     SELECT cd.sample_unique_id, cd.attribute_value AS cancer_type
     FROM clinical_data_derived cd
@@ -334,7 +334,8 @@ WHERE p.profiled_samples >= 50;
 --                   'mutation'           — point mutations (UNCALLED excluded)
 --                   'amplification'      — CNA == +2 (high-level amp)
 --                   'deep_deletion'      — CNA == -2 (homozygous deletion)
---                   'structural_variant' — fusion / SV
+--                   'structural_variant' — fusion / SV (UNCALLED excluded,
+--                                          as in top_sv_genes_in_study)
 --
 -- Usage:
 --   SELECT * FROM gene_alteration_frequency_by_cancer_type(
@@ -351,7 +352,7 @@ WHERE p.profiled_samples >= 50;
 
 DROP VIEW IF EXISTS gene_alteration_frequency_by_cancer_type;
 
-CREATE VIEW gene_alteration_frequency_by_cancer_type AS
+CREATE VIEW gene_alteration_frequency_by_cancer_type SQL SECURITY INVOKER AS
 WITH cohort AS (
     SELECT cancer_study_identifier
     FROM cancer_study_query_preferences
@@ -382,7 +383,8 @@ altered AS (
             AND ged.variant_type = 'cna'
             AND ged.cna_alteration = -2)
         OR ({alteration:String} = 'structural_variant'
-            AND ged.variant_type = 'structural_variant')
+            AND ged.variant_type = 'structural_variant'
+            AND ged.mutation_status != 'UNCALLED')
       )
     GROUP BY sct.cancer_type
 ),
@@ -441,7 +443,9 @@ WHERE p.profiled_samples >= 50;
 -- profiled for ALL genes, so their count is a single number per cohort
 -- (computed once). For named-panel samples, profiled count is per-gene
 -- and only needs to include the genes the panel actually lists. We
--- compute these two pieces separately and add them per gene.
+-- compute these two pieces separately and add them per gene; the panel
+-- piece leaves out samples that are also WES, so a sample with both a WES
+-- and a panel mutation profile is counted once.
 --
 -- Parameters:
 --   preference  — cancer_study_query_preferences.preference_name
@@ -464,7 +468,7 @@ WHERE p.profiled_samples >= 50;
 
 DROP VIEW IF EXISTS top_mutated_genes_in_cohort;
 
-CREATE VIEW top_mutated_genes_in_cohort AS
+CREATE VIEW top_mutated_genes_in_cohort SQL SECURITY INVOKER AS
 WITH cohort AS (
     SELECT cancer_study_identifier
     FROM cancer_study_query_preferences
@@ -477,10 +481,18 @@ wes_profiled_count AS (
     JOIN cohort c USING (cancer_study_identifier)
 ),
 panel_profiled_per_gene AS (
-    -- For each gene, count cohort samples on a named panel that lists it.
+    -- For each gene, count cohort samples on a named panel that lists it,
+    -- leaving out samples already counted as WES (a sample can be WES for
+    -- one mutation profile and on a panel for another). The two counts are
+    -- then disjoint, so their sum is COUNT(DISTINCT) of the union.
     SELECT mpgc.hugo_gene_symbol, COUNT(DISTINCT mpgc.sample_unique_id) AS n
     FROM mutation_panel_gene_coverage mpgc
     JOIN cohort c USING (cancer_study_identifier)
+    WHERE mpgc.sample_unique_id NOT IN (
+        SELECT w.sample_unique_id
+        FROM mutation_wes_coverage w
+        JOIN cohort c2 USING (cancer_study_identifier)
+    )
     GROUP BY mpgc.hugo_gene_symbol
 ),
 altered_per_gene AS (
@@ -529,16 +541,22 @@ LIMIT {top_n:UInt32};
 
 DROP VIEW IF EXISTS top_mutated_genes_in_study;
 
-CREATE VIEW top_mutated_genes_in_study AS
+CREATE VIEW top_mutated_genes_in_study SQL SECURITY INVOKER AS
 WITH wes_profiled_count AS (
     SELECT COUNT(DISTINCT sample_unique_id) AS n
     FROM mutation_wes_coverage
     WHERE cancer_study_identifier = {study:String}
 ),
 panel_profiled_per_gene AS (
+    -- Panel samples not already counted as WES, so WES + panel is the
+    -- distinct union (see top_mutated_genes_in_cohort).
     SELECT hugo_gene_symbol, COUNT(DISTINCT sample_unique_id) AS n
     FROM mutation_panel_gene_coverage
     WHERE cancer_study_identifier = {study:String}
+      AND sample_unique_id NOT IN (
+          SELECT sample_unique_id FROM mutation_wes_coverage
+          WHERE cancer_study_identifier = {study:String}
+      )
     GROUP BY hugo_gene_symbol
 ),
 altered_per_gene AS (
@@ -591,7 +609,7 @@ LIMIT {top_n:UInt32};
 
 DROP VIEW IF EXISTS gene_mutation_variants_in_study;
 
-CREATE VIEW gene_mutation_variants_in_study AS
+CREATE VIEW gene_mutation_variants_in_study SQL SECURITY INVOKER AS
 WITH profiled_count AS (
     SELECT COUNT(DISTINCT sample_unique_id) AS n
     FROM (
@@ -666,7 +684,7 @@ ORDER BY altered_samples DESC, mutation_variant ASC;
 
 DROP VIEW IF EXISTS co_altered_genes_in_study;
 
-CREATE VIEW co_altered_genes_in_study AS
+CREATE VIEW co_altered_genes_in_study SQL SECURITY INVOKER AS
 WITH wes_samples AS (
     SELECT DISTINCT sample_unique_id
     FROM mutation_wes_coverage
@@ -704,11 +722,14 @@ wes_group_sizes AS (
     WHERE sample_unique_id IN (SELECT sample_unique_id FROM wes_samples)
 ),
 panel_group_sizes AS (
+    -- Panel samples not already counted in wes_group_sizes, so the two
+    -- sizes add up to the distinct union per gene.
     SELECT p.hugo_gene_symbol,
            countIf(g.is_mutant) AS mutant_n,
            countIf(NOT g.is_mutant) AS wildtype_n
     FROM panel_samples_per_gene p
     JOIN sample_groups g USING (sample_unique_id)
+    WHERE p.sample_unique_id NOT IN (SELECT sample_unique_id FROM wes_samples)
     GROUP BY p.hugo_gene_symbol
 ),
 altered_per_gene AS (
@@ -756,7 +777,7 @@ LIMIT {top_n:UInt32};
 
 DROP VIEW IF EXISTS cna_panel_gene_coverage;
 
-CREATE VIEW cna_panel_gene_coverage AS
+CREATE VIEW cna_panel_gene_coverage SQL SECURITY INVOKER AS
 SELECT
     stgp.sample_unique_id,
     stgp.cancer_study_identifier,
@@ -772,7 +793,7 @@ WHERE stgp.alteration_type = 'COPY_NUMBER_ALTERATION'
 
 DROP VIEW IF EXISTS cna_wes_coverage;
 
-CREATE VIEW cna_wes_coverage AS
+CREATE VIEW cna_wes_coverage SQL SECURITY INVOKER AS
 SELECT
     stgp.sample_unique_id,
     stgp.cancer_study_identifier
@@ -810,16 +831,22 @@ WHERE stgp.alteration_type = 'COPY_NUMBER_ALTERATION'
 
 DROP VIEW IF EXISTS top_cna_genes_in_study;
 
-CREATE VIEW top_cna_genes_in_study AS
+CREATE VIEW top_cna_genes_in_study SQL SECURITY INVOKER AS
 WITH wes_profiled_count AS (
     SELECT COUNT(DISTINCT sample_unique_id) AS n
     FROM cna_wes_coverage
     WHERE cancer_study_identifier = {study:String}
 ),
 panel_profiled_per_gene AS (
+    -- Panel samples not already counted as WES, so WES + panel is the
+    -- distinct union (see top_mutated_genes_in_cohort).
     SELECT hugo_gene_symbol, COUNT(DISTINCT sample_unique_id) AS n
     FROM cna_panel_gene_coverage
     WHERE cancer_study_identifier = {study:String}
+      AND sample_unique_id NOT IN (
+          SELECT sample_unique_id FROM cna_wes_coverage
+          WHERE cancer_study_identifier = {study:String}
+      )
     GROUP BY hugo_gene_symbol
 ),
 altered_per_gene AS (
@@ -877,7 +904,7 @@ LIMIT {top_n:UInt32};
 
 DROP VIEW IF EXISTS gene_cna_distribution_in_study;
 
-CREATE VIEW gene_cna_distribution_in_study AS
+CREATE VIEW gene_cna_distribution_in_study SQL SECURITY INVOKER AS
 WITH discrete_profiles AS (
     SELECT substring(gprof.stable_id, length({study:String}) + 2) AS profile_type
     FROM genetic_profile gprof
@@ -941,7 +968,7 @@ ORDER BY r.profile_type, r.cna_value = 'NA', toFloat64OrNull(r.cna_value) DESC;
 
 DROP VIEW IF EXISTS sv_panel_gene_coverage;
 
-CREATE VIEW sv_panel_gene_coverage AS
+CREATE VIEW sv_panel_gene_coverage SQL SECURITY INVOKER AS
 SELECT
     stgp.sample_unique_id,
     stgp.cancer_study_identifier,
@@ -955,7 +982,7 @@ WHERE stgp.alteration_type = 'STRUCTURAL_VARIANT';
 
 DROP VIEW IF EXISTS sv_wes_coverage;
 
-CREATE VIEW sv_wes_coverage AS
+CREATE VIEW sv_wes_coverage SQL SECURITY INVOKER AS
 SELECT
     sample_unique_id,
     cancer_study_identifier
@@ -989,16 +1016,22 @@ WHERE alteration_type = 'STRUCTURAL_VARIANT'
 
 DROP VIEW IF EXISTS top_sv_genes_in_study;
 
-CREATE VIEW top_sv_genes_in_study AS
+CREATE VIEW top_sv_genes_in_study SQL SECURITY INVOKER AS
 WITH wes_profiled_count AS (
     SELECT COUNT(DISTINCT sample_unique_id) AS n
     FROM sv_wes_coverage
     WHERE cancer_study_identifier = {study:String}
 ),
 panel_profiled_per_gene AS (
+    -- Panel samples not already counted as WES, so WES + panel is the
+    -- distinct union (see top_mutated_genes_in_cohort).
     SELECT hugo_gene_symbol, COUNT(DISTINCT sample_unique_id) AS n
     FROM sv_panel_gene_coverage
     WHERE cancer_study_identifier = {study:String}
+      AND sample_unique_id NOT IN (
+          SELECT sample_unique_id FROM sv_wes_coverage
+          WHERE cancer_study_identifier = {study:String}
+      )
     GROUP BY hugo_gene_symbol
 ),
 altered_per_gene AS (
