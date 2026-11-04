@@ -8,7 +8,7 @@ SQL_README = REPO / "sql" / "README.md"
 
 
 def _views():
-    return re.findall(r"^CREATE VIEW (\w+) AS", SQL_4.read_text(), re.M)
+    return re.findall(r"^CREATE VIEW (\w+) SQL SECURITY INVOKER AS", SQL_4.read_text(), re.M)
 
 
 def test_every_view_is_dropped_before_create():
