@@ -544,7 +544,7 @@ DEFAULT_SELECT_MAX_ROWS = min(result_format.default_max_rows(), MAX_SELECT_MAX_R
     - cbioportal://mutation-frequency-guide - Gene mutation frequency calculations with proper denominators
     - cbioportal://clinical-data-guide - Patient vs sample-level clinical data queries
     - cbioportal://sample-filtering-guide - Study/sample filtering; subtype in a mixed study: ONCOTREE_CODE
-    - cbioportal://external-resources-guide - External linked resources such as imaging viewers
+    - cbioportal://external-resources-guide - External linked resources: imaging, H&E / pathology slides, viewers
     - cbioportal://gene-resolution-guide - Ambiguous gene symbols and aliases
     - cbioportal://study-resolution-guide - Missing studies (e.g. HTAN OHSU), external portals, substitutes
     - cbioportal://faq-guide - What cancer types, data types and studies the database has
@@ -850,7 +850,7 @@ def list_guides() -> list[dict]:
         },
         {
             "uri": "cbioportal://external-resources-guide",
-            "description": "Guide for finding external linked resources such as imaging, pathology, Minerva, HTAN, or other resource_* table links before declaring data unavailable"
+            "description": "Guide for finding external linked resources such as imaging, H&E or pathology slides, histology images, Minerva, HTAN, or other resource_* table links before declaring data unavailable"
         },
         {
             "uri": "cbioportal://gene-resolution-guide",

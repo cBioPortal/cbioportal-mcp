@@ -6,7 +6,7 @@ Use this guide for data linked from cBioPortal rather than stored in molecular o
 
 Read this guide before answering or refusing questions that mention:
 
-- imaging, radiology, CT, MRI, pathology slides, histology, Minerva, viewer
+- imaging, radiology, CT, MRI, H&E or pathology slides, histology, Minerva, viewer
 - external portal, external resource, image data, spatial data
 - HTAN studies or study-specific linked viewers
 
@@ -21,7 +21,7 @@ cBioPortal may store links to external viewers or portals even when it does not 
 
 ## Which Studies Have Imaging Data
 
-For "which studies have imaging / pathology slides / CT" or "how many samples have images", read `cancer_study.resource_sample_counts` — per-study sample counts keyed by resource display name, the same numbers as the portal's "Data type" filter. One query, no joins:
+For "which studies have imaging / H&E or pathology slides / CT" or "how many samples have images", read `cancer_study.resource_sample_counts` — per-study sample counts keyed by resource display name, the same numbers as the portal's "Data type" filter. One query, no joins:
 
 ```sql
 SELECT
@@ -58,19 +58,13 @@ FROM resource r
 JOIN resource_definition rd
     ON r.resource_id = rd.resource_id AND r.cancer_study_id = rd.cancer_study_id
 JOIN cancer_study cs ON cs.cancer_study_id = r.cancer_study_id
-WHERE lower(rd.display_name) LIKE '%minerva%'
-   OR lower(rd.description) LIKE '%minerva%'
-   OR lower(rd.display_name) LIKE '%image%'
-   OR lower(rd.description) LIKE '%image%'
-   OR lower(rd.display_name) LIKE '%pathology%'
-   OR lower(rd.description) LIKE '%pathology%'
-   OR lower(rd.display_name) LIKE '%histology%'
-   OR lower(rd.description) LIKE '%histology%'
+WHERE match(lower(concat(rd.display_name, ' ', ifNull(rd.description, ''))),
+            'minerva|image|pathology|histology|slide|h&e')
 ORDER BY cs.cancer_study_identifier, rd.display_name
 LIMIT 100;
 ```
 
-To restrict scope, wrap the search predicates in parentheses and add `AND r.resource_scope = 'STUDY'`, or `AND r.resource_scope IN ('SAMPLE', 'PATIENT')`.
+To restrict scope, add `AND r.resource_scope = 'STUDY'` or `AND r.resource_scope IN ('SAMPLE', 'PATIENT')`. To search for other resources, extend the pattern (e.g. `|mxif`).
 
 ## Answer Pattern
 
