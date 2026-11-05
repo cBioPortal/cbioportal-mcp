@@ -838,7 +838,7 @@ def list_guides() -> list[dict]:
         },
         {
             "uri": "cbioportal://faq-guide",
-            "description": "General cBioPortal FAQ: what cancer types, data types and studies the database has, history, how to cite, reference genome, abbreviations, GISTIC thresholds, API access, germline support"
+            "description": "General cBioPortal FAQ: what cancer types, data types and studies the database has (and what it does not store, e.g. the study files data was loaded from), history, how to cite, reference genome, abbreviations, GISTIC thresholds, API access, germline support"
         },
         {
             "uri": "cbioportal://statistical-tests-guide",
