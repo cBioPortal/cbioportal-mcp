@@ -58,7 +58,7 @@ cBioPortal generally does not store:
 - polygenic risk scores as a standard data type
 - full external clinical-trial databases
 
-However, this deployment may contain links to external viewers or portals through `resource_*` tables. For imaging, pathology, Minerva, HTAN, or viewer questions, read `cbioportal://external-resources-guide` and check those tables before saying the data is absent.
+However, this deployment may contain links to external viewers or portals through `resource_*` tables. For imaging, H&E or pathology slides, Minerva, HTAN, or viewer questions, read `cbioportal://external-resources-guide` and check those tables before saying the data is absent.
 
 ## What the MCP Agent Can and Cannot Produce
 
