@@ -55,6 +55,7 @@ cBioPortal generally does not store:
 
 - raw CT, MRI, pathology-slide, or histology image files
 - raw sequencing files such as BAM, CRAM, or FASTQ
+- the study files the data was loaded from (`data_clinical_*.txt`, meta files), or which file an attribute came from; see `cbioportal://common-pitfalls#17e`
 - polygenic risk scores as a standard data type
 - full external clinical-trial databases
 
