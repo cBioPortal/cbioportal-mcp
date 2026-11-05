@@ -27,6 +27,7 @@ import re
 import sys
 import threading
 import time
+import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager  # noqa: E402 (after LLMObs.enable)
 from functools import lru_cache
@@ -1344,6 +1345,76 @@ CBIOPORTAL_STUDY_SUMMARY_URL_TEMPLATE = "https://www.cbioportal.org/study/summar
 
 def _study_summary_url(study_id: str) -> str:
     return CBIOPORTAL_STUDY_SUMMARY_URL_TEMPLATE.format(study_id=study_id)
+
+
+# The patient page serves both views: caseId opens a patient, sampleId a sample.
+CBIOPORTAL_PATIENT_URL_TEMPLATE = "https://www.cbioportal.org/patient?studyId={study_id}&caseId={case_id}"
+CBIOPORTAL_SAMPLE_URL_TEMPLATE = "https://www.cbioportal.org/patient?studyId={study_id}&sampleId={sample_id}"
+MAX_LINK_ID_LENGTH = 128
+
+
+def _link_id(study_id: str, name: str, value: str) -> tuple[str, bool]:
+    """Return (id safe to put in a URL, whether a study prefix was removed).
+
+    clinical_data_derived.patient_unique_id / sample_unique_id are
+    "<study_id>_<id>"; the portal wants the bare id, so strip that prefix.
+    """
+    if not value or not value.strip():
+        raise ValueError(f"{name} cannot be empty")
+    if len(value) > MAX_LINK_ID_LENGTH or not value.isprintable():
+        raise ValueError(f"Invalid {name} '{value[:40]}'")
+    prefix = f"{study_id}_"
+    stripped = value.startswith(prefix) and len(value) > len(prefix)
+    bare = value[len(prefix):] if stripped else value
+    return urllib.parse.quote(bare, safe=""), stripped
+
+
+@mcp.tool()
+def get_example_links(
+    study_id: str, patient_id: Optional[str] = None, sample_id: Optional[str] = None
+) -> dict:
+    """Build cBioPortal web links to a study, patient or sample you have already found.
+
+    Call this whenever the user asks to be shown an example ("show me a study with X",
+    "give me a patient who ..."), and put the returned URLs in your answer. Use IDs from
+    your query results; this tool only formats links and does not check that the study,
+    patient or sample exists.
+
+    Args:
+        study_id: Study identifier, e.g. from list_studies.
+        patient_id: Optional patient id (the bare id, or patient_unique_id from
+            clinical_data_derived; the study prefix is removed).
+        sample_id: Optional sample id (bare, or sample_unique_id).
+
+    Returns:
+        {"links": {"study": url, "patient": url, "sample": url}} with only the links you
+        asked for, plus a "note" when a study prefix was removed. On bad input,
+        {"error_message": ...}.
+    """
+    try:
+        study_id = _validate_study_id(study_id)
+        links = {"study": _study_summary_url(study_id)}
+        notes = []
+        if patient_id is not None:
+            case_id, stripped = _link_id(study_id, "patient_id", patient_id)
+            links["patient"] = CBIOPORTAL_PATIENT_URL_TEMPLATE.format(
+                study_id=study_id, case_id=case_id
+            )
+            if stripped:
+                notes.append(f"Removed the '{study_id}_' prefix from patient_id.")
+        if sample_id is not None:
+            sample, stripped = _link_id(study_id, "sample_id", sample_id)
+            links["sample"] = CBIOPORTAL_SAMPLE_URL_TEMPLATE.format(
+                study_id=study_id, sample_id=sample
+            )
+            if stripped:
+                notes.append(f"Removed the '{study_id}_' prefix from sample_id.")
+        result = {"links": links}
+        if notes:
+            result["note"] = " ".join(notes)
+        return result
+    except ValueError as e:
+        return {"error_message": str(e)}
 
 
 # How long a cached study snapshot is served before an on-demand call

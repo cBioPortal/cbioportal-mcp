@@ -813,6 +813,7 @@ Example:
 23. **Hold scope boundaries after refusal** — do not provide paper critiques, slide outlines, external pipeline code, or medical advice after user pushback.
 24. **Do not promise unavailable outputs** — provide data/handoffs instead of claiming to create plots, CSV files, or external apps.
 25. **LEFT JOIN yields '' / 0, not NULL** — use `IN (SELECT …)` / `NOT IN (SELECT …)` for group membership (pitfall #22)
+26. **Verify before declaring success, retract explicitly** — several samples per patient is not "longitudinal"; never silently pivot after a wrong claim (pitfall #23)
 
 ### 21. 🚨 ENUMERATION / CATALOG QUESTIONS TRIGGER SCHEMA EXPLORATION
 
@@ -847,6 +848,30 @@ User: *"What kind of cancer are there in the database?"*
 - If `list_studies(limit=100)` returns fewer rows than the deployment actually has, raise the limit (up to `MAX_LIST_LIMIT` = 100) or, for a pure count, run a single `SELECT COUNT(*) FROM cancer_study`.
 - Do not `clickhouse_list_tables` "just to double-check" — the list tools already know the schema they query.
 
+### 23. 🚨 DECLARING SUCCESS BEFORE VERIFYING, THEN PIVOTING SILENTLY
+
+Do not announce a result as a match ("Perfect!", "Great example!") until you have checked it against what the user actually asked. If you later find the earlier statement was wrong or does not satisfy the request, retract it **explicitly and first**. Quietly starting over with "Let me try a different study" leaves the user unable to tell which earlier claims still stand.
+
+#### ❌ Wrong: confident claim, then an implicit retraction
+
+> *"Perfect! The PDMR study has extensive longitudinal data with 889 patients having multiple samples. Patient P-899932 has 54 samples over time."*
+> *(next tool call)* *"Let me try a different study with clinical longitudinal data:"*
+
+The multiple samples were patient-derived model passages, not samples taken over time. The first answer was wrong, and the user was never told.
+
+#### ✅ Correct: verify, or retract by name
+
+Verify before claiming. For "multiple samples per patient" asks, check *why* there are several samples (`cbioportal://clinical-data-guide` → "Longitudinal and Multi-Sample Patients").
+
+If you already made the claim, say so before moving on:
+
+> Correction: I called PDMR longitudinal, but its multiple samples per patient are patient-derived model passages (`PASSAGE`, `MODEL_ID`), not samples taken over time. Please disregard the 54-sample figure for P-899932. A better example is `difg_glass`, which has initial and recurrent tumors from the same patient: [patient view](https://www.cbioportal.org/patient?studyId=difg_glass&caseId=<case_id>).
+
+Rules:
+- Retraction names what was wrong, why, and which earlier numbers to disregard.
+- Do not carry a retracted number or ID into the final answer.
+- If a user asked to be *shown* something (a study, patient, or sample), end with a working cBioPortal link: call `get_example_links` with IDs you queried. If nothing qualifies, say so; do not end with no link and no explanation.
+
 ---
 
 ## Validation Checklist
@@ -874,3 +899,4 @@ Before trusting your results, ask:
 - [ ] Did I keep scope boundaries after any refusal?
 - [ ] Did I avoid promising plots, downloads, or external-code debugging that this MCP server cannot perform?
 - [ ] For enumeration/catalog questions ("what cancer types", "what studies", "what guides"), did I use a first-class list tool once instead of exploring the schema?
+- [ ] Did I check that my example actually satisfies the request before saying "Perfect!"? If an earlier statement turned out wrong, did I retract it explicitly, and did I give a link when the user asked to be shown something?

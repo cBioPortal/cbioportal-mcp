@@ -412,6 +412,84 @@ WHERE
     AND cs_sample.attr_id = 'SAMPLE_TYPE';
 ```
 
+## Longitudinal and Multi-Sample Patients
+
+"Longitudinal", "serial", "over time", "multiple samples per patient" and "paired timepoints" questions are easy to get wrong because **several samples per patient does not mean samples taken over time**. Before you call a study longitudinal, find out *why* its patients have more than one sample.
+
+| What the extra samples are | Longitudinal? | Tell-tale |
+|---|---|---|
+| Samples collected at different times (pre/post-treatment, diagnosis vs recurrence, serial ctDNA draws) | Yes | Time-point attribute (`SAMPLE_COLLECTION_TIMEPOINT`, `TIME_POINT`), or `Sample acquisition` / `Specimen` timeline events with different `start_date` |
+| Patient-derived models (xenograft passages, organoids) | **No** | `MODEL_ID`, `PASSAGE` attributes |
+| Multiple regions of one tumor, or primary + metastasis sampled together | **No** (unless dated) | Region/site attributes and no differing dates |
+| Second primaries (different cancer types in one patient) | **No** | Different `CANCER_TYPE` per sample |
+
+A study can also be longitudinal in the *clinical-timeline* sense (treatments, labs and progression recorded over time in `clinical_event`) while having one sample per patient. Say which kind you found. If the user's intent is ambiguous, answer for serial samples and mention the timeline option.
+
+`sample.sample_type` ("Primary Solid Tumor" for everything) is useless here; use `SAMPLE_TYPE` from `clinical_data_derived`.
+
+### Step 1: Patients with more than one sample
+
+```sql
+SELECT
+    substring(patient_unique_id, length(cancer_study_identifier) + 2) AS case_id,
+    uniqExact(sample_unique_id) AS samples
+FROM clinical_data_derived
+WHERE cancer_study_identifier = 'your_study_id'
+  AND sample_unique_id != ''
+GROUP BY case_id
+HAVING samples > 1
+ORDER BY samples DESC
+LIMIT 10;
+```
+
+`patient_unique_id` is `<study_id>_<patient>`; the `substring` strips the prefix to give the bare patient id.
+
+### Step 2: Why do they have several samples?
+
+```sql
+SELECT attribute_name, uniqExact(attribute_value) AS distinct_values
+FROM clinical_data_derived
+WHERE cancer_study_identifier = 'your_study_id'
+  AND (attribute_name ILIKE '%TIME%' OR attribute_name ILIKE '%PASSAGE%' OR attribute_name ILIKE '%MODEL%')
+GROUP BY attribute_name;
+```
+
+`PASSAGE` / `MODEL_ID` means models, not time points. A time-point attribute means you can filter on its values. If neither appears, check the timeline (Step 3).
+
+### Step 3: Are the samples dated differently?
+
+`start_date` is days from diagnosis, so more than one distinct date per patient means samples at different times:
+
+```sql
+SELECT p.stable_id AS case_id, uniqExact(ce.start_date) AS distinct_sample_dates
+FROM clinical_event ce
+JOIN patient p ON ce.patient_id = p.internal_id
+JOIN cancer_study cs ON p.cancer_study_id = cs.cancer_study_id
+WHERE cs.cancer_study_identifier = 'your_study_id'
+  AND ce.event_type IN ('Sample acquisition', 'Specimen')
+GROUP BY case_id
+HAVING distinct_sample_dates > 1
+LIMIT 10;
+```
+
+### Starting points (verify before relying on them)
+
+Studies change; confirm with Steps 1-3 rather than trusting this list. Other deployments (e.g. the GENIE portal) have their own studies: use `list_studies()` and the steps above instead of assuming.
+
+| Study | What multiple samples mean |
+|---|---|
+| `difg_glass` | Temporally separated tumor pairs (initial vs recurrent diffuse glioma) |
+| `breast_alpelisib_2020` | Pre-, on- and post-treatment tumor/cfDNA; filter `SAMPLE_COLLECTION_TIMEPOINT` |
+| `brca_aurora_2023` | Matched primary and metastatic samples with `Specimen` timeline events |
+| `nsclc_ctdx_msk_2022`, `msk_access_2021` | ctDNA/cfDNA; many patients have several plasma samples. Check for a date or time-point attribute before claiming an order |
+| `nsclc_tracerx_2017` | Mostly multi-region primary tumors from one surgery (**not** longitudinal); only the `Post-treatment` ctDNA subset is later in time |
+| `msk_chord_2024` | Longitudinal only in the clinical-timeline sense (treatment, lab, progression events). Nearly one sample per patient; see its study guide |
+| `pancan_pdmr_2025` | **Not longitudinal.** Patient-derived xenograft/organoid models; many "samples" per patient are passages |
+
+### Always give a link to the example
+
+When the user asks you to *show* or *find* an example, call `get_example_links(study_id, patient_id)` with IDs you actually queried (never invented) and put the returned URLs in your answer. The patient page shows the patient's clinical timeline in its Summary tab. If no study qualifies after checking, say that instead of presenting a near miss as the answer. If you change your mind about an example mid-answer, retract it explicitly: see `cbioportal://common-pitfalls#23`.
+
 ## Treatment and Clinical Events Data
 
 Treatment data is stored separately from clinical attributes, in the clinical events tables. For per-agent or per-regimen patient counts in one study, use `treatment_counts_in_study` / `treatment_regimens_in_study` (see Study-View Chart Counts above). Details: `cbioportal://treatment-guide`.
