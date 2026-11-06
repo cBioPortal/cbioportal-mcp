@@ -67,9 +67,14 @@ export CLICKHOUSE_MCP_SERVER_TRANSPORT=http # default; or sse
 ```
 
 Study filtering accepts only `on` or `off` (case-insensitive, surrounding whitespace
-is ignored). Missing, blank, and other values refuse startup. This release also
-refuses `on`: filtering cannot be enabled until P11 in a later release. `off`
-preserves current behavior. These checks apply to alternate launchers too.
+is ignored). Missing, blank, and other values refuse startup. `off` preserves
+current behavior and is the permanent setting for the public deployment. `on`
+is for private deployments only and starts only when both
+`CBIOPORTAL_MCP_AUTH_ENFORCEMENT` and `CBIOPORTAL_MCP_PUBLIC_DB_CHECK` are
+`enforce`, `CBIOPORTAL_MCP_STUDY_FILTERING_PUBLIC_DATABASES` is set, and the
+database-side startup check passes; see
+[docs/study-filtering-rollout.md](docs/study-filtering-rollout.md). These checks
+apply to alternate launchers too.
 HTTP is the default transport; stdio requires exactly `CBIOPORTAL_MCP_LOCAL_DEV=1`.
 
 The auth rollout switches are parsed once at startup and refuse startup when missing
@@ -82,8 +87,11 @@ plausible email refuses startup. It is ignored (with a warning) when enforcement
 Only local stdio (`CBIOPORTAL_MCP_LOCAL_DEV=1`) defaults unset switches to
 `off` / empty / `off`. The startup log shows each value and the tester count, never
 tester emails. These switches are temporary and expire on 2027-06-30 (see
-`cbioportal_mcp.rollout.EXPIRES`). Authentication enforcement is described below;
-the public-database check is reserved for a later release.
+`cbioportal_mcp.rollout.EXPIRES`). Authentication enforcement is described below.
+The public-database check (P10) is not built yet: `CBIOPORTAL_MCP_PUBLIC_DB_CHECK=enforce`
+is validated, logged and required for study filtering `on`, but currently has no
+other effect. In particular, nothing yet refuses a filtering-`off` server pointed at
+a database with private studies.
 
 ### Required login (P2)
 

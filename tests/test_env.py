@@ -33,10 +33,19 @@ def test_filtering_rejects_missing_and_invalid(monkeypatch, value):
 
 
 @pytest.mark.parametrize("value", ["on", " ON "])
-def test_filtering_on_is_locked(monkeypatch, value):
+def test_filtering_on_requires_enforced_switches(monkeypatch, value):
+    """`on` is a valid value; it starts only with both rollout switches at enforce.
+
+    The full precondition matrix lives in test_study_filtering_on_startup.py.
+    """
     monkeypatch.setenv("CBIOPORTAL_MCP_STUDY_FILTERING", value)
-    with pytest.raises(ValueError, match="cannot be enabled until a later release"):
+    with pytest.raises(ValueError, match="STUDY_FILTERING=on requires"):
         validate_startup()
+    rollout._reset_for_tests()
+    monkeypatch.setenv("CBIOPORTAL_MCP_AUTH_ENFORCEMENT", "enforce")
+    monkeypatch.setenv("CBIOPORTAL_MCP_PUBLIC_DB_CHECK", "enforce")
+    monkeypatch.setenv("CBIOPORTAL_MCP_BRIDGE_SECRET", "test-bridge-secret")
+    assert validate_startup() == ("on", "http")
 
 
 @pytest.mark.parametrize("value", ["off", " OFF "])
