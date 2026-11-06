@@ -62,11 +62,13 @@ def _check_grant(priv: str, scope: str) -> bool:
     try:
         raw = json.loads(run_query(f"CHECK GRANT {priv} ON {scope}"))
     except ToolError as e:
+        from cbioportal_mcp.study_authz.startup_check import redact
+
         logger.warning(
             "CHECK GRANT %s ON %s failed (treating as not granted): %s",
             priv,
             scope,
-            e,
+            redact(e),
         )
         return False
     rows = raw.get("rows") or []
@@ -120,21 +122,18 @@ def ensure_db_permissions(config: McpConfig) -> None:
     )
 
     if not _check_grant("SELECT", f"{db}.*"):
+        # One line: startup logs it as a single CRITICAL record.
         raise PermissionError(
-            "Permission check failed: the MCP ClickHouse user lacks required privileges.\n"
-            f"- Missing: SELECT ON {db}.* for user '{user}'.\n"
-            "Grant minimally:\n"
-            f"  GRANT SELECT ON {db}.* TO {user};"
+            f"the MCP ClickHouse user '{user}' lacks SELECT ON {db}.*; "
+            f"grant minimally: GRANT SELECT ON {db}.* TO {user}"
         )
 
     bad_privs = _forbidden_privs_present()
     if bad_privs:
+        privs = ", ".join(sorted(bad_privs))
         raise PermissionError(
-            "Permission check failed: the MCP ClickHouse user has excessive privileges.\n"
-            f"- Forbidden privileges detected on *.*: {', '.join(sorted(bad_privs))}\n"
-            "The MCP ClickHouse user must be strictly read-only. "
-            "Revoke these permissions, e.g.:\n"
-            f"  REVOKE {', '.join(sorted(bad_privs))} ON *.* FROM {user};"
+            f"the MCP ClickHouse user '{user}' has forbidden privileges on *.* ({privs}) "
+            f"and must be strictly read-only: REVOKE {privs} ON *.* FROM {user}"
         )
 
     logger.info(

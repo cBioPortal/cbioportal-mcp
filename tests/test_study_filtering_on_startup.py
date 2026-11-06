@@ -223,8 +223,184 @@ def test_on_refused_when_clickhouse_unreachable(monkeypatch, caplog):
         _validate_server_startup()
     assert exc.value.code == 2
     [line] = critical_lines(caplog)
-    assert "cannot connect to ClickHouse" in line
-    assert "\n" not in line and LEAKY_EMAIL not in line
+    assert "cannot connect to ClickHouse (ConnectionError)" in line
+    assert_clean_one_line(line)
+    assert SECRET not in caplog.text and LEAKY_EMAIL not in caplog.text
+
+
+LEAKY_DETAILS = [
+    f"Code: 516. Authentication failed: password={SECRET}",
+    f"password = '{SECRET}' is incorrect",
+    f"connect to https://mcp_user:{SECRET}@ch.example.org:8443/db failed",
+    f"HTTP 401 Authorization: Bearer {SECRET}",
+    f"bad request ?user=mcp_user&token={SECRET}&secret={SECRET}",
+    f"api_key: {SECRET} rejected",
+]
+
+
+@pytest.mark.parametrize("detail", LEAKY_DETAILS)
+def test_p6_refusal_never_logs_credentials(monkeypatch, caplog, detail):
+    def fake(client, database, email, public_databases):
+        raise startup_check.PolicyCoverageError(f"system.enabled_roles: {detail}\nmore")
+
+    monkeypatch.setattr(startup_check, "_check", fake)
+    with caplog.at_level(logging.DEBUG), pytest.raises(SystemExit) as exc:
+        _validate_server_startup()
+    assert exc.value.code == 2
+    [line] = critical_lines(caplog)
+    assert "system.enabled_roles" in line
+    assert_clean_one_line(line)
+    assert SECRET not in caplog.text
+
+
+@pytest.mark.parametrize("detail", LEAKY_DETAILS)
+def test_p6_unexpected_error_logs_class_only(monkeypatch, caplog, detail):
+    def fake(client, database, email, public_databases):
+        raise RuntimeError(f"{detail} for {LEAKY_EMAIL}\nTraceback-ish")
+
+    monkeypatch.setattr(startup_check, "_check", fake)
+    with caplog.at_level(logging.DEBUG), pytest.raises(SystemExit) as exc:
+        _validate_server_startup()
+    assert exc.value.code == 2
+    [line] = critical_lines(caplog)
+    assert "unexpected RuntimeError" in line
+    assert_clean_one_line(line)
+    assert SECRET not in caplog.text and LEAKY_EMAIL not in caplog.text
+
+
+@pytest.mark.parametrize("detail", LEAKY_DETAILS)
+def test_redact_strips_credentials_and_emails(detail):
+    out = startup_check.redact(f"{detail} for {LEAKY_EMAIL}\nnext")
+    assert SECRET not in out and LEAKY_EMAIL not in out and "\n" not in out
+
+
+# --- the real ClickHouse permission gate (conftest mocks it elsewhere) ------
+
+
+@pytest.fixture
+def real_permission_gate(monkeypatch):
+    from cbioportal_mcp.authentication import permissions
+
+    monkeypatch.setattr(
+        "cbioportal_mcp.server.ensure_db_permissions", permissions.ensure_db_permissions
+    )
+    return permissions
+
+
+def _grant_answers(granted):
+    import json
+
+    def run_query(sql):
+        priv_scope = sql.removeprefix("CHECK GRANT ")
+        return json.dumps({"rows": [[1 if granted(priv_scope) else 0]]})
+
+    return run_query
+
+
+def test_permission_refusal_missing_select_is_one_line(real_permission_gate, monkeypatch, caplog):
+    monkeypatch.setattr(real_permission_gate, "run_query", _grant_answers(lambda _ps: False))
+    with caplog.at_level(logging.DEBUG), pytest.raises(SystemExit) as exc:
+        _validate_server_startup()
+    assert exc.value.code == 2
+    [line] = critical_lines(caplog)
+    db = get_mcp_config().mcp_database
+    assert f"lacks SELECT ON {db}.*" in line
+    assert f"GRANT SELECT ON {db}.* TO" in line
+    assert_clean_one_line(line)
+    assert SECRET not in caplog.text
+
+
+def test_permission_refusal_forbidden_privileges_is_one_line(
+    real_permission_gate, monkeypatch, caplog
+):
+    monkeypatch.setattr(real_permission_gate, "run_query", _grant_answers(lambda _ps: True))
+    with caplog.at_level(logging.DEBUG), pytest.raises(SystemExit) as exc:
+        _validate_server_startup()
+    assert exc.value.code == 2
+    [line] = critical_lines(caplog)
+    assert "forbidden privileges on *.*" in line and "REVOKE" in line
+    assert_clean_one_line(line)
+
+
+def test_permission_check_tool_error_is_redacted(real_permission_gate, monkeypatch, caplog):
+    from fastmcp.exceptions import ToolError
+
+    def failing(sql):
+        raise ToolError(f"query failed: password={SECRET} user {LEAKY_EMAIL}\nmore")
+
+    monkeypatch.setattr(real_permission_gate, "run_query", failing)
+    with caplog.at_level(logging.DEBUG), pytest.raises(SystemExit) as exc:
+        _validate_server_startup()
+    assert exc.value.code == 2
+    [line] = critical_lines(caplog)
+    assert "lacks SELECT" in line
+    assert_clean_one_line(line)
+    assert SECRET not in caplog.text and LEAKY_EMAIL not in caplog.text
+
+
+def test_permission_check_connection_error_logs_class_only(
+    real_permission_gate, monkeypatch, caplog
+):
+    def failing(sql):
+        raise ConnectionError(f"https://mcp_user:{SECRET}@ch.example.org failed\nretry")
+
+    monkeypatch.setattr(real_permission_gate, "run_query", failing)
+    with caplog.at_level(logging.DEBUG), pytest.raises(SystemExit) as exc:
+        _validate_server_startup()
+    assert exc.value.code == 2
+    [line] = critical_lines(caplog)
+    assert "ConnectionError" in line
+    assert_clean_one_line(line)
+    assert SECRET not in caplog.text
+
+
+def test_permission_gate_passes_with_select_only(real_permission_gate, monkeypatch, caplog):
+    db = get_mcp_config().mcp_database
+    monkeypatch.setattr(
+        real_permission_gate, "run_query", _grant_answers(lambda ps: ps == f"SELECT ON {db}.*")
+    )
+    with caplog.at_level(logging.INFO):
+        _validate_server_startup()
+    assert "ClickHouse permission checks passed" in caplog.text
+    assert "study_filtering=on transport=http" in caplog.text
+
+
+# --- P6 failure refuses before serving on every transport ------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transport", ["http", "sse"])
+async def test_p6_failure_refuses_lifespan_before_serving(monkeypatch, caplog, transport):
+    p6_fails(monkeypatch)
+    app = ConfiguredFastMCP(name="test")
+    asgi = app.http_app(transport=transport)
+    served = False
+    with caplog.at_level(logging.INFO), pytest.raises(SystemExit) as exc:
+        async with asgi.router.lifespan_context(asgi):
+            served = True
+    assert exc.value.code == 2 and not served
+    [line] = critical_lines(caplog)
+    assert_clean_one_line(line)
+    assert f"study_filtering=on transport={transport}" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_p6_failure_refuses_local_stdio_before_serving(monkeypatch, caplog):
+    from cbioportal_mcp.server import _startup_lifespan
+
+    monkeypatch.setenv("CLICKHOUSE_MCP_SERVER_TRANSPORT", "stdio")
+    monkeypatch.setenv("CBIOPORTAL_MCP_LOCAL_DEV", "1")
+    p6_fails(monkeypatch)
+    app = ConfiguredFastMCP(name="test")
+    assert app.startup_transport == "stdio"
+    served = False
+    with caplog.at_level(logging.INFO), pytest.raises(SystemExit) as exc:
+        async with _startup_lifespan(app):
+            served = True
+    assert exc.value.code == 2 and not served
+    [line] = critical_lines(caplog)
+    assert_clean_one_line(line)
+    assert "study_filtering=on transport=stdio" not in caplog.text
 
 
 def test_on_auth_enforce_still_needs_a_login_route(monkeypatch):

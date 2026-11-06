@@ -190,10 +190,13 @@ cBioPortal MCP startup: study_filtering=on transport=http
 cBioPortal MCP rollout switches: study_filtering=on auth_enforcement=enforce auth_test_users_count=0 public_db_check=enforce
 ```
 
-(`(user <mcp_user>, ...)` for a user target.) A refusal of the database check
-is one `CRITICAL` line and exit code 2; a refusal of the env settings is a
-`ValueError` whose one-line message names the setting. Neither contains emails
-or secrets.
+(`(user <mcp_user>, ...)` for a user target.) A refusal by the ClickHouse
+permission gate or the study-filtering check is one `CRITICAL` line and exit
+code 2. Driver and server error text in it is redacted (emails, URL userinfo,
+`password=`/`secret=`/`token=`/`key=` values, bearer tokens), and connection or
+unexpected errors are reported by exception class only. A refusal of the env
+settings is a `ValueError` whose one-line message names the setting. None of
+them contains emails or secrets.
 
 ## 6. Verify
 
@@ -233,17 +236,42 @@ reads `SQL_cbio_user` is rejected.
 ## 7. Rollback
 
 Order matters. While the policies exist and the MCP sends no email, the
-protected database shows only public studies; once the policies are gone, any
-user still holding `SELECT` on it reads **everything**.
+runtime user sees only public studies in the protected database. **Once the
+policies are dropped, every principal that can still `SELECT` from the
+protected database reads every study.** Changing `CLICKHOUSE_DATABASE` is
+**not** enough: it only changes the default database, the old grant stays, and
+filtering-off SQL accepts fully qualified names such as
+`SELECT * FROM <protected_db>.cancer_study`.
 
 1. Set `CBIOPORTAL_MCP_STUDY_FILTERING=off` and restart the MCP. (It no longer
    sends `SQL_cbio_user`, so the policies show it public studies only.)
-2. Point the MCP at a different database, or revoke the runtime target's
-   access to the protected one:
+2. Remove the runtime access to the protected database, **before any policy is
+   dropped**, with exactly one of:
+   - **A. Revoke** (admin) from the policy target, i.e. the role for a role
+     target or the user for a user target:
+     ```sql
+     REVOKE SELECT, SHOW ROW POLICIES ON <protected_db>.* FROM <target>;
+     ```
+   - **B. Replace the credentials:** restart the MCP with a different
+     `CLICKHOUSE_USER` that has no grant on the protected database, then
+     `DROP USER <old_mcp_user>` (admin). The old user must go too: otherwise
+     anyone holding its password reads everything after step 4.
+3. Verify, as the runtime user the MCP now uses (e.g.
+   `clickhouse-client --user <mcp_user>`), that it can no longer read the
+   protected database:
    ```sql
-   REVOKE SELECT, SHOW ROW POLICIES ON <protected_db>.* FROM <target>;
+   CHECK GRANT SELECT ON <protected_db>.*;               -- must return 0
+   SELECT count() FROM <protected_db>.cancer_study;     -- must fail: ACCESS_DENIED (497)
+   SHOW GRANTS FINAL;   -- no line may cover <protected_db>.* or *.*
    ```
-3. Drop the policies (admin). Generate the statements, review, then run them:
+   and, as admin, that no other non-admin principal still can:
+   ```sql
+   SELECT user_name, role_name, access_type, database
+   FROM system.grants
+   WHERE access_type IN ('SELECT', 'ALL') AND (database = '<protected_db>' OR database IS NULL);
+   ```
+   Do not continue until both checks are clean.
+4. Drop the policies (admin). Generate the statements, review, then run them:
    ```sql
    SELECT format('DROP ROW POLICY IF EXISTS `{}` ON `{}`.{};', short_name, database,
                  if(table = '', '*', concat('`', table, '`')))

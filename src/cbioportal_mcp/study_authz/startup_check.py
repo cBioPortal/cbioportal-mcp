@@ -68,6 +68,14 @@ EMAIL_SETTING = "SQL_cbio_user"
 PROBE_DOMAIN = "startup-probe.invalid"
 
 _EMAIL_RE = re.compile(r"[^\s@'\"`]+@[^\s@'\"`]+")
+# Credentials a driver/server error can echo: URL userinfo, key=value pairs
+# and bearer tokens. Over-redaction is acceptable; leaking one is not.
+_URL_USERINFO_RE = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)[^/\s@]*@")
+_SECRET_KV_RE = re.compile(
+    r"(?i)\b(password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|key|"
+    r"authorization|credentials?)(\s*[=:]\s*)(\"[^\"]*\"|'[^']*'|[^\s,;&)]+)"
+)
+_BEARER_RE = re.compile(r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]+")
 MAX_REASONS = 5
 
 
@@ -102,9 +110,16 @@ def parse_public_databases(env=os.environ) -> frozenset[str]:
     return frozenset(validate_identifier("public database", name) for name in names)
 
 
-def redact(text: str) -> str:
-    """One line, no email addresses (ClickHouse errors can echo settings)."""
+def redact(text) -> str:
+    """One line, no credentials and no email addresses.
+
+    ClickHouse and driver errors can echo settings (the caller's email),
+    connection URLs and ``password=...`` style parameters.
+    """
     line = " ".join(str(text).split())
+    line = _URL_USERINFO_RE.sub(r"\1<redacted>@", line)
+    line = _BEARER_RE.sub(r"\1 <redacted>", line)  # before KV: "Authorization: Bearer x"
+    line = _SECRET_KV_RE.sub(r"\1\2<redacted>", line)
     return _EMAIL_RE.sub("<email>", line)[:300]
 
 
@@ -390,7 +405,10 @@ def check_with_mcp_connection(database: str, *, public_databases=None) -> CheckR
     try:
         client = create_clickhouse_client()
     except Exception as e:  # noqa: BLE001
-        raise PolicyCoverageError(f"cannot connect to ClickHouse: {redact(e)}") from None
+        # Connection errors are the likeliest to carry credentials: class only.
+        raise PolicyCoverageError(
+            f"cannot connect to ClickHouse ({type(e).__name__}); check the CLICKHOUSE_* settings"
+        ) from None
     try:
         with _send_custom_settings():
             return check(client, database, public_databases=public_databases)
