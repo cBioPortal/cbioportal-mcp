@@ -205,7 +205,10 @@ are created: credential values (URL userinfo; `password`, `passwd`, `pwd`,
 without quotes and with `=` or `:`; the **whole** value of any
 `Authorization` / `Proxy-Authorization` header, whatever its scheme, including
 Digest parameter lists; bare Basic/Bearer/Digest credentials) are replaced
-with `<redacted>`. WARNING-and-above records are collapsed to one physical
+with `<redacted>`. Redaction fails closed and may remove more than the secret:
+an unquoted `Authorization` value takes the rest of its line, including any
+neighbouring fields on it (and folded continuation lines); a quoted value that
+never closes, or closes mid-token, takes everything to the end of the message. WARNING-and-above records are collapsed to one physical
 line, with any traceback or stack folded into it after ` | `. A message that
 cannot be rendered is logged as `<unloggable message redacted>`; scrubbing
 never raises into the code that logs. Use the error code and check name to diagnose; reproduce with

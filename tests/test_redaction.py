@@ -184,3 +184,74 @@ def test_unscrubbed_loggers_are_untouched():
         "some.other.library", logging.ERROR, __file__, 1, "password=%s", (SECRET,), None
     )
     assert record.getMessage() == f"password={SECRET}"
+
+
+# --- 4. Unterminated quotes fail closed: redact to the end of the message ----
+
+UNTERMINATED_AUTH = [
+    f'Authorization: "Bearer\n{SECRET}',
+    f"Authorization: 'Bearer\n{SECRET}\nmore",
+    f'Proxy-Authorization: "Digest username="u",\n response="{SECRET}"',
+    f'Proxy-Authorization: \'Digest username="u",\nresponse="{SECRET}"\n\ntrailer',
+    f'{{"Authorization": "Bearer\n{SECRET}\n}}',
+    f"{{'proxy-authorization': 'Basic\r\n{SECRET}'\n",  # \r\n, quote closes after the secret
+    # Unquoted value with a quote opened inside it that spans lines.
+    f'Authorization: Digest response="a\n{SECRET}"',
+    f'Authorization: Digest response="never closed\n{SECRET}\nmore',
+    # Folded (obs-fold) continuation lines belong to the header value.
+    f'Authorization: Digest username="u",\n response="{SECRET}"',
+    f'Proxy-Authorization: Digest username="u",\n\tresponse="{SECRET}"',
+    # Bare Digest list with an unterminated quote.
+    f'server sent Digest realm="r\n{SECRET}',
+]
+
+
+@pytest.mark.parametrize("value", UNTERMINATED_AUTH)
+@pytest.mark.parametrize("level", [logging.ERROR, logging.INFO])
+def test_unterminated_or_multiline_authorization_never_leaks(emit, value, level):
+    out = emit(level, "Failed to connect to ClickHouse: %s", value)
+    assert SECRET not in out
+    if level >= logging.WARNING:
+        assert len(physical_lines(out)) == 1
+
+
+@pytest.mark.parametrize("value", UNTERMINATED_AUTH)
+def test_unterminated_authorization_redact_helpers(value):
+    assert SECRET not in redaction.redact(value)
+    assert SECRET not in redaction.redact_credentials(value)
+
+
+UNTERMINATED_KV = [
+    f'password="abc\n{SECRET}',
+    f"password='abc\n{SECRET}\nmore",
+    f'{{"passwd": "x\n{SECRET}',
+    f"{{'pwd': 'x\n\n{SECRET}",
+    f'"secret": "x\n{SECRET}',
+    f"token: 'x\n{SECRET}",
+    f'{{"api_key": "x\\"\n{SECRET}',  # escaped quote, never closed
+    f"'client_secret'='x\n{SECRET}",
+    f'credentials="x\r\n{SECRET}',
+    f'password="ab"c\n{SECRET}',  # closes mid-token: malformed, fail closed
+    f"token='ab'cd {SECRET}",
+]
+
+
+@pytest.mark.parametrize("value", UNTERMINATED_KV)
+def test_unterminated_quoted_key_values_fail_closed(emit, value):
+    out = emit(logging.ERROR, "error: %s", value)
+    assert SECRET not in out
+    assert len(physical_lines(out)) == 1
+    assert SECRET not in redaction.redact_credentials(value)
+    assert SECRET not in redaction.redact(value)
+
+
+def test_terminated_values_keep_their_neighbours():
+    out = redaction.redact_credentials(
+        f'{{"Authorization": "Bearer {SECRET}", "status": 401}}\n'
+        f'password="{SECRET}" user=mcp_user\n'
+        f"Authorization: Basic {SECRET}\n"
+        "next line kept"
+    )
+    assert SECRET not in out
+    assert '"status": 401' in out and "user=mcp_user" in out
+    assert out.endswith("\nnext line kept")

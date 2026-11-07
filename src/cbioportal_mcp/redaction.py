@@ -28,28 +28,34 @@ _KEY = (
     r"private[_-]?key|authorization|credentials?)"
     r"|key"
 )
+# A closing quote only ends a value when a delimiter (or the end) follows it;
+# otherwise the quoting is malformed and the value fails closed.
+_AFTER_QUOTE = r"[\s,;&)}\]]|\Z"
+_AFTER_QUOTE_CHARS = " \t\r\n,;&)}]"
 # Optional quote around the key ("password", 'password', password), then = or :,
-# then a quoted or bare value.
+# then a quoted or bare value. A quote that never closes fails closed: the
+# value runs to the end of the WHOLE text, across every following line.
 _SECRET_KV_RE = re.compile(
     rf"""(?ix)
     (?P<q>["']?)\b(?P<key>{_KEY})(?P=q)
     (?P<sep>\s*[=:]\s*)
-    (?P<value>"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\s,;&)}}\]]+)
+    (?P<value>"(?:[^"\\]|\\.)*"(?={_AFTER_QUOTE})|'(?:[^'\\]|\\.)*'(?={_AFTER_QUOTE})
+              |["'][\s\S]*|[^\s,;&)}}\]]+)
     """
 )
 _URL_USERINFO_RE = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)[^/\s@]*@")
-# An Authorization / Proxy-Authorization header (or dict/JSON entry): the WHOLE
-# value goes, whatever the scheme (Digest carries comma-separated parameters).
-# A quoted value ends at its closing quote; an unquoted one runs to end of line.
+# An Authorization / Proxy-Authorization header (or dict/JSON entry) and a bare
+# Digest parameter list: the WHOLE value goes, whatever the scheme. The end of
+# the value is found by _auth_value_end (fail closed on unterminated quotes).
 _AUTH_HEADER_RE = re.compile(
     r"""(?ix)
     (?P<q>["']?)(?P<key>\b(?:proxy-)?authorization)(?P=q)
     (?P<sep>\s*[=:]\s*)
-    (?P<value>"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\r\n]*)
     """
 )
-# Credentials outside a header: "Bearer x", "Basic x", or a Digest parameter list.
-_AUTH_SCHEME_RE = re.compile(r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]+|\b(digest)\s+[^\r\n]*")
+_DIGEST_RE = re.compile(r"(?i)(?P<key>\bdigest)(?P<sep>\s+)")
+# Bare token credentials: "Bearer x", "Basic x".
+_AUTH_SCHEME_RE = re.compile(r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]+")
 _EMAIL_RE = re.compile(r"[^\s@'\"`<>]+(?:@|%40)[^\s@'\"`<>]+", re.IGNORECASE)
 # A ClickHouse server error code ("Code: 497." / DatabaseError.code).
 _CH_CODE_RE = re.compile(r"\bCode:\s*(\d{1,4})\b")
@@ -58,13 +64,72 @@ MAX_LINE = 300
 REDACTED = "<redacted>"
 
 
+def _auth_value_end(text: str, start: int) -> int:
+    """End of an Authorization value starting at ``start``. Fail closed.
+
+    - Quoted value: ends at the matching closing quote (backslash escapes
+      honoured) when a delimiter or the end follows it; if it never closes, or
+      closes mid-token (``"Digest username="u"...``), at the end of the text.
+    - Unquoted value: runs to the end of the line, and also absorbs folded
+      continuation lines (next line starts with space/tab) and any quote opened
+      inside it; a quote that never closes takes the rest of the text.
+    """
+    n = len(text)
+    if start < n and text[start] in "\"'":
+        quote, j = text[start], start + 1
+        while j < n:
+            if text[j] == "\\":
+                j += 2
+            elif text[j] == quote:
+                end = j + 1
+                if end == n or text[end] in _AFTER_QUOTE_CHARS:
+                    return end
+                return n  # malformed quoting: fail closed
+            else:
+                j += 1
+        return n
+    j, quote = start, None
+    while j < n:
+        c = text[j]
+        if quote is not None:
+            if c == "\\":
+                j += 2
+                continue
+            if c == quote:
+                quote = None
+        elif c in "\"'":
+            quote = c
+        elif c in "\r\n":
+            k = j + 2 if text.startswith("\r\n", j) else j + 1
+            if k < n and text[k] in " \t":
+                j = k
+                continue
+            return j
+        j += 1
+    return n
+
+
+def _redact_auth_values(text: str, pattern: re.Pattern) -> str:
+    out, pos = [], 0
+    while True:
+        m = pattern.search(text, pos)
+        if m is None:
+            out.append(text[pos:])
+            return "".join(out)
+        q = m.groupdict().get("q") or ""
+        out.append(text[pos : m.start()])
+        out.append(f"{q}{m['key']}{q}{m['sep']}{REDACTED}")
+        pos = _auth_value_end(text, m.end())
+
+
 def redact_credentials(text) -> str:
     """Remove credential values; keeps everything else (including newlines)."""
     text = str(text)
     text = _URL_USERINFO_RE.sub(rf"\1{REDACTED}@", text)
-    # Whole header values first, then bare scheme credentials, then key=value.
-    text = _AUTH_HEADER_RE.sub(lambda m: f"{m['q']}{m['key']}{m['q']}{m['sep']}{REDACTED}", text)
-    text = _AUTH_SCHEME_RE.sub(lambda m: f"{m[1] or m[2]} {REDACTED}", text)
+    # Whole header values first, then Digest lists, bare tokens, then key=value.
+    text = _redact_auth_values(text, _AUTH_HEADER_RE)
+    text = _redact_auth_values(text, _DIGEST_RE)
+    text = _AUTH_SCHEME_RE.sub(rf"\1 {REDACTED}", text)
     return _SECRET_KV_RE.sub(lambda m: f"{m['q']}{m['key']}{m['q']}{m['sep']}{REDACTED}", text)
 
 

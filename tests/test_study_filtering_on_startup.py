@@ -478,6 +478,34 @@ def test_upstream_run_query_worker_error_is_scrubbed(monkeypatch, caplog):
     assert_logs_clean(caplog)
 
 
+UNTERMINATED_AUTH_CONNECT_ERRORS = [
+    f'Authorization: "Bearer\n{REVIEW_SECRET}',  # Codex re-review #3 repro
+    f"Authorization: 'Bearer\n{REVIEW_SECRET}",
+    f'Proxy-Authorization: "Digest username="u",\nresponse="{REVIEW_SECRET}"',
+    f'Proxy-Authorization: \'Digest username="u",\nresponse="{REVIEW_SECRET}"',
+    f'password="abc\n{REVIEW_SECRET}',
+]
+
+
+@pytest.mark.parametrize("detail", UNTERMINATED_AUTH_CONNECT_ERRORS)
+def test_permission_gate_unterminated_quoted_credentials_never_logged(
+    below_upstream, caplog, detail
+):
+    """Real permission gate + real upstream factory: clickhouse_connect.get_client
+    raises; upstream logs 'Failed to connect to ClickHouse: ...' itself."""
+    below_upstream(connect_error=ConnectionError(detail))
+    with caplog.at_level(logging.DEBUG), pytest.raises(SystemExit) as exc:
+        _validate_server_startup()
+    assert exc.value.code == 2
+    upstream_errors = [
+        r for r in caplog.records if r.name == "mcp-clickhouse" and r.levelno == logging.ERROR
+    ]
+    assert upstream_errors and "Failed to connect to ClickHouse" in upstream_errors[0].getMessage()
+    assert_logs_clean(caplog)
+    for record in caplog.records:
+        assert "review-secret" not in record.getMessage() + (record.exc_text or "")
+
+
 def test_startup_with_failing_upstream_acquire_is_scrubbed(below_upstream, monkeypatch, caplog):
     """Codex's exact startup repro: patch upstream acquisition to raise and run
     the real gate. Startup refuses and no record carries the secret."""
