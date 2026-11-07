@@ -1,0 +1,131 @@
+-- ============================================================================
+-- study-authz 0: user_study, its manual source, and the refresh that builds it
+-- ============================================================================
+-- TEMPLATE. Render and apply with
+--   uv run python -m cbioportal_mcp.study_authz apply --database <db> \
+--       --public-group <group> --app-name <app>
+-- (see docs/study-authz.md). Placeholders:
+--   __CLICKHOUSE_DATABASE__   target database (blue/green name)
+--   __PUBLIC_GROUP__          cBioPortal always_show_study_group (required)
+--   __APP_NAME__              cBioPortal app.name (required; recorded for the
+--                             future JWT source's claim matching)
+--   __REFRESH_MINUTES__       refresh interval
+--   __PRIVATE_GRACE_MINUTES__ how long a private row outlives its last refresh
+--
+-- Never part of sql/ or the daily public clone: filtering stays OFF there.
+-- Requires ClickHouse >= 24.10 (refreshable materialized views without the
+-- experimental flag; the row policies use getSettingOrDefault).
+--
+-- Layout: user_study is the ONLY table the row policies read, and the refresh
+-- below is its only writer. Every source lands in its own input table and is
+-- folded in by the refresh, which builds a staging table and EXCHANGEs it with
+-- user_study (that is what a non-APPEND refreshable materialized view does), so
+-- readers always see one complete snapshot.
+--   * public  - rows with email = '' for every study whose cancer_study.groups
+--               contains __PUBLIC_GROUP__. valid_until is the far future, so a
+--               failing refresh never removes public access.
+--   * manual  - user_study_manual, maintained by an admin.
+--   * (future) jwt - user_study_jwt, appended by an INSERT-only writer; the
+--               refresh keeps only each email's newest token (by issued_at).
+--               Adding it is one more UNION ALL branch in `grants` below; no
+--               policy or user_study schema change (docs/study-authz.md).
+--
+-- Fail closed: private rows get valid_until = least(source valid_until,
+-- refresh time + __PRIVATE_GRACE_MINUTES__ minutes). If the refresh stops or
+-- keeps failing, user_study keeps its last snapshot, every private row expires
+-- within the grace period, and the public rows remain.
+--
+-- Idempotent: CREATE TABLE IF NOT EXISTS keeps the tables (and the manual
+-- grants); the refresh view is dropped and recreated so changed parameters take
+-- effect (dropping a TO view leaves user_study's rows in place), then the file
+-- waits for one refresh.
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS __CLICKHOUSE_DATABASE__.user_study
+(
+    `email` String COMMENT 'Lower-cased caller email; empty string = every caller (public studies).',
+    `cancer_study_identifier` String COMMENT 'Study the email may read.',
+    `valid_until` DateTime64(3, 'UTC') COMMENT 'The row grants nothing from this instant on.',
+    `source` LowCardinality(String) COMMENT 'public | manual | jwt (future).',
+    `issued_at` DateTime64(3, 'UTC') COMMENT 'Refresh time (public/manual) or token issued-at (jwt) that produced the row.'
+)
+ENGINE = MergeTree
+ORDER BY (email, cancer_study_identifier);
+
+CREATE TABLE IF NOT EXISTS __CLICKHOUSE_DATABASE__.user_study_manual
+(
+    `email` String COMMENT 'Caller email (lower-cased by the refresh). Must not be empty.',
+    `grant_key` String COMMENT 'A cancer_study_identifier, a whole cancer_study.groups entry, or ALL / ALL_TCGA / ALL_NCI_TARGET; case-insensitive.',
+    `valid_until` DateTime64(3, 'UTC') COMMENT 'Grant ends at this instant.',
+    `note` String DEFAULT '' COMMENT 'Free text: who asked, ticket, etc.'
+)
+ENGINE = MergeTree
+ORDER BY (email, grant_key);
+
+ALTER TABLE __CLICKHOUSE_DATABASE__.user_study
+    MODIFY COMMENT 'study-authz: read by the row policies, written only by user_study_refresh. public_group=__PUBLIC_GROUP__ app_name=__APP_NAME__ refresh_minutes=__REFRESH_MINUTES__ private_grace_minutes=__PRIVATE_GRACE_MINUTES__';
+
+DROP VIEW IF EXISTS __CLICKHOUSE_DATABASE__.user_study_refresh SYNC;
+
+CREATE MATERIALIZED VIEW __CLICKHOUSE_DATABASE__.user_study_refresh
+REFRESH EVERY __REFRESH_MINUTES__ MINUTE
+TO __CLICKHOUSE_DATABASE__.user_study
+DEFINER = CURRENT_USER SQL SECURITY DEFINER
+AS
+WITH
+    now64(3, 'UTC') AS refreshed_at,
+    refreshed_at + toIntervalMinute(__PRIVATE_GRACE_MINUTES__) AS private_until,
+    upperUTF8('__PUBLIC_GROUP__') AS public_group,
+    studies AS (
+        -- groups rule: split on ';', drop empty entries, whole-entry
+        -- case-insensitive comparison, no trimming.
+        SELECT
+            assumeNotNull(cancer_study_identifier) AS cancer_study_identifier,
+            upperUTF8(assumeNotNull(cancer_study_identifier)) AS study_key,
+            arrayMap(g -> upperUTF8(g), arrayFilter(g -> g != '', splitByChar(';', ifNull(`groups`, '')))) AS group_keys
+        FROM __CLICKHOUSE_DATABASE__.cancer_study
+        WHERE cancer_study_identifier IS NOT NULL AND cancer_study_identifier != ''
+    ),
+    study_keys AS (
+        -- Every grant key that unlocks a study (cBioPortal's rules).
+        SELECT
+            cancer_study_identifier,
+            arrayJoin(arrayDistinct(arrayConcat(
+                [study_key, 'ALL'],
+                group_keys,
+                if(endsWith(study_key, '_TCGA'), ['ALL_TCGA'], []),
+                if(endsWith(study_key, '_TARGET') OR study_key IN ('ALL_TARGET_PHASE1', 'ALL_TARGET_PHASE2'),
+                   ['ALL_NCI_TARGET'], [])
+            ))) AS match_key
+        FROM studies
+    ),
+    grants AS (
+        SELECT
+            lowerUTF8(email) AS email,
+            upperUTF8(grant_key) AS match_key,
+            least(valid_until, private_until) AS valid_until,
+            'manual' AS source,
+            refreshed_at AS issued_at
+        FROM __CLICKHOUSE_DATABASE__.user_study_manual
+        WHERE lowerUTF8(email) != '' AND grant_key != '' AND valid_until > refreshed_at
+    )
+SELECT
+    '' AS email,
+    cancer_study_identifier,
+    toDateTime64('2299-12-31 23:59:59.999', 3, 'UTC') AS valid_until,
+    'public' AS source,
+    refreshed_at AS issued_at
+FROM studies
+WHERE has(group_keys, public_group)
+UNION ALL
+SELECT
+    g.email AS email,
+    s.cancer_study_identifier AS cancer_study_identifier,
+    g.valid_until AS valid_until,
+    g.source AS source,
+    g.issued_at AS issued_at
+FROM grants AS g
+INNER JOIN study_keys AS s ON g.match_key = s.match_key;
+
+SYSTEM REFRESH VIEW __CLICKHOUSE_DATABASE__.user_study_refresh;
+SYSTEM WAIT VIEW __CLICKHOUSE_DATABASE__.user_study_refresh;

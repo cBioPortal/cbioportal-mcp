@@ -224,13 +224,12 @@ def validate_startup(transport: Optional[str] = None) -> tuple[str, str]:
 
     A launcher can override the transport (e.g. Inspector selects stdio), so
     validate that effective transport too, rather than trusting only the env.
+
+    Filtering ``on`` additionally needs both rollout switches at ``enforce``
+    (checked in ``rollout.parse``); the server's lifespan then runs the
+    database-side coverage check (``study_authz.startup_check``) before serving.
     """
     filtering = required_enum("CBIOPORTAL_MCP_STUDY_FILTERING", ("on", "off"))
-    if filtering == "on":
-        raise ValueError(
-            "CBIOPORTAL_MCP_STUDY_FILTERING=on: study filtering cannot be enabled "
-            "until a later release (P11); set it to off for this release"
-        )
     configured_transport = get_mcp_config().mcp_server_transport
     effective_transport = transport if transport is not None else configured_transport
     if "stdio" in (configured_transport, effective_transport):
@@ -242,4 +241,7 @@ def validate_startup(transport: Optional[str] = None) -> tuple[str, str]:
 
     # Rollout switches default to off only when actually serving local stdio.
     rollout.initialize(filtering, local_dev=effective_transport == "stdio")
+    from cbioportal_mcp.identity import validate_auth_startup
+
+    validate_auth_startup()
     return filtering, effective_transport

@@ -1,7 +1,9 @@
 """Auth rollout switches, parsed once at startup and frozen thereafter.
 
-No request handling reads these yet; later PRs call `auth_checks_apply` and
-`public_db_check_enforced`. Each switch is temporary: see `EXPIRES`.
+Authentication uses `auth_checks_apply`. `public_db_check_enforced` is reserved
+for the public-database check (P10), which is not built yet: today
+PUBLIC_DB_CHECK=enforce is only validated, logged and required for study
+filtering `on`. Each switch is temporary: see `EXPIRES`.
 """
 
 import logging
