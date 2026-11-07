@@ -202,9 +202,13 @@ Log records from the ClickHouse client stack (`mcp-clickhouse`,
 `clickhouse_connect`, `urllib3`) and from this package are scrubbed when they
 are created: credential values (URL userinfo; `password`, `passwd`, `pwd`,
 `secret`, `token`, `api_key`, `client_secret`, `authorization` keys with or
-without quotes and with `=` or `:`; Basic/Bearer/Digest credentials) are
-replaced with `<redacted>`, and WARNING-and-above records are collapsed to one
-line. Use the error code and check name to diagnose; reproduce with
+without quotes and with `=` or `:`; the **whole** value of any
+`Authorization` / `Proxy-Authorization` header, whatever its scheme, including
+Digest parameter lists; bare Basic/Bearer/Digest credentials) are replaced
+with `<redacted>`. WARNING-and-above records are collapsed to one physical
+line, with any traceback or stack folded into it after ` | `. A message that
+cannot be rendered is logged as `<unloggable message redacted>`; scrubbing
+never raises into the code that logs. Use the error code and check name to diagnose; reproduce with
 `clickhouse-client` as the runtime user when you need the full server text.
 
 ## 6. Verify
