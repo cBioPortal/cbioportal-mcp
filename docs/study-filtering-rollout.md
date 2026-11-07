@@ -192,11 +192,20 @@ cBioPortal MCP rollout switches: study_filtering=on auth_enforcement=enforce aut
 
 (`(user <mcp_user>, ...)` for a user target.) A refusal by the ClickHouse
 permission gate or the study-filtering check is one `CRITICAL` line and exit
-code 2. Driver and server error text in it is redacted (emails, URL userinfo,
-`password=`/`secret=`/`token=`/`key=` values, bearer tokens), and connection or
-unexpected errors are reported by exception class only. A refusal of the env
-settings is a `ValueError` whose one-line message names the setting. None of
-them contains emails or secrets.
+code 2. It names the failed check and the corrective step; ClickHouse,
+driver and connection errors are reported only as the exception class and the
+ClickHouse error code (e.g. `DatabaseError (ClickHouse code 516)`), never their
+free-form text. A refusal of the env settings is a `ValueError` whose one-line
+message names the setting. None of them contains emails or secrets.
+
+Log records from the ClickHouse client stack (`mcp-clickhouse`,
+`clickhouse_connect`, `urllib3`) and from this package are scrubbed when they
+are created: credential values (URL userinfo; `password`, `passwd`, `pwd`,
+`secret`, `token`, `api_key`, `client_secret`, `authorization` keys with or
+without quotes and with `=` or `:`; Basic/Bearer/Digest credentials) are
+replaced with `<redacted>`, and WARNING-and-above records are collapsed to one
+line. Use the error code and check name to diagnose; reproduce with
+`clickhouse-client` as the runtime user when you need the full server text.
 
 ## 6. Verify
 

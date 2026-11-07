@@ -33,10 +33,10 @@ from __future__ import annotations
 import contextlib
 import logging
 import os
-import re
 import uuid
 from dataclasses import dataclass
 
+from cbioportal_mcp.redaction import describe_error, redact  # noqa: F401 (re-exported)
 from cbioportal_mcp.study_authz.catalog import (
     USER_STUDY_MANUAL_TABLE,
     USER_STUDY_TABLE,
@@ -50,6 +50,7 @@ from cbioportal_mcp.study_authz.coverage import (
 )
 from cbioportal_mcp.study_authz.grants import (
     STUDY_LINK_COLUMNS,
+    GrantParseError,
     audit_grants,
     audit_other_database,
     collect_grants,
@@ -67,15 +68,6 @@ EMAIL_SETTING = "SQL_cbio_user"
 # RFC 2606 reserves .invalid: no real caller can ever have this address.
 PROBE_DOMAIN = "startup-probe.invalid"
 
-_EMAIL_RE = re.compile(r"[^\s@'\"`]+@[^\s@'\"`]+")
-# Credentials a driver/server error can echo: URL userinfo, key=value pairs
-# and bearer tokens. Over-redaction is acceptable; leaking one is not.
-_URL_USERINFO_RE = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)[^/\s@]*@")
-_SECRET_KV_RE = re.compile(
-    r"(?i)\b(password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|key|"
-    r"authorization|credentials?)(\s*[=:]\s*)(\"[^\"]*\"|'[^']*'|[^\s,;&)]+)"
-)
-_BEARER_RE = re.compile(r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]+")
 MAX_REASONS = 5
 
 
@@ -108,19 +100,6 @@ def parse_public_databases(env=os.environ) -> frozenset[str]:
             f"{PUBLIC_DATABASES_ENV} must be a comma-separated list without empty items"
         )
     return frozenset(validate_identifier("public database", name) for name in names)
-
-
-def redact(text) -> str:
-    """One line, no credentials and no email addresses.
-
-    ClickHouse and driver errors can echo settings (the caller's email),
-    connection URLs and ``password=...`` style parameters.
-    """
-    line = " ".join(str(text).split())
-    line = _URL_USERINFO_RE.sub(r"\1<redacted>@", line)
-    line = _BEARER_RE.sub(r"\1 <redacted>", line)  # before KV: "Authorization: Bearer x"
-    line = _SECRET_KV_RE.sub(r"\1\2<redacted>", line)
-    return _EMAIL_RE.sub("<email>", line)[:300]
 
 
 def probe_email() -> str:
@@ -185,8 +164,12 @@ def _check(
             return fn()
         except PolicyCoverageError:
             raise
+        except GrantParseError as e:  # our own fixed-text parser messages
+            raise PolicyCoverageError(f"{what}: {e}") from None
         except Exception as e:  # noqa: BLE001 - any driver/server error refuses
-            raise PolicyCoverageError(f"{what}: {redact(e)}") from None
+            # Never echo driver/server text: it can carry credentials (URLs,
+            # JSON bodies, headers). The step name says what to fix.
+            raise PolicyCoverageError(f"{what}: {describe_error(e)}") from None
 
     # 1. The per-query email setting must reach the policies.
     echoed = step(
@@ -407,7 +390,7 @@ def check_with_mcp_connection(database: str, *, public_databases=None) -> CheckR
     except Exception as e:  # noqa: BLE001
         # Connection errors are the likeliest to carry credentials: class only.
         raise PolicyCoverageError(
-            f"cannot connect to ClickHouse ({type(e).__name__}); check the CLICKHOUSE_* settings"
+            f"cannot connect to ClickHouse ({describe_error(e)}); check the CLICKHOUSE_* settings"
         ) from None
     try:
         with _send_custom_settings():

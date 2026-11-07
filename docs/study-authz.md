@@ -356,7 +356,8 @@ are all example.org fakes; put real ones only in your local CSV.
 With `CBIOPORTAL_MCP_STUDY_FILTERING=on` the server refuses to start (one
 `CRITICAL` line, exit code 2) unless its own ClickHouse user is covered. It
 runs `study_authz/startup_check.py` over a client built like mcp-clickhouse's,
-as `currentUser()`, and never logs an email:
+as `currentUser()`, and never logs an email or driver error text (failures name
+the check plus the exception class and ClickHouse error code):
 
 - `SQL_cbio_user` reaches `getSettingOrDefault` under `readonly=1` (ClickHouse
   >= 24.10 and the `SQL_` custom settings prefix).

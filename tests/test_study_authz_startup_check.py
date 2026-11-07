@@ -374,7 +374,10 @@ def test_wildcard_database_grant_refused():
 
 def test_custom_setting_rejected_refused_without_echoing_email():
     message = refused(FakeClickHouse(accept_custom_setting=False), "SQL_cbio_user rejected")
-    assert "<email>" in message
+    # Driver/server text (which echoes the probe email) is not repeated at all:
+    # only the exception class and the ClickHouse error code.
+    assert "@" not in message and startup_check.PROBE_DOMAIN not in message
+    assert "(ClickHouse code 115)" in message
 
 
 def test_policies_unreadable_refused():

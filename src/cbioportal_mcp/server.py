@@ -40,6 +40,7 @@ import mcp.types as mt  # noqa: E402
 from fastmcp import FastMCP  # noqa: E402
 
 from cbioportal_mcp import (  # noqa: E402
+    redaction,  # noqa: E402
     result_format,  # noqa: E402 (after LLMObs.enable)
     rollout,  # noqa: E402 (after LLMObs.enable)
 )
@@ -61,6 +62,9 @@ from cbioportal_mcp.telemetry import (  # noqa: E402
 )
 
 study_request.install()
+# Scrub credentials from ClickHouse client-stack and package log records at
+# creation, before upstream workers log raw exception text (see redaction.py).
+redaction.install()
 
 logger = logging.getLogger(__name__)
 
