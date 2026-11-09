@@ -49,8 +49,9 @@ IDENTITIES = [
 
 # Deliberately independent of TABLES: a new catalog path must receive seed data
 # here, rather than quietly disappearing from parametrization or testing emptiness.
-# Only relationship columns are needed. Int64 IDs line up across each study;
-# stable IDs exercise the String-key path as well.
+# Only relationship columns are needed. Each entity has a disjoint, permuted
+# ID space, so skipping a hop or using another relationship cannot match by accident.
+# Stable IDs exercise the String-key path as well.
 SEED_COLUMNS = {
     "cancer_study": "cancer_study_id cancer_study_identifier groups",
     "patient": "internal_id cancer_study_id",
@@ -82,6 +83,38 @@ SEED_COLUMNS = {
     "cna_event": "cna_event_id",
     "resource_study": "internal_id",
 }
+PARENT_ONLY_TABLES = {"cancer_study", "patient", "genetic_profile", "gistic", "sample_list"}
+# Values are in STUDIES insertion order, deliberately permuted between entities.
+ENTITY_IDS = {
+    "patient": (103, 101, 104, 102),
+    "sample": (202, 204, 201, 203),
+    "genetic_profile": (304, 302, 303, 301),
+    "clinical_event": (401, 403, 402, 404),
+    "gistic": (502, 501, 504, 503),
+    "sample_list": (603, 604, 601, 602),
+    "mutation_event": (704, 701, 703, 702),
+    "cna_event": (801, 803, 804, 802),
+}
+COLUMN_ENTITIES = {
+    "patient_id": "patient",
+    "sample_id": "sample",
+    "genetic_profile_id": "genetic_profile",
+    "referring_genetic_profile_id": "genetic_profile",
+    "referred_genetic_profile_id": "genetic_profile",
+    "clinical_event_id": "clinical_event",
+    "gistic_roi_id": "gistic",
+    "list_id": "sample_list",
+    "mutation_event_id": "mutation_event",
+    "cna_event_id": "cna_event",
+}
+INTERNAL_ID_ENTITIES = {
+    "patient": "patient",
+    "sample": "sample",
+    "clinical_patient": "patient",
+    "resource_patient": "patient",
+    "clinical_sample": "sample",
+    "resource_sample": "sample",
+}
 STRING_COLUMNS = {"stable_id", "profile_stable_id"}
 NULLABLE_COLUMNS = {"cancer_study_identifier", "groups"}
 
@@ -89,10 +122,23 @@ NULLABLE_COLUMNS = {"cancer_study_identifier", "groups"}
 def _docker_ok() -> bool:
     if not shutil.which("docker"):
         return False
-    return subprocess.run(["docker", "info"], capture_output=True).returncode == 0
+    try:
+        return subprocess.run(["docker", "info"], capture_output=True, timeout=10).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
 
 
-pytestmark = pytest.mark.skipif(not _docker_ok(), reason="Docker is not available")
+DOCKER_AVAILABLE = _docker_ok()
+
+
+def test_catalog_tables_have_seed_data():
+    missing = set(TABLES) - SEED_COLUMNS.keys()
+    assert not missing, f"Indirect catalog tables without seed data: {sorted(missing)}"
+
+
+def test_seed_tables_remain_in_catalog_coverage():
+    unexpected = SEED_COLUMNS.keys() - set(TABLES) - PARENT_ONLY_TABLES
+    assert not unexpected, f"Seeded tables lost indirect catalog coverage: {sorted(unexpected)}"
 
 
 class Server:
@@ -126,8 +172,10 @@ class Server:
 
 @pytest.fixture(scope="module")
 def server():
-    missing = set(TABLES) - SEED_COLUMNS.keys()
-    assert not missing, f"Indirect catalog tables without seed data: {sorted(missing)}"
+    if not DOCKER_AVAILABLE:
+        if "CI" in os.environ:
+            pytest.fail("Docker is required when CI is set")
+        pytest.skip("Docker is not available")
     name = f"study-authz-indirect-{uuid.uuid4().hex[:8]}"
     try:
         run = subprocess.run(
@@ -152,7 +200,7 @@ def server():
             text=True,
         )
         if run.returncode:
-            pytest.skip(f"could not start {IMAGE}: {run.stderr.strip()[:200]}")
+            pytest.fail(f"could not start {IMAGE}: {run.stderr.strip()[:1000]}")
         port_line = subprocess.run(
             ["docker", "port", name, "8123/tcp"], capture_output=True, text=True, check=True
         ).stdout.splitlines()[0]
@@ -200,6 +248,22 @@ def server():
         subprocess.run(["docker", "rm", "-f", name], capture_output=True)
 
 
+def _entity_id(entity: str, sid: int) -> int:
+    return ENTITY_IDS[entity][sid - 1]
+
+
+def _seed_value(table: str, column: str, sid: int) -> int | str:
+    if column in STRING_COLUMNS:
+        return f"profile_{_entity_id('genetic_profile', sid)}"
+    if column in NULLABLE_COLUMNS:
+        return ""  # Filled with study metadata below.
+    if column == "cancer_study_id" or (table == "resource_study" and column == "internal_id"):
+        return sid
+    if column == "internal_id":
+        return _entity_id(INTERNAL_ID_ENTITIES[table], sid)
+    return _entity_id(COLUMN_ENTITIES[column], sid)
+
+
 def _load_fixture(server: Server) -> None:
     admin = server.admin
     admin.command(f"CREATE DATABASE {DB}")
@@ -220,9 +284,7 @@ def _load_fixture(server: Server) -> None:
         server.rows[table] = []
         server.expected[table] = {}
         for sid, study in STUDIES.items():
-            row = {column: sid for column in columns}
-            for column in STRING_COLUMNS & row.keys():
-                row[column] = f"profile_{sid}"
+            row = {column: _seed_value(table, column, sid) for column in columns}
             if table == "cancer_study":
                 row.update(cancer_study_identifier=study, groups="PUBLIC" if sid == 1 else study)
             row["row_tag"] = study
@@ -237,8 +299,8 @@ def _load_fixture(server: Server) -> None:
             tag = f"link_{referring}_{referred}"
             server.rows["genetic_profile_link"].append(
                 {
-                    "referring_genetic_profile_id": referring,
-                    "referred_genetic_profile_id": referred,
+                    "referring_genetic_profile_id": _entity_id("genetic_profile", referring),
+                    "referred_genetic_profile_id": _entity_id("genetic_profile", referred),
                     "row_tag": tag,
                 }
             )
@@ -249,8 +311,8 @@ def _load_fixture(server: Server) -> None:
         ("cna_event", "sample_cna_event", "cna_event_id"),
     ):
         for event_id, tag, studies in (
-            (99, "shared_public_A", {1, 2}),
-            (98, "only_A", {2}),
+            (_entity_id(event, 1) + 90, "shared_public_A", {1, 2}),
+            (_entity_id(event, 1) + 91, "only_A", {2}),
         ):
             server.rows[event].append({key: event_id, "row_tag": tag})
             server.expected[event][tag] = studies
