@@ -96,11 +96,11 @@ def test_local_stdio_defaults_and_still_rejects_invalid(monkeypatch, name):
 
 
 @pytest.mark.parametrize(
-    "enforcement, db_check, ok",
-    [("enforce", "enforce", True), ("enforce", "off", False),
-     ("off", "enforce", False), ("off", "off", False)],
+    "enforcement, db_check",
+    [("enforce", "enforce"), ("enforce", "off"),
+     ("off", "enforce"), ("off", "off")],
 )
-def test_study_filtering_requires_both_enforced(monkeypatch, enforcement, db_check, ok):
+def test_study_filtering_accepts_switch_combinations(monkeypatch, enforcement, db_check):
     monkeypatch.setenv(ENFORCEMENT, enforcement)
     monkeypatch.setenv(DB_CHECK, db_check)
     assert rollout.parse("on", local_dev=False).public_db_check == db_check

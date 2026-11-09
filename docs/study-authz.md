@@ -364,8 +364,11 @@ still refuse startup.
 
 Verify `GET /health` after restart: it returns only `study_data_available` and
 `reason` (`checks_pending`, `rollout_not_enforced`, `filtering_check_failed`,
-`ready`, `filtering_off`). Pending checks return HTTP 503; completed checks
-return HTTP 200 even when degraded so Kubernetes keeps login/schema reachable.
+`ready`, `filtering_off`). Normal uvicorn startup binds only after the lifespan
+and checks finish, so probes during checks get connection refused. HTTP 503
+(`checks_pending`) is observable on hosts that skip the lifespan. Completed
+checks return HTTP 200 even when degraded so Kubernetes keeps login/schema
+reachable.
 Inspect the boolean or startup log, rather than process uptime or status code
 alone. Fix grants/configuration and restart to recover. During rollback to
 filtering `off`, verify `reason: filtering_off`; retain the grant revocation

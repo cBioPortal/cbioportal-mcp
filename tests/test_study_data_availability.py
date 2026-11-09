@@ -1,6 +1,9 @@
 """Exercise the gate through real MCP dispatch, ahead of validation and caches."""
 
 import json
+import os
+import subprocess
+import sys
 
 import pytest
 from fastmcp import Client
@@ -49,7 +52,11 @@ async def test_every_registered_tool_and_resource_is_gated(degraded, monkeypatch
         "get_gene_frequency_by_cancer_type",
         "get_profiled_counts",
     }
-    assert set(tools) == study_tools | availability.SAFE_TOOLS
+    assert set(tools) == study_tools | {
+        "clickhouse_list_tables",
+        "clickhouse_list_table_columns",
+        "search_oncotree",
+    }
     resources = await server.mcp.get_resources()
     templates = await server.mcp.get_resource_templates()
     assert resources
@@ -189,6 +196,160 @@ def test_gate_remains_closed_during_check_and_off_bypasses(degraded, monkeypatch
     availability.require()
     rollout._reset_for_tests()
     monkeypatch.setenv("CBIOPORTAL_MCP_STUDY_FILTERING", "off")
+    rollout.initialize("off", local_dev=False)
     availability.complete("filtering_check_failed")
     assert availability.reason() == "filtering_off"
     availability.require()
+
+
+def test_safe_tool_allowlist_is_pinned():
+    assert availability.SAFE_TOOLS == {
+        "clickhouse_list_tables",
+        "clickhouse_list_table_columns",
+        "search_oncotree",
+    }
+
+
+@pytest.mark.parametrize("raw", [None, "off", "on"])
+def test_fresh_import_is_blocked_before_and_after_pinning(raw):
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith(("CLICKHOUSE_", "CBIOPORTAL_MCP_"))
+    }
+    if raw is not None:
+        env["CBIOPORTAL_MCP_STUDY_FILTERING"] = raw
+    env.update(
+        {
+            rollout.AUTH_ENFORCEMENT_ENV: "enforce",
+            rollout.PUBLIC_DB_CHECK_ENV: "enforce",
+            rollout.AUTH_TEST_USERS_ENV: "",
+        }
+    )
+    script = """
+from fastmcp.exceptions import ToolError
+from cbioportal_mcp import rollout
+from cbioportal_mcp.study_authz import availability
+assert rollout._PIN is None
+for pinned in (False, True):
+    if pinned:
+        rollout.initialize('on', local_dev=False)
+    assert availability.reason() == 'checks_pending'
+    assert not availability.available()
+    try:
+        availability.require()
+    except ToolError as error:
+        assert 'checks_pending' in str(error)
+    else:
+        raise AssertionError('fresh import served study data')
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script], env=env, capture_output=True, text=True, timeout=60
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("raw", [None, "off", "on"])
+def test_unpinned_filtering_never_reports_available(monkeypatch, raw):
+    if raw is None:
+        monkeypatch.delenv("CBIOPORTAL_MCP_STUDY_FILTERING", raising=False)
+    else:
+        monkeypatch.setenv("CBIOPORTAL_MCP_STUDY_FILTERING", raw)
+    assert rollout._PIN is None
+    availability.complete("ready")
+    assert availability.reason() == "checks_pending"
+    with pytest.raises(ToolError, match="checks_pending"):
+        availability.require()
+
+
+@pytest.mark.asyncio
+async def test_preload_waits_for_startup_checks(monkeypatch):
+    monkeypatch.setenv("CBIOPORTAL_MCP_STUDY_FILTERING", "off")
+    app = server.ConfiguredFastMCP(name="preload-order")
+    app.preload_studies = True
+    events = []
+    monkeypatch.setattr(server, "ensure_db_permissions", lambda config: events.append("checks"))
+
+    def fetch():
+        assert events == ["checks"]
+        events.append("fetch")
+
+    class InlineThread:
+        def __init__(self, *, target, daemon):
+            assert daemon
+            self.target = target
+
+        def start(self):
+            self.target()
+
+    monkeypatch.setattr(server.threading, "Thread", InlineThread)
+    monkeypatch.setattr(server, "_fetch_and_store_studies", fetch)
+    monkeypatch.setattr(server, "_refresh_studies_cache_forever", lambda: events.append("loop"))
+    async with server._startup_lifespan(app):
+        events.append("serving")
+    assert events == ["checks", "fetch", "loop", "serving"]
+
+
+def test_main_requests_preload(monkeypatch):
+    monkeypatch.setattr(server.mcp, "preload_studies", False, raising=False)
+    monkeypatch.setattr(server, "configure_telemetry", lambda: None)
+    monkeypatch.setattr(server, "dogstatsd_metrics_configured", lambda: False)
+    calls = []
+
+    def run(**kwargs):
+        assert server.mcp.preload_studies is True
+        calls.append(kwargs)
+
+    monkeypatch.setattr(server.mcp, "run", run)
+    server.main()
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_login_precedes_study_gate(degraded, monkeypatch, caplog):
+    assert isinstance(server.mcp.middleware[0], identity.IdentityMiddleware)
+    assert isinstance(server.mcp.middleware[1], availability.StudyDataMiddleware)
+    async with Client(server.mcp) as client:
+        caplog.clear()
+        monkeypatch.setattr(
+            identity, "request_decision", lambda: identity.Decision(None, False, True)
+        )
+        result = await client.call_tool("list_studies", {}, raise_on_error=False)
+        assert result.is_error and result.structured_content is None
+        assert "Verified login required" in result.content[0].text
+        assert not [r for r in caplog.records if r.name == availability.logger.name]
+
+
+@pytest.mark.asyncio
+async def test_none_check_result_keeps_server_degraded(degraded, monkeypatch):
+    monkeypatch.setattr(startup_check, "run_startup_check", lambda *args: None)
+    async with Client(server.mcp) as client:
+        assert availability.reason() == "filtering_check_failed"
+        result = await client.call_tool("list_studies", {}, raise_on_error=False)
+        assert result.is_error and result.structured_content is None
+        assert "Study data unavailable" in result.content[0].text
+
+
+@pytest.mark.asyncio
+async def test_prompts_require_explicit_classification():
+    assert await server.mcp.get_prompts() == {}
+
+
+def test_custom_http_routes_require_explicit_classification():
+    routes = server.mcp._get_additional_http_routes()
+    assert [(route.path, route.methods, route.endpoint) for route in routes] == [
+        ("/health", {"GET", "HEAD"}, server.study_data_health)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_future_prompt_is_gated(degraded):
+    app = server.ConfiguredFastMCP(name="future-prompt")
+
+    @app.prompt()
+    def new_study_prompt() -> str:
+        return "study data must not be served"
+
+    async with Client(app) as client:
+        with pytest.raises(McpError, match="Study data unavailable: filtering_check_failed"):
+            await client.get_prompt("new_study_prompt")

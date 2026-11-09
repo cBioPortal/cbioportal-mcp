@@ -202,12 +202,20 @@ or grants and restart to retry.
 
 `GET /health` returns only `study_data_available` (boolean) and `reason`:
 `checks_pending`, `rollout_not_enforced`, `filtering_check_failed`, `ready`,
-or `filtering_off`. It returns HTTP 503 while checks are pending, then HTTP
-200 even when degraded. This keeps Kubernetes readiness routing login and
-schema requests to a running server without restart loops. Operators must
+or `filtering_off`. Normal uvicorn startup binds the listening socket only
+after the lifespan and checks finish: probes during checks get connection
+refused, not HTTP 503. Hosts that skip the lifespan can reach the endpoint
+before checks and receive HTTP 503 (`checks_pending`). After normal startup
+it returns HTTP 200 even when degraded. This keeps Kubernetes readiness
+routing login and schema requests to a running server without restart loops. Operators must
 inspect the JSON availability flag or the startup log; HTTP 200 alone does
 not establish study-data availability. No identities, secrets, hosts or
 study counts appear in the response.
+
+Refused calls stop before the telemetry middleware and do **not** appear in
+tool metrics. Alert on the `Study data unavailable` refusal log line or on
+`/health` JSON with `study_data_available: false`. A probe that checks only
+HTTP status 200 will miss degraded mode.
 
 The general ClickHouse permission gate still exits with code 2. Missing or
 invalid filtering/rollout switch values, login configuration errors and

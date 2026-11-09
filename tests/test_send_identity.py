@@ -159,6 +159,7 @@ def test_caches_bypassed_and_scope(filtering, monkeypatch):
             assert "unavailable" in server._study_guide_text("brca_tcga_pan_can_atlas_2018")
     from cbioportal_mcp.study_authz import availability
 
+    rollout.initialize("on", local_dev=False)
     availability.complete("ready")
     server._refresh_studies_cache_once()
     assert len(seen) == 9

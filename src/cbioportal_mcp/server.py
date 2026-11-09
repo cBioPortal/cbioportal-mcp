@@ -1536,7 +1536,7 @@ def _all_studies_query() -> tuple[tuple[tuple[str, object], ...], ...]:
     list_studies() filters this single snapshot in Python by search/limit/
     verbose, so every call is a cache hit regardless of the search term used.
 
-    In steady state the background loop in main() keeps this fresh before
+    In steady state the background loop started by _startup_lifespan keeps this fresh before
     TTL ever expires (see STUDIES_CACHE_REFRESH_INTERVAL_SECONDS), so this
     on-demand path is normally only exercised on the very first call after a
     cold start, or if that background loop has stalled.
@@ -1574,8 +1574,8 @@ def _refresh_studies_cache_once() -> None:
 def _refresh_studies_cache_forever() -> None:
     """Background loop: proactively refetch the study cache every
     STUDIES_CACHE_REFRESH_INTERVAL_SECONDS for the life of the process. Runs
-    on a daemon thread started from main(); see that call site for how this
-    combines with the initial startup warm-up.
+    on a daemon thread started by _startup_lifespan after startup checks,
+    when main() requests preload; it follows the initial startup warm-up.
     """
     while True:
         time.sleep(STUDIES_CACHE_REFRESH_INTERVAL_SECONDS)

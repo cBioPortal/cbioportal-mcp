@@ -81,7 +81,9 @@ available under configured login rules. Checks retry only on restart. After
 configuration changes or rollback, inspect `GET /health` or the startup log:
 health returns `study_data_available` and a stable `reason` (`checks_pending`,
 `rollout_not_enforced`, `filtering_check_failed`, `ready`, `filtering_off`). HTTP
-503 means checks are pending; HTTP 200 means the server is serving, including
+503 (`checks_pending`) is observable on hosts that skip the lifespan. Normal
+uvicorn startup binds only after the lifespan checks finish, so probes during
+checks get connection refused. HTTP 200 means the server is serving, including
 degraded mode to keep Kubernetes routing login/schema requests. Check the boolean
 for study availability. General ClickHouse permission and login configuration
 errors still refuse startup.

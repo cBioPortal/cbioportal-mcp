@@ -6,11 +6,11 @@ resources always contain deployment or study guidance and are gated too.
 
 import logging
 
-from fastmcp.exceptions import ResourceError, ToolError
+from fastmcp.exceptions import PromptError, ResourceError, ToolError
 from fastmcp.server.middleware import Middleware
 
+from cbioportal_mcp import rollout
 from cbioportal_mcp.redaction import redact
-from cbioportal_mcp.study_authz import request
 
 logger = logging.getLogger(__name__)
 SAFE_TOOLS = frozenset(
@@ -20,7 +20,9 @@ _reason = "checks_pending"
 
 
 def reason() -> str:
-    return _reason if request.enabled() else "filtering_off"
+    if rollout._PIN is None:
+        return "checks_pending"
+    return _reason if rollout._PIN.filtering == "on" else "filtering_off"
 
 
 def available() -> bool:
@@ -32,13 +34,14 @@ def complete(code: str) -> None:
     _reason = code
 
 
-def require(*, resource: bool = False) -> None:
+def require(*, resource: bool = False, prompt: bool = False) -> None:
     """The single admission gate; run outside handlers' exception fallbacks."""
     if available():
         return
     message = f"Study data unavailable: {reason()}"
     logger.warning("%s", redact(message))
-    raise (ResourceError if resource else ToolError)(message)
+    error = PromptError if prompt else ResourceError if resource else ToolError
+    raise error(message)
 
 
 class StudyDataMiddleware(Middleware):
@@ -49,4 +52,8 @@ class StudyDataMiddleware(Middleware):
 
     async def on_read_resource(self, context, call_next):
         require(resource=True)
+        return await call_next(context)
+
+    async def on_get_prompt(self, context, call_next):
+        require(prompt=True)
         return await call_next(context)

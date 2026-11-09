@@ -157,7 +157,7 @@ def test_on_constructs_without_enforced_switches(monkeypatch):
     assert not availability.available()
 
 
-def test_on_refused_without_public_databases_setting(monkeypatch, caplog):
+def test_on_degrades_without_public_databases_setting(monkeypatch, caplog):
     monkeypatch.delenv(PUBLIC_DBS)
     monkeypatch.setattr(
         "mcp_clickhouse.mcp_server.create_clickhouse_client",
@@ -175,7 +175,7 @@ def test_on_refused_without_public_databases_setting(monkeypatch, caplog):
 
 
 @pytest.mark.parametrize("raw", [",", "a,,b", "bad-name", "db`x"])
-def test_on_refused_with_invalid_public_databases(monkeypatch, caplog, raw):
+def test_on_degrades_with_invalid_public_databases(monkeypatch, caplog, raw):
     monkeypatch.setenv(PUBLIC_DBS, raw)
     with caplog.at_level(logging.INFO):
         _validate_server_startup()
@@ -186,7 +186,7 @@ def test_on_refused_with_invalid_public_databases(monkeypatch, caplog, raw):
     assert_clean_one_line(line)
 
 
-def test_on_refused_when_p6_check_fails(monkeypatch, caplog):
+def test_on_degrades_when_p6_check_fails(monkeypatch, caplog):
     p6_fails(monkeypatch)
     with caplog.at_level(logging.INFO):
         _validate_server_startup()
@@ -201,7 +201,7 @@ def test_on_refused_when_p6_check_fails(monkeypatch, caplog):
     assert "study_filtering=on transport" in caplog.text
 
 
-def test_on_refused_when_clickhouse_unreachable(monkeypatch, caplog):
+def test_on_degrades_when_clickhouse_unreachable(monkeypatch, caplog):
     def unreachable():
         raise ConnectionError(f"auth failed for {LEAKY_EMAIL} password={SECRET}\nretry")
 
