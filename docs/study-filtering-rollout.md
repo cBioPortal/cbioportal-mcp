@@ -25,7 +25,7 @@ env files that are committed, or in tickets.
 - **The MCP's ClickHouse user must be able to change settings per query
   (`readonly=0`).** The MCP sends `readonly=1` together with `SQL_cbio_user`
   on every study-data query. A user or settings profile that already forces
-  `readonly` rejects those per-query settings, and the startup check refuses
+  `readonly` rejects those per-query settings, and the startup check disables study data
   (`SQL_cbio_user rejected`). Do not attach a read-only settings profile; the
   user's grants keep it read-only instead (see §3).
 - **An admin ClickHouse user** that can `CREATE ROLE`, `CREATE ROW POLICY`,
@@ -95,16 +95,16 @@ GRANT SELECT ON <protected_db>.* TO <target>;
 unfiltered table.
 
 - **No `system` grants of any kind** (`system.*`, `system.query_log`,
-  `system.grants`, ...). The startup check refuses them.
+  `system.grants`, ...). The startup check degrades the server for these grants.
 - **No table- or column-level grants**, on any database. Only database-wide
   `ON <db>.*` grants are accepted; narrower grants hide columns from the
-  startup audit, so they refuse startup.
+  startup audit, so they disable study data.
 - No global (`*.*`) grants, no `GRANT OPTION` / `ADMIN OPTION`, no write,
   DDL, `REMOTE`/table-function, `dictGet` or `CREATE TEMPORARY TABLE`
   privileges.
 - Role target: the user's only direct grant is the role, which must be a
   **default** role. A direct `SELECT` next to the role lets `SET ROLE NONE`
-  bypass the policies; startup refuses it. `user-sql` produces this shape.
+  bypass the policies; startup disables study data. `user-sql` produces this shape.
 
 **Recommended: the MCP database user can read only the protected database.**
 Every other database the user can `SELECT` from is audited at startup, and
@@ -162,8 +162,8 @@ export CBIOPORTAL_MCP_GOOGLE_BASE_URL=https://<this-server>
 # export CBIOPORTAL_MCP_BRIDGE_SECRET=...
 ```
 
-Startup refuses `CBIOPORTAL_MCP_STUDY_FILTERING=on` unless **all** of these
-hold:
+With `CBIOPORTAL_MCP_STUDY_FILTERING=on`, study data remains blocked unless
+**all** of these hold (the server stays running in degraded mode on failure):
 
 1. `CBIOPORTAL_MCP_AUTH_ENFORCEMENT=enforce`;
 2. `CBIOPORTAL_MCP_PUBLIC_DB_CHECK=enforce` (see "Known limits": the check
@@ -177,7 +177,7 @@ hold:
 Otherwise list, comma-separated, the other readable databases that hold
 **only data every logged-in user may see**. Listing a database does not grant
 access and never overrides the unsafe-object checks. Never list a private
-source copy to make a startup error go away.
+source copy to clear degraded status.
 
 **Success** looks like these INFO lines, in this order:
 
@@ -190,13 +190,29 @@ cBioPortal MCP startup: study_filtering=on transport=http
 cBioPortal MCP rollout switches: study_filtering=on auth_enforcement=enforce auth_test_users_count=0 public_db_check=enforce
 ```
 
-(`(user <mcp_user>, ...)` for a user target.) A refusal by the ClickHouse
-permission gate or the study-filtering check is one `CRITICAL` line and exit
-code 2. It names the failed check and the corrective step; ClickHouse,
-driver and connection errors are reported only as the exception class and the
-ClickHouse error code (e.g. `DatabaseError (ClickHouse code 516)`), never their
-free-form text. A refusal of the env settings is a `ValueError` whose one-line
-message names the setting. None of them contains emails or secrets.
+(`(user <mcp_user>, ...)` for a user target.) A study-filtering failure logs
+one redacted `CRITICAL` line at startup and leaves the server running. Every
+refused call logs one redacted line and returns an MCP tool/resource error,
+never an empty or zero result. Raw SQL, study lists, study/deployment guides
+(including static files), frequency tools and direct resource reads are all
+blocked, including public data. Login, schema listings and OncoTree remain
+available, with login admission still enforced as configured. No study cache
+is preloaded in degraded mode. Checks run once per process; fix configuration
+or grants and restart to retry.
+
+`GET /health` returns only `study_data_available` (boolean) and `reason`:
+`checks_pending`, `rollout_not_enforced`, `filtering_check_failed`, `ready`,
+or `filtering_off`. It returns HTTP 503 while checks are pending, then HTTP
+200 even when degraded. This keeps Kubernetes readiness routing login and
+schema requests to a running server without restart loops. Operators must
+inspect the JSON availability flag or the startup log; HTTP 200 alone does
+not establish study-data availability. No identities, secrets, hosts or
+study counts appear in the response.
+
+The general ClickHouse permission gate still exits with code 2. Missing or
+invalid filtering/rollout switch values, login configuration errors and
+transport/stdio violations still refuse startup. Driver errors are reported
+by class and ClickHouse error code, never free-form text.
 
 Log records from the ClickHouse client stack (`mcp-clickhouse`,
 `clickhouse_connect`, `urllib3`) and from this package are scrubbed when they
@@ -215,6 +231,13 @@ never raises into the code that logs. Use the error code and check name to diagn
 `clickhouse-client` as the runtime user when you need the full server text.
 
 ## 6. Verify
+
+After each restart, check `/health` for `study_data_available: true` and
+`reason: ready`, and inspect the startup log. Process uptime or HTTP 200 is
+insufficient. In a deliberately misconfigured test deployment, confirm
+`study_data_available: false`, a stable failure reason and actual MCP errors
+with no rows from both raw SQL and `list_studies`; public studies must also
+be blocked. Login, schema listings and OncoTree should remain usable.
 
 Run as the **runtime user** (an admin is in the policies' `ALL EXCEPT`
 catch-all and sees everything), e.g. with `clickhouse-client --user <mcp_user>`.
@@ -261,6 +284,8 @@ filtering-off SQL accepts fully qualified names such as
 
 1. Set `CBIOPORTAL_MCP_STUDY_FILTERING=off` and restart the MCP. (It no longer
    sends `SQL_cbio_user`, so the policies show it public studies only.)
+   Verify `/health` reports `study_data_available: true`, `reason: filtering_off`,
+   and check the startup log. A previous degraded status does not survive restart.
 2. Remove the runtime access to the protected database, **before any policy is
    dropped**, with exactly one of:
    - **A. Revoke** (admin) from the policy target, i.e. the role for a role

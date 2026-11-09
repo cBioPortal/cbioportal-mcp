@@ -1,28 +1,16 @@
-"""CBIOPORTAL_MCP_STUDY_FILTERING=on: starts only when every precondition holds.
-
-Preconditions (P1.5 + P6), all checked by the shared server startup gate:
-
-1. CBIOPORTAL_MCP_AUTH_ENFORCEMENT=enforce
-2. CBIOPORTAL_MCP_PUBLIC_DB_CHECK=enforce
-3. CBIOPORTAL_MCP_STUDY_FILTERING_PUBLIC_DATABASES explicitly set (may be '')
-4. The P6 database coverage check passes (mocked here; see
-   test_study_authz_startup_check.py and test_study_authz_live.py for the check
-   itself).
-
-Each missing precondition must refuse startup with one line that names the
-problem and contains no secret or email.
-"""
+"""Filtering failures keep the server up with study data blocked."""
 
 import logging
 
 # Captured before the autouse fixture replaces them.
 import mcp_clickhouse.mcp_server as _upstream  # noqa: E402
 import pytest
+from fastmcp.exceptions import ToolError
 
 from cbioportal_mcp import rollout
 from cbioportal_mcp.env import get_mcp_config
 from cbioportal_mcp.server import ConfiguredFastMCP, _validate_server_startup
-from cbioportal_mcp.study_authz import startup_check
+from cbioportal_mcp.study_authz import availability, startup_check
 
 _REAL_CREATE_CLIENT = _upstream.create_clickhouse_client
 _REAL_P6_CHECK = startup_check._check
@@ -66,7 +54,7 @@ def all_preconditions_met(monkeypatch):
         monkeypatch.delenv(name, raising=False)
     # Mock only the connection and the database queries: run_startup_check,
     # parse_public_databases, check() (with its redaction) and the server's
-    # exit-2 handling all run for real.
+    # degraded-mode handling all run for real.
     monkeypatch.setattr("mcp_clickhouse.mcp_server.create_clickhouse_client", lambda: _FakeClient())
     p6_passes(monkeypatch)
 
@@ -138,7 +126,7 @@ async def test_on_server_construction_and_lifespan_start(monkeypatch, caplog):
     assert "is covered by the row policies on" in caplog.text
 
 
-# --- negative: each missing precondition refuses startup -------------------
+# --- negative: filtering failures degrade; malformed switches refuse startup -------------------
 
 
 @pytest.mark.parametrize(
@@ -150,35 +138,23 @@ async def test_on_server_construction_and_lifespan_start(monkeypatch, caplog):
         (DB_CHECK, None),
     ],
 )
-def test_on_refused_without_both_switches_enforced(monkeypatch, name, value):
+def test_on_degraded_without_both_switches_enforced(monkeypatch, name, value):
     if value is None:
         monkeypatch.delenv(name)
-    else:
-        monkeypatch.setenv(name, value)
-    monkeypatch.setattr(
-        startup_check, "_check", lambda *a, **k: pytest.fail("P6 must not run first")
-    )
-    with pytest.raises(ValueError) as error:
-        _validate_server_startup()
-    message = str(error.value)
-    assert name in message
-    assert_clean_one_line(message)
+        with pytest.raises(ValueError, match=name):
+            _validate_server_startup()
+        return
+    monkeypatch.setenv(name, value)
+    _validate_server_startup()
+    assert availability.reason() == "rollout_not_enforced"
+    with pytest.raises(ToolError, match="Study data unavailable"):
+        availability.require()
 
 
-def test_on_refused_with_both_switches_off(monkeypatch):
+def test_on_constructs_without_enforced_switches(monkeypatch):
     monkeypatch.setenv(ENFORCEMENT, "off")
-    monkeypatch.setenv(DB_CHECK, "off")
-    with pytest.raises(ValueError, match=f"{FILTERING}=on requires") as error:
-        _validate_server_startup()
-    assert_clean_one_line(str(error.value))
-
-
-def test_on_refused_at_construction_without_switches(monkeypatch):
-    """Alternate launchers (ASGI import, fastmcp dev) refuse before serving too."""
-    monkeypatch.setenv(ENFORCEMENT, "off")
-    with pytest.raises(ValueError, match=f"{FILTERING}=on requires") as error:
-        ConfiguredFastMCP(name="test")
-    assert_clean_one_line(str(error.value))
+    ConfiguredFastMCP(name="test")
+    assert not availability.available()
 
 
 def test_on_refused_without_public_databases_setting(monkeypatch, caplog):
@@ -187,36 +163,42 @@ def test_on_refused_without_public_databases_setting(monkeypatch, caplog):
         "mcp_clickhouse.mcp_server.create_clickhouse_client",
         lambda: pytest.fail("must not connect before the declaration is validated"),
     )
-    with caplog.at_level(logging.INFO), pytest.raises(SystemExit) as exc:
+    with caplog.at_level(logging.INFO):
         _validate_server_startup()
-    assert exc.value.code == 2
+    assert not availability.available()
+    with pytest.raises(ToolError, match="Study data unavailable"):
+        availability.require()
     [line] = critical_lines(caplog)
     assert PUBLIC_DBS in line and "required" in line
     assert_clean_one_line(line)
-    assert "study_filtering=on transport" not in caplog.text
+    assert "study_filtering=on transport" in caplog.text
 
 
 @pytest.mark.parametrize("raw", [",", "a,,b", "bad-name", "db`x"])
 def test_on_refused_with_invalid_public_databases(monkeypatch, caplog, raw):
     monkeypatch.setenv(PUBLIC_DBS, raw)
-    with caplog.at_level(logging.INFO), pytest.raises(SystemExit) as exc:
+    with caplog.at_level(logging.INFO):
         _validate_server_startup()
-    assert exc.value.code == 2
+    assert not availability.available()
+    with pytest.raises(ToolError, match="Study data unavailable"):
+        availability.require()
     [line] = critical_lines(caplog)
     assert_clean_one_line(line)
 
 
 def test_on_refused_when_p6_check_fails(monkeypatch, caplog):
     p6_fails(monkeypatch)
-    with caplog.at_level(logging.INFO), pytest.raises(SystemExit) as exc:
+    with caplog.at_level(logging.INFO):
         _validate_server_startup()
-    assert exc.value.code == 2
+    assert not availability.available()
+    with pytest.raises(ToolError, match="Study data unavailable"):
+        availability.require()
     [line] = critical_lines(caplog)
     assert "study filtering startup check failed" in line
     assert "default-deny" in line
     assert "<email>" in line
     assert_clean_one_line(line)
-    assert "study_filtering=on transport" not in caplog.text
+    assert "study_filtering=on transport" in caplog.text
 
 
 def test_on_refused_when_clickhouse_unreachable(monkeypatch, caplog):
@@ -224,9 +206,11 @@ def test_on_refused_when_clickhouse_unreachable(monkeypatch, caplog):
         raise ConnectionError(f"auth failed for {LEAKY_EMAIL} password={SECRET}\nretry")
 
     monkeypatch.setattr("mcp_clickhouse.mcp_server.create_clickhouse_client", unreachable)
-    with caplog.at_level(logging.INFO), pytest.raises(SystemExit) as exc:
+    with caplog.at_level(logging.INFO):
         _validate_server_startup()
-    assert exc.value.code == 2
+    assert not availability.available()
+    with pytest.raises(ToolError, match="Study data unavailable"):
+        availability.require()
     [line] = critical_lines(caplog)
     assert "cannot connect to ClickHouse (ConnectionError)" in line
     assert_clean_one_line(line)
@@ -249,9 +233,11 @@ def test_p6_refusal_never_logs_credentials(monkeypatch, caplog, detail):
         raise startup_check.PolicyCoverageError(f"system.enabled_roles: {detail}\nmore")
 
     monkeypatch.setattr(startup_check, "_check", fake)
-    with caplog.at_level(logging.DEBUG), pytest.raises(SystemExit) as exc:
+    with caplog.at_level(logging.DEBUG):
         _validate_server_startup()
-    assert exc.value.code == 2
+    assert not availability.available()
+    with pytest.raises(ToolError, match="Study data unavailable"):
+        availability.require()
     [line] = critical_lines(caplog)
     assert "system.enabled_roles" in line
     assert_clean_one_line(line)
@@ -264,9 +250,11 @@ def test_p6_unexpected_error_logs_class_only(monkeypatch, caplog, detail):
         raise RuntimeError(f"{detail} for {LEAKY_EMAIL}\nTraceback-ish")
 
     monkeypatch.setattr(startup_check, "_check", fake)
-    with caplog.at_level(logging.DEBUG), pytest.raises(SystemExit) as exc:
+    with caplog.at_level(logging.DEBUG):
         _validate_server_startup()
-    assert exc.value.code == 2
+    assert not availability.available()
+    with pytest.raises(ToolError, match="Study data unavailable"):
+        availability.require()
     [line] = critical_lines(caplog)
     assert "unexpected RuntimeError" in line
     assert_clean_one_line(line)
@@ -550,9 +538,11 @@ def test_p6_real_checker_query_error_never_echoes_credentials(below_upstream, ca
 
     error = DatabaseError(f"HTTP 401 {form} for {LEAKY_EMAIL}\nCode: 516. retry")
     below_upstream(_p6_answers("getSettingOrDefault", error))
-    with caplog.at_level(logging.DEBUG), pytest.raises(SystemExit) as exc:
+    with caplog.at_level(logging.DEBUG):
         _validate_server_startup()
-    assert exc.value.code == 2
+    assert not availability.available()
+    with pytest.raises(ToolError, match="Study data unavailable"):
+        availability.require()
     [line] = critical_lines(caplog)
     assert "study filtering startup check failed" in line
     assert "SQL_cbio_user rejected" in line
@@ -581,9 +571,11 @@ def test_p6_real_checker_connect_error_never_echoes_credentials(
         raise ConnectionError(f"{form}\nretry")
 
     monkeypatch.setattr(clickhouse_connect, "get_client", get_client)
-    with caplog.at_level(logging.DEBUG), pytest.raises(SystemExit) as exc:
+    with caplog.at_level(logging.DEBUG):
         _validate_server_startup()
-    assert exc.value.code == 2
+    assert not availability.available()
+    with pytest.raises(ToolError, match="Study data unavailable"):
+        availability.require()
     [line] = critical_lines(caplog)
     assert "cannot connect to ClickHouse (ConnectionError)" in line
     assert_clean_one_line(line)
@@ -610,46 +602,34 @@ def test_redactor_keeps_non_secret_text():
     )
 
 
-# --- P6 failure refuses before serving on every transport ------------------
+# --- P6 failure keeps every transport serving in degraded mode ------------------
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("transport", ["http", "sse"])
-async def test_p6_failure_refuses_lifespan_before_serving(monkeypatch, caplog, transport):
+async def test_p6_failure_serves_degraded_lifespan(monkeypatch, caplog, transport):
     p6_fails(monkeypatch)
     app = ConfiguredFastMCP(name="test")
     asgi = app.http_app(transport=transport)
-    served = False
-    with caplog.at_level(logging.INFO), pytest.raises(SystemExit) as exc:
+    with caplog.at_level(logging.INFO):
         async with asgi.router.lifespan_context(asgi):
-            served = True
-    assert exc.value.code == 2 and not served
+            assert not availability.available()
+            with pytest.raises(ToolError, match="Study data unavailable"):
+                availability.require()
     [line] = critical_lines(caplog)
     assert_clean_one_line(line)
-    assert f"study_filtering=on transport={transport}" not in caplog.text
 
 
 @pytest.mark.asyncio
-async def test_p6_failure_refuses_local_stdio_before_serving(monkeypatch, caplog):
-    """Through ConfiguredFastMCP.run_stdio_async itself: the lifespan refuses
-    before FastMCP opens the stdio streams."""
-    import fastmcp.server.server as fastmcp_server
-
+async def test_p6_failure_serves_degraded_local_stdio(monkeypatch):
+    from cbioportal_mcp.server import _startup_lifespan
     monkeypatch.setenv("CLICKHOUSE_MCP_SERVER_TRANSPORT", "stdio")
     monkeypatch.setenv("CBIOPORTAL_MCP_LOCAL_DEV", "1")
     p6_fails(monkeypatch)
-    monkeypatch.setattr(
-        fastmcp_server, "stdio_server", lambda: pytest.fail("stdio opened before refusal")
-    )
     app = ConfiguredFastMCP(name="test")
-    with caplog.at_level(logging.INFO), pytest.raises(SystemExit) as exc:
-        await app.run_stdio_async(show_banner=False)
-    assert exc.value.code == 2
-    assert app.startup_transport == "stdio"
-    [line] = critical_lines(caplog)
-    assert "study filtering startup check failed" in line
-    assert_clean_one_line(line)
-    assert "study_filtering=on transport=stdio" not in caplog.text
+    async with _startup_lifespan(app):
+        assert app.startup_transport == "stdio"
+        assert not availability.available()
 
 
 def test_on_auth_enforce_still_needs_a_login_route(monkeypatch):

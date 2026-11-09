@@ -69,12 +69,22 @@ export CLICKHOUSE_MCP_SERVER_TRANSPORT=http # default; or sse
 Study filtering accepts only `on` or `off` (case-insensitive, surrounding whitespace
 is ignored). Missing, blank, and other values refuse startup. `off` preserves
 current behavior and is the permanent setting for the public deployment. `on`
-is for private deployments only and starts only when both
+is for private deployments only and serves study data only when both
 `CBIOPORTAL_MCP_AUTH_ENFORCEMENT` and `CBIOPORTAL_MCP_PUBLIC_DB_CHECK` are
 `enforce`, `CBIOPORTAL_MCP_STUDY_FILTERING_PUBLIC_DATABASES` is set, and the
 database-side startup check passes; see
 [docs/study-filtering-rollout.md](docs/study-filtering-rollout.md). These checks
-apply to alternate launchers too.
+apply to alternate launchers too. Failed filtering checks keep the server running
+in degraded mode and block all public/private study tools and resource reads with
+MCP errors before handlers or caches. Login, schema tools and OncoTree remain
+available under configured login rules. Checks retry only on restart. After
+configuration changes or rollback, inspect `GET /health` or the startup log:
+health returns `study_data_available` and a stable `reason` (`checks_pending`,
+`rollout_not_enforced`, `filtering_check_failed`, `ready`, `filtering_off`). HTTP
+503 means checks are pending; HTTP 200 means the server is serving, including
+degraded mode to keep Kubernetes routing login/schema requests. Check the boolean
+for study availability. General ClickHouse permission and login configuration
+errors still refuse startup.
 HTTP is the default transport; stdio requires exactly `CBIOPORTAL_MCP_LOCAL_DEV=1`.
 
 The auth rollout switches are parsed once at startup and refuse startup when missing

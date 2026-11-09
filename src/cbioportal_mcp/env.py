@@ -226,7 +226,7 @@ def validate_startup(transport: Optional[str] = None) -> tuple[str, str]:
     validate that effective transport too, rather than trusting only the env.
 
     Filtering ``on`` additionally needs both rollout switches at ``enforce``
-    (checked in ``rollout.parse``); the server's lifespan then runs the
+    to serve study data; the server's lifespan runs the
     database-side coverage check (``study_authz.startup_check``) before serving.
     """
     filtering = required_enum("CBIOPORTAL_MCP_STUDY_FILTERING", ("on", "off"))

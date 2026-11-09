@@ -103,11 +103,7 @@ def test_local_stdio_defaults_and_still_rejects_invalid(monkeypatch, name):
 def test_study_filtering_requires_both_enforced(monkeypatch, enforcement, db_check, ok):
     monkeypatch.setenv(ENFORCEMENT, enforcement)
     monkeypatch.setenv(DB_CHECK, db_check)
-    if ok:
-        assert rollout.parse("on", local_dev=False).public_db_check == "enforce"
-    else:
-        with pytest.raises(ValueError, match="STUDY_FILTERING=on requires"):
-            rollout.parse("on", local_dev=False)
+    assert rollout.parse("on", local_dev=False).public_db_check == db_check
     assert rollout.parse("off", local_dev=False).auth_enforcement == enforcement
 
 

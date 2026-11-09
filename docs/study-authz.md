@@ -353,8 +353,29 @@ are all example.org fakes; put real ones only in your local CSV.
 
 ## Server startup check (study filtering on)
 
-With `CBIOPORTAL_MCP_STUDY_FILTERING=on` the server refuses to start (one
-`CRITICAL` line, exit code 2) unless its own ClickHouse user is covered. It
+Checks run only on restart. Pending checks, missing public-database declarations,
+un-enforced rollout switches, coverage/grant/other-database failures and identity
+propagation errors all block public and private study data through one gate before
+handlers or caches. Refusals are real MCP tool/resource errors, with a single
+redacted log line per call. Login, schema tools and OncoTree keep working under
+the configured login rules. Missing/invalid filtering or rollout values,
+transport/stdio rules, login configuration and general ClickHouse permissions
+still refuse startup.
+
+Verify `GET /health` after restart: it returns only `study_data_available` and
+`reason` (`checks_pending`, `rollout_not_enforced`, `filtering_check_failed`,
+`ready`, `filtering_off`). Pending checks return HTTP 503; completed checks
+return HTTP 200 even when degraded so Kubernetes keeps login/schema reachable.
+Inspect the boolean or startup log, rather than process uptime or status code
+alone. Fix grants/configuration and restart to recover. During rollback to
+filtering `off`, verify `reason: filtering_off`; retain the grant revocation
+and policy removal order in the rollout guide. Filtering `off` bypasses the gate.
+`PUBLIC_DB_CHECK=enforce` still has no effect until P10 exists; requiring its
+value for filtering `on` does not implement that check.
+
+With `CBIOPORTAL_MCP_STUDY_FILTERING=on` the server stays running but blocks
+all study data until its own ClickHouse user is proven covered. A failed
+check logs one redacted `CRITICAL` line and marks the server degraded. It
 runs `study_authz/startup_check.py` over a client built like mcp-clickhouse's,
 as `currentUser()`, and never logs an email or driver error text (failures name
 the check plus the exception class and ClickHouse error code):
@@ -388,7 +409,7 @@ the check plus the exception class and ClickHouse error code):
 - Explicit grants on **any object in `system`** are refused, including
   `system.*`, `system.query_log`, and the two grant tables. Global grants,
   wildcard names, grant/admin options, and privileges outside the allow list
-  also refuse startup. The self-scoped SHOW commands avoid exposing other
+  also disable study data. The self-scoped SHOW commands avoid exposing other
   users' grants and email-named console identities to agent SQL.
 - Every other database selectable through FINAL is inspected using
   `system.tables` and `system.columns`. Only plain storage engines are allowed:
@@ -530,7 +551,7 @@ TTL. Schema and static file indexes retain their existing caches. Public-only
 callers receive a scope/frequency note in query metadata and study lists.
 
 P11 removed the P1 startup lock: `CBIOPORTAL_MCP_STUDY_FILTERING=on` now
-starts when both rollout switches are `enforce`, the public-database
+serves study data when both rollout switches are `enforce`, the public-database
 declaration is set, and the startup check above passes
 (`tests/test_study_filtering_on_startup.py`). The operator steps are in
 [`study-filtering-rollout.md`](study-filtering-rollout.md).
