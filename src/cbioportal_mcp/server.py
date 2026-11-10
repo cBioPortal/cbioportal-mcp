@@ -40,6 +40,7 @@ import mcp.types as mt  # noqa: E402
 from fastmcp import FastMCP  # noqa: E402
 
 from cbioportal_mcp import (  # noqa: E402
+    redaction,  # noqa: E402
     result_format,  # noqa: E402 (after LLMObs.enable)
     rollout,  # noqa: E402 (after LLMObs.enable)
 )
@@ -61,6 +62,9 @@ from cbioportal_mcp.telemetry import (  # noqa: E402
 )
 
 study_request.install()
+# Scrub credentials from ClickHouse client-stack and package log records at
+# creation, before upstream workers log raw exception text (see redaction.py).
+redaction.install()
 
 logger = logging.getLogger(__name__)
 
@@ -324,10 +328,19 @@ def _validate_server_startup(transport=None):
         "ClickHouse query pool: %d workers", query_concurrency.query_pool_size()
     )
 
+    from cbioportal_mcp.study_authz.startup_check import redact
+
     try:
         ensure_db_permissions(config=config)
     except PermissionError as e:
-        logger.critical("❌ ClickHouse permission check failed: %s", e)
+        logger.critical("❌ ClickHouse permission check failed: %s", redact(e))
+        sys.exit(2)
+    except Exception as e:  # noqa: BLE001 - e.g. connection errors; never echo raw text
+        logger.critical(
+            "❌ ClickHouse permission check failed: %s (cannot run CHECK GRANT; "
+            "check the CLICKHOUSE_* settings)",
+            type(e).__name__,
+        )
         sys.exit(2)
 
     enforce_study_policy_coverage(config.mcp_database)
@@ -410,7 +423,12 @@ def enforce_study_policy_coverage(database: str) -> None:
     try:
         result = startup_check.run_startup_check(database)
     except startup_check.PolicyCoverageError as e:
-        logger.critical("❌ study filtering startup check failed: %s", e)
+        logger.critical("❌ study filtering startup check failed: %s", startup_check.redact(e))
+        sys.exit(2)
+    except Exception as e:  # noqa: BLE001 - unexpected; fail closed, never echo raw text
+        logger.critical(
+            "❌ study filtering startup check failed: unexpected %s", type(e).__name__
+        )
         sys.exit(2)
     if result is not None:
         logger.info(

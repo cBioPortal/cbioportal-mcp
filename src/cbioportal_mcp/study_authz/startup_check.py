@@ -33,10 +33,10 @@ from __future__ import annotations
 import contextlib
 import logging
 import os
-import re
 import uuid
 from dataclasses import dataclass
 
+from cbioportal_mcp.redaction import describe_error, redact  # noqa: F401 (re-exported)
 from cbioportal_mcp.study_authz.catalog import (
     USER_STUDY_MANUAL_TABLE,
     USER_STUDY_TABLE,
@@ -50,6 +50,7 @@ from cbioportal_mcp.study_authz.coverage import (
 )
 from cbioportal_mcp.study_authz.grants import (
     STUDY_LINK_COLUMNS,
+    GrantParseError,
     audit_grants,
     audit_other_database,
     collect_grants,
@@ -67,7 +68,6 @@ EMAIL_SETTING = "SQL_cbio_user"
 # RFC 2606 reserves .invalid: no real caller can ever have this address.
 PROBE_DOMAIN = "startup-probe.invalid"
 
-_EMAIL_RE = re.compile(r"[^\s@'\"`]+@[^\s@'\"`]+")
 MAX_REASONS = 5
 
 
@@ -100,12 +100,6 @@ def parse_public_databases(env=os.environ) -> frozenset[str]:
             f"{PUBLIC_DATABASES_ENV} must be a comma-separated list without empty items"
         )
     return frozenset(validate_identifier("public database", name) for name in names)
-
-
-def redact(text: str) -> str:
-    """One line, no email addresses (ClickHouse errors can echo settings)."""
-    line = " ".join(str(text).split())
-    return _EMAIL_RE.sub("<email>", line)[:300]
 
 
 def probe_email() -> str:
@@ -170,8 +164,12 @@ def _check(
             return fn()
         except PolicyCoverageError:
             raise
+        except GrantParseError as e:  # our own fixed-text parser messages
+            raise PolicyCoverageError(f"{what}: {e}") from None
         except Exception as e:  # noqa: BLE001 - any driver/server error refuses
-            raise PolicyCoverageError(f"{what}: {redact(e)}") from None
+            # Never echo driver/server text: it can carry credentials (URLs,
+            # JSON bodies, headers). The step name says what to fix.
+            raise PolicyCoverageError(f"{what}: {describe_error(e)}") from None
 
     # 1. The per-query email setting must reach the policies.
     echoed = step(
@@ -390,7 +388,10 @@ def check_with_mcp_connection(database: str, *, public_databases=None) -> CheckR
     try:
         client = create_clickhouse_client()
     except Exception as e:  # noqa: BLE001
-        raise PolicyCoverageError(f"cannot connect to ClickHouse: {redact(e)}") from None
+        # Connection errors are the likeliest to carry credentials: class only.
+        raise PolicyCoverageError(
+            f"cannot connect to ClickHouse ({describe_error(e)}); check the CLICKHOUSE_* settings"
+        ) from None
     try:
         with _send_custom_settings():
             return check(client, database, public_databases=public_databases)

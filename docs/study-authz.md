@@ -356,7 +356,8 @@ are all example.org fakes; put real ones only in your local CSV.
 With `CBIOPORTAL_MCP_STUDY_FILTERING=on` the server refuses to start (one
 `CRITICAL` line, exit code 2) unless its own ClickHouse user is covered. It
 runs `study_authz/startup_check.py` over a client built like mcp-clickhouse's,
-as `currentUser()`, and never logs an email:
+as `currentUser()`, and never logs an email or driver error text (failures name
+the check plus the exception class and ClickHouse error code):
 
 - `SQL_cbio_user` reaches `getSettingOrDefault` under `readonly=1` (ClickHouse
   >= 24.10 and the `SQL_` custom settings prefix).
@@ -472,7 +473,9 @@ Shared/Replicated MergeTree families. Docker does not register Shared engines,
 so these names have metadata/unit coverage; its live tests use the matching
 ordinary MergeTree families. The available Cloud credential could not verify
 `SharedReplacingMergeTree` tables or the full `llm_user` configuration.
-A full policy-enabled startup on Cloud 26.6.1 remains unverified.
+A full policy-enabled startup on Cloud 26.6.1 (with the P1 lock removed in a
+throwaway test commit) passed end to end; see "End-to-end test plan and
+results" on PR #193.
 
 ## Security notes and caveats
 
@@ -505,8 +508,8 @@ A full policy-enabled startup on Cloud 26.6.1 remains unverified.
   the next successful refresh. A new clone picks it up immediately.
 - `mutation_event` / `cna_event` policies go through `mutation` /
   `sample_cna_event`, which is correct but can be slow on very large tables.
-- Only tested on ClickHouse 25.8 in Docker, not on ClickHouse Cloud.
-  Refreshable MVs in a Replicated database (Cloud's default) are documented
+- Tested on ClickHouse 25.8 and 26.6 in Docker, and end to end on ClickHouse
+  Cloud 26.6.1 (PR #193). Refreshable MVs in a Replicated database (Cloud's default) are documented
   to be coordinated across replicas. Run `check` after the first apply there.
 
 ## Request identity wiring (P7)
@@ -526,7 +529,11 @@ study visibility on every read. This makes revocations effective as soon as
 TTL. Schema and static file indexes retain their existing caches. Public-only
 callers receive a scope/frequency note in query metadata and study lists.
 
-The P1 startup lock remains: filtering cannot be enabled in production until
-P11 unlocks it. `tests/test_send_identity.py` exercises the wiring with fakes;
+P11 removed the P1 startup lock: `CBIOPORTAL_MCP_STUDY_FILTERING=on` now
+starts when both rollout switches are `enforce`, the public-database
+declaration is set, and the startup check above passes
+(`tests/test_study_filtering_on_startup.py`). The operator steps are in
+[`study-filtering-rollout.md`](study-filtering-rollout.md).
+`tests/test_send_identity.py` exercises the wiring with fakes;
 `test_p7_user_tools_and_cache_isolation` in `tests/test_study_authz_live.py`
 calls the wiring directly against P4's throwaway Docker fixture.

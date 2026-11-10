@@ -138,6 +138,8 @@ class _RedactEmails(logging.Filter):
             if record.exc_info:
                 record.exc_text = redact("".join(traceback.format_exception(*record.exc_info)))
                 record.exc_info = None
+            elif record.exc_text:  # already formatted (e.g. by redaction.scrub_record)
+                record.exc_text = redact(record.exc_text)
             record.args = ()
         return True
 

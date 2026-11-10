@@ -17,14 +17,11 @@ If checks fail, we raise PermissionError so the application can fail fast.
 
 from __future__ import annotations
 
-import json
 import logging
-import os
-from typing import Dict, List
+from typing import List
 
 from cbioportal_mcp.env import McpConfig
-from mcp_clickhouse.mcp_server import run_query
-from fastmcp.exceptions import ToolError
+from cbioportal_mcp.redaction import describe_error
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +38,25 @@ FORBIDDEN_PRIVS = {
 }
 
 
-def _check_grant(priv: str, scope: str) -> bool:
+def _open_client():
+    """A fresh client built exactly like mcp-clickhouse's own.
+
+    The permission gate does not go through upstream ``run_query``: its
+    worker logs raw exception text (which can carry credentials) before any
+    caller could sanitize it. Errors here are reported as class + code only.
+    """
+    from mcp_clickhouse.mcp_server import create_clickhouse_client
+
+    try:
+        return create_clickhouse_client()
+    except Exception as e:  # noqa: BLE001 - never echo driver text
+        raise PermissionError(
+            f"cannot connect to ClickHouse to run CHECK GRANT ({describe_error(e)}); "
+            "check the CLICKHOUSE_* settings"
+        ) from None
+
+
+def _check_grant(client, priv: str, scope: str) -> bool:
     """
     Use CHECK GRANT <priv> ON <scope> to see if the current user has a privilege.
 
@@ -50,7 +65,8 @@ def _check_grant(priv: str, scope: str) -> bool:
       - "*.*"
       - "<db>.table[*]" (not used here, but legal)
 
-    Returns True iff result == 1.
+    Returns True iff result == 1. A failed query counts as not granted and is
+    logged as exception class + ClickHouse code only.
 
     Important: CHECK GRANT may return a row with no column names, so we read
     the first value from rows[0][0] rather than relying on column metadata.
@@ -60,16 +76,15 @@ def _check_grant(priv: str, scope: str) -> bool:
         scope = "*.*"
 
     try:
-        raw = json.loads(run_query(f"CHECK GRANT {priv} ON {scope}"))
-    except ToolError as e:
+        rows = client.query(f"CHECK GRANT {priv} ON {scope}").result_rows
+    except Exception as e:  # noqa: BLE001
         logger.warning(
             "CHECK GRANT %s ON %s failed (treating as not granted): %s",
             priv,
             scope,
-            e,
+            describe_error(e),
         )
         return False
-    rows = raw.get("rows") or []
     if not rows:
         # No rows means "no" or an unexpected shape; treat as not granted.
         return False
@@ -85,13 +100,13 @@ def _check_grant(priv: str, scope: str) -> bool:
         return False
 
 
-def _forbidden_privs_present() -> List[str]:
+def _forbidden_privs_present(client) -> List[str]:
     """
     Returns a list of forbidden privileges for which CHECK GRANT ... ON *.* is true.
     """
     bad: List[str] = []
     for p in FORBIDDEN_PRIVS:
-        if _check_grant(p, "*.*"):
+        if _check_grant(client, p, "*.*"):
             bad.append(p)
     return bad
 
@@ -119,22 +134,28 @@ def ensure_db_permissions(config: McpConfig) -> None:
         db,
     )
 
-    if not _check_grant("SELECT", f"{db}.*"):
+    client = _open_client()
+    try:
+        has_select = _check_grant(client, "SELECT", f"{db}.*")
+        bad_privs = _forbidden_privs_present(client) if has_select else []
+    finally:
+        try:
+            client.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+    if not has_select:
+        # One line: startup logs it as a single CRITICAL record.
         raise PermissionError(
-            "Permission check failed: the MCP ClickHouse user lacks required privileges.\n"
-            f"- Missing: SELECT ON {db}.* for user '{user}'.\n"
-            "Grant minimally:\n"
-            f"  GRANT SELECT ON {db}.* TO {user};"
+            f"the MCP ClickHouse user '{user}' lacks SELECT ON {db}.*; "
+            f"grant minimally: GRANT SELECT ON {db}.* TO {user}"
         )
 
-    bad_privs = _forbidden_privs_present()
     if bad_privs:
+        privs = ", ".join(sorted(bad_privs))
         raise PermissionError(
-            "Permission check failed: the MCP ClickHouse user has excessive privileges.\n"
-            f"- Forbidden privileges detected on *.*: {', '.join(sorted(bad_privs))}\n"
-            "The MCP ClickHouse user must be strictly read-only. "
-            "Revoke these permissions, e.g.:\n"
-            f"  REVOKE {', '.join(sorted(bad_privs))} ON *.* FROM {user};"
+            f"the MCP ClickHouse user '{user}' has forbidden privileges on *.* ({privs}) "
+            f"and must be strictly read-only: REVOKE {privs} ON *.* FROM {user}"
         )
 
     logger.info(

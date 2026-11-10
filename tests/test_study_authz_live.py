@@ -574,7 +574,7 @@ def test_user_targeted_policies_direct_grant_is_not_a_bypass(server):
 
 
 def test_p7_user_tools_and_cache_isolation(server, monkeypatch):
-    """Test wiring directly while P1 intentionally keeps filtering locked at startup."""
+    """Test the request wiring directly, without the server startup gate."""
     import mcp_clickhouse.mcp_server as upstream
     from clickhouse_connect import common
 
@@ -582,7 +582,7 @@ def test_p7_user_tools_and_cache_isolation(server, monkeypatch):
     from cbioportal_mcp import server as mcp_server
 
     # A first server import validates filtering=off and pins it after fixtures
-    # have reset rollout. Unlock only this test's direct wiring after import.
+    # have reset rollout. Drop that pin so this test can switch filtering on.
     monkeypatch.setattr(rollout, "_PIN", None)
 
     # The P4 minimal fixture omits list_studies' deployment metadata columns.
