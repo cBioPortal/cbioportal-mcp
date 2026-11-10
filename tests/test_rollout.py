@@ -25,6 +25,7 @@ def fresh(monkeypatch):
     monkeypatch.setenv(ENFORCEMENT, "off")
     monkeypatch.setenv(TESTERS, "")
     monkeypatch.setenv(DB_CHECK, "off")
+    monkeypatch.setenv("CBIOPORTAL_MCP_BRIDGE_SECRET", "test-bridge-secret")
     rollout._reset_for_tests()  # conftest also resets; keep explicit here
 
 

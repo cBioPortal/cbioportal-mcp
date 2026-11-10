@@ -46,6 +46,7 @@ from cbioportal_mcp.env import (  # noqa: E402 (after LLMObs.enable)
 from cbioportal_mcp import rollout  # noqa: E402 (after LLMObs.enable)
 from cbioportal_mcp.authentication.permissions import ensure_db_permissions
 from cbioportal_mcp.auth import _build_auth_provider
+from cbioportal_mcp.identity import CombinedAuth, IdentityMiddleware  # noqa: E402
 from cbioportal_mcp.telemetry import (
     TelemetryMiddleware,
     configure_telemetry,
@@ -343,7 +344,12 @@ class ConfiguredFastMCP(FastMCP):
 
     def __init__(self, **kwargs):
         _, self.startup_transport = validate_startup()
-        super().__init__(**kwargs, lifespan=_startup_lifespan)
+        provider = kwargs.pop("auth") if "auth" in kwargs else _build_auth_provider()
+        self.identity_auth = CombinedAuth(provider)
+        # CombinedAuth mounts OAuth routes itself: FastMCP 2's bearer-only
+        # wrapper cannot admit bridge or rollout-exempt requests.
+        super().__init__(**kwargs, auth=None, lifespan=_startup_lifespan)
+        self.middleware.insert(0, IdentityMiddleware(self))
 
     async def run_async(self, transport=None, show_banner=True, **kwargs):
         # FastMCP's own default is stdio; use our configured HTTP default.
@@ -357,7 +363,24 @@ class ConfiguredFastMCP(FastMCP):
 
     def http_app(self, path=None, **kwargs):
         _, self.startup_transport = validate_startup(kwargs.get("transport", "http"))
-        return super().http_app(path=path, **kwargs)
+        app = super().http_app(path=path, **kwargs)
+        settings = self._deprecated_settings
+        if self.startup_transport == "sse":
+            paths = [path or settings.sse_path, settings.message_path]
+        else:
+            paths = [path or settings.streamable_http_path]
+        self.identity_auth.mount(app, paths)
+        return app
+
+    def sse_app(self, path=None, message_path=None, middleware=None):
+        _, self.startup_transport = validate_startup("sse")
+        app = super().sse_app(path=path, message_path=message_path, middleware=middleware)
+        self.identity_auth.mount(
+            app,
+            [path or self._deprecated_settings.sse_path,
+             message_path or self._deprecated_settings.message_path],
+        )
+        return app
 
 
 # Construction validates even when main() is bypassed by fastmcp dev / ASGI.
