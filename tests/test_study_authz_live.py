@@ -440,7 +440,12 @@ def test_make_test_db(server):
     admin = server.admin
     source = "authz_source"
     _load_fixture(admin, source)  # no policies, users/authorities present
-    target = sqlgen.Params(database="authz_e2e_test", public_group="PUBLIC", app_name="cbioportal")
+    target = sqlgen.Params(
+        database="authz_e2e_test",
+        public_group="PUBLIC",
+        app_name="cbioportal",
+        policy_target="e2e_policy",
+    )
     gated = {"priv_1": "TEAM_A", "priv_2": "TEAM_B", "brca_tcga": "TEAM_A"}
     grants = [
         Grant("frank@example.org", "TEAM_A", FUTURE),
@@ -461,10 +466,10 @@ def test_make_test_db(server):
         "priv_2": "TEAM_B",
         "brca_tcga": "TEAM_A",
     }
-    assert fetch_and_evaluate(admin, "authz_e2e_test", ROW_POLICY_ROLE).ok
+    assert fetch_and_evaluate(admin, "authz_e2e_test", "e2e_policy").ok
 
     for statement in sqlgen.statements(
-        sqlgen.restricted_user_sql("mcp_e2e", "pw", "authz_e2e_test")
+        sqlgen.restricted_user_sql("mcp_e2e", "pw", "authz_e2e_test", role="e2e_policy")
     ):
         admin.command(statement)
     q = "SELECT cancer_study_identifier FROM authz_e2e_test.cancer_study"
@@ -491,7 +496,12 @@ def test_make_test_db(server):
         make_test_db(
             admin,
             source,
-            sqlgen.Params(database=DB, public_group="PUBLIC", app_name="cbioportal"),
+            sqlgen.Params(
+                database=DB,
+                public_group="PUBLIC",
+                app_name="cbioportal",
+                policy_target="e2e_policy",
+            ),
             gated,
             ["pub_a"],
             [],
@@ -761,3 +771,546 @@ def test_review_repro_placeholder_database_cannot_redirect_apply(server):
         "SELECT 1 FROM system.tables WHERE database IN ('review_victim', '__PUBLIC_GROUP__') "
         "AND name LIKE 'user_study%'"
     ).result_rows
+
+
+# --- P6: the server's startup check, run as the runtime user itself ----------
+
+
+def _runtime_client(server, user: str):
+    import clickhouse_connect
+
+    return clickhouse_connect.get_client(
+        host="127.0.0.1", port=server.port, username=user, password="pw"
+    )
+
+
+def _startup_check(server, user: str, database: str = DB, public_databases=frozenset()):
+    from cbioportal_mcp.study_authz import startup_check
+
+    with startup_check._send_custom_settings():
+        return startup_check.check(
+            _runtime_client(server, user), database, public_databases=public_databases
+        )
+
+
+def _refused(
+    server, user: str, needle: str, database: str = DB, public_databases=frozenset()
+) -> str:
+    from cbioportal_mcp.study_authz.startup_check import PolicyCoverageError
+
+    with pytest.raises(PolicyCoverageError) as exc:
+        _startup_check(server, user, database, public_databases)
+    message = str(exc.value)
+    assert needle in message, message
+    assert "\n" not in message and "@" not in message
+    return message
+
+
+def test_startup_check_role_target_passes(server):
+    result = _startup_check(server, "mcp_restricted")
+    assert (result.user, result.target, result.target_is_user) == (
+        "mcp_restricted",
+        ROW_POLICY_ROLE,
+        False,
+    )
+    assert result.public_studies == len(PUBLIC)
+
+
+def test_startup_check_role_target_with_direct_grant_refused(server):
+    _refused(server, "mcp_direct", f"direct SELECT grant ON {DB}.* bypasses role")
+
+
+def test_startup_check_other_role_with_select_refused(server):
+    """A second default role holding SELECT bypasses the policy role via ?role=."""
+    admin = server.admin
+    for statement in sqlgen.statements(sqlgen.restricted_user_sql("p6_two_roles", "pw", DB)):
+        admin.command(statement)
+    admin.command("CREATE ROLE IF NOT EXISTS p6_analyst")
+    admin.command(f"GRANT SELECT ON {DB}.* TO p6_analyst")
+    admin.command("GRANT p6_analyst TO p6_two_roles")
+    admin.command("SET DEFAULT ROLE ALL TO p6_two_roles")
+    try:
+        _refused(server, "p6_two_roles", "only policy role")
+    finally:
+        admin.command("DROP USER IF EXISTS p6_two_roles")
+        admin.command("DROP ROLE IF EXISTS p6_analyst")
+
+
+def test_startup_check_missing_policy_on_one_table_refused(server):
+    admin = server.admin
+    admin.command(f"DROP ROW POLICY cbioportal_mcp_study_patient ON {DB}.patient")
+    try:
+        _refused(server, "mcp_restricted", "patient: study table has only the default-deny")
+    finally:
+        sqlgen.apply(admin, PARAMS, log=lambda *_: None)
+    _startup_check(server, "mcp_restricted")
+
+
+def test_startup_check_readable_user_study_manual_refused(server):
+    admin = server.admin
+    admin.command(
+        f"CREATE ROW POLICY p6_leak ON {DB}.user_study_manual FOR SELECT USING 1 "
+        f"TO {ROW_POLICY_ROLE}"
+    )
+    try:
+        assert server.http(f"SELECT count() FROM {DB}.user_study_manual", "mcp_restricted") != "0"
+        _refused(server, "mcp_restricted", "user_study_manual: denied object has policies")
+    finally:
+        admin.command(f"DROP ROW POLICY p6_leak ON {DB}.user_study_manual")
+    _startup_check(server, "mcp_restricted")
+
+
+def test_startup_check_foreign_policy_refused(server):
+    """P4's ownership rule at startup: a foreign PERMISSIVE policy TO the policy
+    role is OR-ed with ours and widens the MCP user; one TO another principal
+    is widened by our catch-all. Both refuse."""
+    admin = server.admin
+    sql = f"SELECT count() FROM {DB}.cancer_study"
+    admin.command(
+        f"CREATE ROW POLICY team_view ON {DB}.cancer_study USING cancer_study_id > 0 "
+        f"TO {ROW_POLICY_ROLE}"
+    )
+    try:
+        assert server.http(sql, "mcp_restricted") == str(len(STUDIES))  # widened
+        _refused(server, "mcp_restricted", f"team_view ON {DB}.cancer_study (not created")
+    finally:
+        admin.command(f"DROP ROW POLICY IF EXISTS team_view ON {DB}.cancer_study")
+    admin.command("CREATE USER IF NOT EXISTS p6_outsider IDENTIFIED BY 'pw'")
+    admin.command(f"CREATE ROW POLICY outsider_only ON {DB}.patient USING 0 TO p6_outsider")
+    try:
+        assert server.http(sql, "mcp_restricted") == str(len(PUBLIC))  # MCP unaffected...
+        _refused(server, "mcp_restricted", f"outsider_only ON {DB}.patient")  # ...still refused
+    finally:
+        admin.command(f"DROP ROW POLICY IF EXISTS outsider_only ON {DB}.patient")
+        admin.command("DROP USER IF EXISTS p6_outsider")
+    _startup_check(server, "mcp_restricted")
+
+
+def test_startup_check_admin_privilege_refused(server):
+    admin = server.admin
+    admin.command(f"GRANT INSERT ON {DB}.user_study_manual TO {ROW_POLICY_ROLE}")
+    try:
+        _refused(server, "mcp_restricted", f"user holds INSERT ON {DB}.user_study_manual")
+    finally:
+        admin.command(f"REVOKE INSERT ON {DB}.user_study_manual FROM {ROW_POLICY_ROLE}")
+
+
+def test_startup_check_user_target_passes(server):
+    """Policies TO the user itself (llm_user style): its direct grants are fine."""
+    admin = server.admin
+    admin.command("CREATE USER p6_llm_user IDENTIFIED BY 'pw'")
+    admin.command("CREATE DATABASE IF NOT EXISTS authz_p6_other")
+    admin.command("GRANT SELECT ON authz_p6_other.* TO p6_llm_user")
+    source = "authz_source_p6"
+    _load_fixture(admin, source)
+    target = sqlgen.Params(
+        database="authz_p6_user_target",
+        public_group="PUBLIC",
+        app_name="cbioportal",
+        policy_target="p6_llm_user",
+        target_is_user=True,
+    )
+    make_test_db(admin, source, target, {"priv_1": "TEAM_A"}, ["pub_a"], [], log=lambda *_: None)
+    result = _startup_check(server, "p6_llm_user", target.database)
+    assert (result.target, result.target_is_user, result.public_studies) == (
+        "p6_llm_user",
+        True,
+        1,
+    )
+    assert server.http("CHECK GRANT SELECT ON system.grants", "p6_llm_user") == "0"
+    assert server.http("CHECK GRANT SELECT ON system.role_grants", "p6_llm_user") == "0"
+    # Without the SHOW ROW POLICIES grant the check cannot see the policies: refuse.
+    admin.command(f"REVOKE SHOW ROW POLICIES ON {target.database}.* FROM p6_llm_user")
+    try:
+        _refused(server, "p6_llm_user", "grant SHOW ROW POLICIES", target.database)
+    finally:
+        admin.command(f"GRANT SHOW ROW POLICIES ON {target.database}.* TO p6_llm_user")
+
+
+def test_startup_check_through_the_mcp_connection(server, monkeypatch):
+    """run_startup_check with filtering on builds mcp-clickhouse's own client."""
+    from mcp_clickhouse import mcp_env
+
+    from cbioportal_mcp.study_authz import startup_check
+
+    for key, value in {
+        "CLICKHOUSE_HOST": "127.0.0.1",
+        "CLICKHOUSE_PORT": str(server.port),
+        "CLICKHOUSE_USER": "mcp_restricted",
+        "CLICKHOUSE_PASSWORD": "pw",
+        "CLICKHOUSE_SECURE": "false",
+        "CLICKHOUSE_VERIFY": "false",
+        "CLICKHOUSE_DATABASE": DB,
+    }.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setattr(mcp_env, "_CONFIG_INSTANCE", None)
+    on = {startup_check.FILTERING_ENV: "on", startup_check.PUBLIC_DATABASES_ENV: ""}
+    assert startup_check.run_startup_check(DB, env=on).target == ROW_POLICY_ROLE
+    assert startup_check.run_startup_check(DB, env={}) is None
+    monkeypatch.setenv("CLICKHOUSE_USER", "mcp_direct")
+    monkeypatch.setattr(mcp_env, "_CONFIG_INSTANCE", None)
+    with pytest.raises(startup_check.PolicyCoverageError, match="bypasses role"):
+        startup_check.run_startup_check(DB, env=on)
+
+
+# --- P6 allow-list audit: the reviewer's false-PASS repros -------------------
+
+
+def _p6_user_target_db(admin, db: str, user: str):
+    """A user-targeted policy database and its llm_user-like runtime user."""
+    admin.command(f"CREATE USER IF NOT EXISTS {user} IDENTIFIED BY 'pw'")
+    source = f"{db}_source"
+    _load_fixture(admin, source)
+    target = sqlgen.Params(
+        database=db,
+        public_group=PUBLIC_GROUP,
+        app_name="cbioportal",
+        policy_target=user,
+        target_is_user=True,
+    )
+    make_test_db(admin, source, target, {"priv_1": "TEAM_A"}, ["pub_a"], [], log=lambda *_: None)
+    return target
+
+
+def _p6_role_target_db(admin, db: str, role: str, user: str):
+    """A role-targeted policy database plus a runtime user with that role."""
+    source = f"{db}_source"
+    _load_fixture(admin, source)
+    target = sqlgen.Params(
+        database=db,
+        public_group=PUBLIC_GROUP,
+        app_name="cbioportal",
+        policy_target=role,
+    )
+    make_test_db(admin, source, target, {"priv_1": "TEAM_A"}, ["pub_a"], [], log=lambda *_: None)
+    admin.command(f"CREATE USER IF NOT EXISTS {user} IDENTIFIED BY 'pw'")
+    admin.command(f"GRANT {role} TO {user}")
+    admin.command(f"SET DEFAULT ROLE {role} TO {user}")
+    return target
+
+
+def test_startup_check_wildcard_database_grant_refused(server):
+    """Repro 1: GRANT SELECT ON authz*.* was compared literally, so a
+    SET ROLE NONE bypass read the whole database."""
+    admin = server.admin
+    db, role, user = "authz_p6_wild", "p6_wild_policy", "p6_wild_user"
+    _p6_role_target_db(admin, db, role, user)
+    admin.command(f"GRANT SELECT ON authz*.* TO {user}")
+    _refused(server, user, "wildcard database", db)
+
+
+def test_startup_check_other_role_table_select_refused(server):
+    """Repro 2: an extra role with table-level SELECT was invisible to the
+    whole-database CHECK GRANT."""
+    admin = server.admin
+    db, role, user = "authz_p6_table", "p6_table_policy", "p6_table_user"
+    _p6_role_target_db(admin, db, role, user)
+    admin.command("CREATE ROLE p6_sample_reader")
+    admin.command(f"GRANT SELECT ON {db}.sample TO p6_sample_reader")
+    admin.command(f"GRANT p6_sample_reader TO {user}")
+    _refused(server, user, "only policy role", db)
+
+
+def test_startup_check_role_grant_option_refused(server):
+    """Repro 3: the policy role's SELECT carries WITH GRANT OPTION, so the
+    user can grant itself a roleless path and read everything."""
+    admin = server.admin
+    db, role, user = "authz_p6_option", "p6_option_policy", "p6_option_user"
+    _p6_role_target_db(admin, db, role, user)
+    admin.command(f"GRANT SELECT ON {db}.* TO {role} WITH GRANT OPTION")
+    _refused(server, user, "WITH GRANT OPTION", db)
+
+
+def test_startup_check_non_default_role_admin_privilege_refused(server):
+    """Repro 4: a non-default granted role holds ACCESS MANAGEMENT ON *.*."""
+    admin = server.admin
+    db, role, user = "authz_p6_nondefault", "p6_nondefault_policy", "p6_nondefault_user"
+    _p6_role_target_db(admin, db, role, user)
+    admin.command("CREATE ROLE p6_nondefault_admin")
+    admin.command("GRANT ACCESS MANAGEMENT ON *.* TO p6_nondefault_admin")
+    admin.command(f"GRANT p6_nondefault_admin TO {user}")  # deliberately not default
+    _refused(server, user, "only policy role", db)
+
+
+def test_startup_check_target_role_table_ddl_refused(server):
+    """Repro 5: table-level DDL on an authz table via the policy role."""
+    admin = server.admin
+    db, role, user = "authz_p6_ddl", "p6_ddl_policy", "p6_ddl_user"
+    _p6_role_target_db(admin, db, role, user)
+    admin.command(f"GRANT DROP TABLE ON {db}.user_study TO {role}")
+    _refused(server, user, "DROP TABLE", db)
+
+
+@pytest.mark.parametrize(
+    ("grant", "needle"),
+    [
+        ("MYSQL", "MYSQL"),
+        ("SYSTEM DROP DNS CACHE", "SYSTEM DROP DNS CACHE"),
+    ],
+)
+def test_startup_check_target_role_table_function_refused(server, grant, needle):
+    """Repro 6: table functions the old deny list did not enumerate."""
+    admin = server.admin
+    suffix = "mysql" if grant == "MYSQL" else "system"
+    db, role, user = f"authz_p6_func_{suffix}", f"p6_{suffix}_policy", f"p6_{suffix}_user"
+    _p6_role_target_db(admin, db, role, user)
+    admin.command(f"GRANT {grant} ON *.* TO {role}")
+    _refused(server, user, needle, db)
+
+
+def test_startup_check_quoted_object_name_refused(server):
+    """Quoted names with spaces are parsed as objects, never as roles."""
+    admin = server.admin
+    db, user = "authz_p6_quoted", "p6_quoted_user"
+    _p6_user_target_db(admin, db, user)
+    admin.command("CREATE DATABASE IF NOT EXISTS `p6 weird db`")
+    admin.command(
+        "CREATE TABLE IF NOT EXISTS `p6 weird db`.`my table` (x Int64) "
+        "ENGINE=MergeTree ORDER BY x"
+    )
+    admin.command(f"GRANT SELECT ON `p6 weird db`.`my table` TO {user}")
+    _refused(server, user, "p6 weird db", db)
+
+
+def test_startup_check_nested_role_grant_refused(server):
+    """A nested role is audited (or refused if unreadable); a grant inside it
+    cannot hide behind the outer role."""
+    admin = server.admin
+    db, role, user = "authz_p6_nested", "p6_nested_policy", "p6_nested_user"
+    _p6_role_target_db(admin, db, role, user)
+    admin.command("CREATE ROLE p6_nested_inner")
+    admin.command(f"GRANT SELECT ON {db}.sample TO p6_nested_inner WITH GRANT OPTION")
+    admin.command(f"GRANT p6_nested_inner TO {role}")
+    _refused(server, user, "WITH GRANT OPTION", db)
+
+
+def test_startup_check_user_target_with_five_other_databases_passes(server):
+    """The llm_user shape: no roles, direct SELECT on five unrelated databases,
+    policies attached directly to the user."""
+    admin = server.admin
+    db, user = "authz_p6_llm_five", "p6_llm_five"
+    admin.command(f"CREATE USER IF NOT EXISTS {user} IDENTIFIED BY 'pw'")
+    others = [f"p6_other_{i}" for i in range(5)]
+    for other in others:
+        admin.command(f"CREATE DATABASE IF NOT EXISTS {other}")
+        admin.command(f"GRANT SELECT ON {other}.* TO {user}")
+    _p6_user_target_db(admin, db, user)
+    assert admin.query(
+        "SELECT count() FROM system.role_grants WHERE user_name = {u:String}",
+        parameters={"u": user},
+    ).result_rows == [(0,)]
+    # Docker does not register Shared* engines; exercise the corresponding
+    # MergeTree families here and Shared* metadata in the unit/Cloud checks.
+    engines = [
+        "MergeTree",
+        "ReplacingMergeTree",
+        "SummingMergeTree",
+        "AggregatingMergeTree",
+        "CoalescingMergeTree",
+    ]
+    for other, engine in zip(others, engines, strict=True):
+        admin.command(f"CREATE TABLE {other}.cancer_study (id Int64) ENGINE={engine} ORDER BY id")
+    _refused(server, user, "not declared public", db)
+    # A public declaration permits study copies, never privileged objects.
+    result = _startup_check(server, user, db, frozenset(others))
+    assert (result.target, result.target_is_user, result.public_studies) == (user, True, 1)
+
+
+def test_startup_check_unfiltered_source_requires_public_declaration(server):
+    admin = server.admin
+    db, user = "authz_p6_copy", "p6_copy_user"
+    _p6_user_target_db(admin, db, user)
+    source = db + "_source"
+    admin.command(f"GRANT SELECT ON {source}.* TO {user}")
+    assert server.http(f"SELECT count() FROM {source}.cancer_study", user) == "9"
+    _refused(server, user, "not declared public", db)
+    assert _startup_check(server, user, db, frozenset({source})).public_studies == 1
+
+
+@pytest.mark.parametrize("kind", ["definer", "none", "dictionary", "merge"])
+def test_startup_check_unsafe_other_database_even_when_public(server, kind):
+    admin = server.admin
+    db, user, other = f"authz_p6_{kind}", f"p6_{kind}_user", f"other_p6_{kind}"
+    _p6_user_target_db(admin, db, user)
+    admin.command(f"CREATE DATABASE {other}")
+    if kind in {"definer", "none"}:
+        security = (
+            "DEFINER=admin SQL SECURITY DEFINER" if kind == "definer" else "SQL SECURITY NONE"
+        )
+        admin.command(f"CREATE VIEW {other}.leak {security} AS SELECT * FROM {db}.cancer_study")
+        needle = "SQL SECURITY INVOKER"
+    elif kind == "dictionary":
+        admin.command(
+            f"CREATE DICTIONARY {other}.leak (cancer_study_id UInt64, name String) "
+            "PRIMARY KEY cancer_study_id SOURCE(CLICKHOUSE(HOST '127.0.0.1' PORT 9000 "
+            f"USER 'admin' PASSWORD 'admin' DB '{db}' TABLE 'cancer_study')) "
+            "LAYOUT(FLAT()) LIFETIME(0)"
+        )
+        needle = "Dictionary engine is not allowed"
+    else:
+        admin.command(
+            f"CREATE TABLE {other}.leak AS {db}.cancer_study "
+            f"ENGINE=Merge('{db}', '^cancer_study$')"
+        )
+        needle = "Merge engine is not allowed"
+    admin.command(f"GRANT SELECT ON {other}.* TO {user}")
+    if kind == "definer":
+        assert server.http(f"SELECT count() FROM {other}.leak", user) == "2"
+    _refused(server, user, needle, db, frozenset({other}))
+
+
+@pytest.mark.parametrize("scope", ["system.*", "system.query_log"])
+def test_startup_check_system_grants_refused(server, scope):
+    admin = server.admin
+    suffix = "all" if scope.endswith("*") else "log"
+    db, user = f"authz_p6_sys_{suffix}", f"p6_sys_{suffix}"
+    _p6_user_target_db(admin, db, user)
+    admin.command(f"GRANT SELECT ON {scope} TO {user}")
+    _refused(server, user, "grants on system are not allowed", db)
+
+
+@pytest.mark.parametrize("kind", ["url_source", "url_encoded_policy", "mysql_source"])
+def test_startup_check_credentials_in_external_engine_refused(server, kind):
+    admin = server.admin
+    db, user, other = f"authz_r3_{kind}", f"r3_{kind}_user", f"other_r3_{kind}"
+    _p6_user_target_db(admin, db, user)
+    admin.command(f"CREATE DATABASE {other}")
+    if kind.startswith("url"):
+        source = db if kind == "url_encoded_policy" else db + "_source"
+        query = f"SELECT cancer_study_identifier FROM {source}.cancer_study FORMAT TSV"
+        encoded = urllib.parse.quote(query, safe="")
+        if kind == "url_encoded_policy":
+            encoded = encoded.replace(db, "".join(f"%{ord(c):02X}" for c in db))
+        url = f"http://127.0.0.1:8123/?user=admin&password=admin&query={encoded}"
+        engine = f"URL('{url}', TSV)"
+        expected = "2" if kind == "url_encoded_policy" else "9"
+        needle = "URL engine is not allowed"
+    else:
+        engine = f"MySQL('127.0.0.1:9004', '{db}_source', 'cancer_study', 'admin', 'admin')"
+        expected, needle = "9", "MySQL engine is not allowed"
+    admin.command(
+        f"CREATE TABLE {other}.leak (cancer_study_identifier Nullable(String)) ENGINE={engine}"
+    )
+    admin.command(f"GRANT SELECT ON {other}.* TO {user}")
+    assert server.http(f"SELECT count() FROM {other}.leak", user) == expected
+    _refused(server, user, needle, db)
+    _refused(server, user, needle, db, frozenset({other}))
+
+
+def test_startup_and_admin_check_reject_view_security_alias_spoof(server):
+    admin = server.admin
+    db, user, other = "authz_r3_spoof", "r3_spoof_user", "other_r3_spoof"
+    _p6_user_target_db(admin, db, user)
+    admin.command(f"CREATE DATABASE {other}")
+    select = f"SELECT cancer_study_identifier AS `a SQL SECURITY INVOKER b` FROM {db}.cancer_study"
+    admin.command(f"CREATE VIEW {other}.leak DEFINER=admin SQL SECURITY DEFINER AS {select}")
+    admin.command(f"GRANT SELECT ON {other}.* TO {user}")
+    assert server.http(f"SELECT count() FROM {other}.leak", user) == "2"
+    _refused(server, user, "SQL SECURITY INVOKER", db)
+    _refused(server, user, "SQL SECURITY INVOKER", db, frozenset({other}))
+    admin.command(
+        f"CREATE OR REPLACE VIEW {db}.clinical_attribute_counts "
+        f"DEFINER=admin SQL SECURITY DEFINER AS {select}"
+    )
+    report = fetch_and_evaluate(admin, db, user)
+    assert any("view is SQL SECURITY DEFINER" in error for error in report.errors)
+
+
+@pytest.mark.parametrize("source_table", ["sample_derived", "mutation"])
+def test_startup_check_renamed_study_copy_refused(server, source_table):
+    admin = server.admin
+    db, user, other = (
+        f"authz_r3_copy_{source_table}",
+        f"r3_copy_{source_table}",
+        f"other_r3_{source_table}",
+    )
+    _p6_user_target_db(admin, db, user)
+    admin.command(f"CREATE DATABASE {other}")
+    admin.command(
+        f"CREATE TABLE {other}.renamed ENGINE=Memory AS SELECT * FROM {db}_source.{source_table}"
+    )
+    admin.command(f"GRANT SELECT ON {other}.* TO {user}")
+    assert int(server.http(f"SELECT count() FROM {other}.renamed", user)) >= 9
+    _refused(server, user, "not declared public", db)
+    assert _startup_check(server, user, db, frozenset({other})).public_studies == 1
+
+
+@pytest.mark.parametrize("default_security", ["INVOKER", "DEFINER"])
+def test_clauseless_stored_view_is_invoker_under_both_defaults(server, default_security):
+    from cbioportal_mcp.study_authz.coverage import view_sql_security
+
+    admin = server.admin
+    db, user, other = (
+        f"authz_r3_implicit_{default_security.lower()}",
+        f"r3_implicit_{default_security.lower()}",
+        f"other_r3_implicit_{default_security.lower()}",
+    )
+    _p6_user_target_db(admin, db, user)
+    admin.command(f"CREATE DATABASE {other}")
+    admin.command(
+        f"CREATE VIEW {other}.v AS SELECT count() AS n FROM {db}.cancer_study",
+        settings={"default_normal_view_sql_security": default_security},
+    )
+    create = admin.query(
+        "SELECT create_table_query FROM system.tables WHERE database={db:String} AND name='v'",
+        parameters={"db": other},
+    ).result_rows[0][0]
+    assert "SQL SECURITY" not in create
+    assert view_sql_security(create) == "INVOKER"
+    admin.command(f"GRANT SELECT ON {other}.* TO {user}")
+    assert server.http(f"SELECT n FROM {other}.v", user) == "1"
+    assert _startup_check(server, user, db).public_studies == 1
+
+
+@pytest.mark.parametrize("grant", ["SELECT(sample_unique_id)", "SELECT"])
+def test_startup_check_other_database_narrow_grant_refused(server, grant):
+    admin = server.admin
+    suffix = "column" if "(" in grant else "table"
+    db, user, other = f"authz_c1_{suffix}", f"c1_{suffix}_user", f"other_c1_{suffix}"
+    _p6_user_target_db(admin, db, user)
+    admin.command(f"CREATE DATABASE {other}")
+    admin.command(
+        f"CREATE TABLE {other}.zz ENGINE=MergeTree ORDER BY tuple() "
+        f"AS SELECT * FROM {db}_source.sample_derived"
+    )
+    admin.command(f"GRANT {grant} ON {other}.zz TO {user}")
+    # A column grant hides the study-link column while still exposing private IDs.
+    assert "priv_1:s" in server.studies_seen(f"SELECT sample_unique_id FROM {other}.zz", user)
+    if suffix == "column":
+        assert (
+            server.http(
+                "SELECT name FROM system.columns "
+                f"WHERE database='{other}' AND table='zz' "
+                "AND name='cancer_study_identifier'",
+                user,
+            )
+            == ""
+        )
+    _refused(server, user, "table/column-scoped grants", db)
+    _refused(server, user, "table/column-scoped grants", db, frozenset({other}))
+    admin.command(f"REVOKE SELECT ON {other}.zz FROM {user}")
+    admin.command(f"GRANT SELECT ON {other}.* TO {user}")
+    _refused(server, user, "not declared public", db)
+    assert _startup_check(server, user, db, frozenset({other})).public_studies == 1
+
+
+@pytest.mark.parametrize(
+    "column,source_column",
+    [
+        ("CANCER_STUDY_ID", "cancer_study_id"),
+        ("CANCER_STUDY_IDENTIFIER", "cancer_study_identifier"),
+    ],
+)
+def test_startup_check_uppercase_study_column_detected(server, column, source_column):
+    admin = server.admin
+    suffix = "id" if column.endswith("_ID") else "identifier"
+    db, user, other = f"authz_c1_upper_{suffix}", f"c1_upper_{suffix}", f"other_c1_upper_{suffix}"
+    _p6_user_target_db(admin, db, user)
+    admin.command(f"CREATE DATABASE {other}")
+    admin.command(
+        f"CREATE TABLE {other}.zz ENGINE=Memory AS "
+        f"SELECT {source_column} AS {column} FROM {db}_source.cancer_study"
+    )
+    admin.command(f"GRANT SELECT ON {other}.* TO {user}")
+    _refused(server, user, "not declared public", db)
+    assert _startup_check(server, user, db, frozenset({other})).public_studies == 1
