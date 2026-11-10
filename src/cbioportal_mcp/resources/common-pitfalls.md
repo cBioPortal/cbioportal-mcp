@@ -849,6 +849,15 @@ User: *"What kind of cancer are there in the database?"*
 
 ---
 
+### 23. 🚨 A VERIFIED ZERO IS AN ANSWER
+
+A well-formed query that returns 0 rows or a count of 0 is often the correct result (for example, no patient with one diagnosis appears in a second cohort even though the cohorts overlap overall). Do not keep rebuilding the query to "fix" it.
+
+1. Run one sanity check in a single query or two at most: both sides are non-empty on their own, and the same join without the narrow filter returns more than 0.
+2. If the check passes, report the 0, say which filter produced it, and offer the nearest alternative (for example a related OncoTree code).
+3. Do not re-derive the same count with different join forms, hex-dump ids, or re-count each side repeatedly. If three differently written queries agree, stop and answer.
+4. Background claims in a guide such as "~96% of patients are also in study X" describe the cohorts as a whole, not any one subtype, so they do not contradict a 0 for a subtype.
+
 ## Validation Checklist
 
 Before trusting your results, ask:
