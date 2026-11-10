@@ -36,8 +36,9 @@ All policies are attached `TO` one **policy target**, chosen at apply time:
   `GRANT SELECT` on several public databases and no roles. `apply` refuses a
   user that does not exist.
 
-Either way, `apply` ends with `GRANT SELECT ON <db>.* TO <target>`, issued
-after every policy. Everyone except the target gets `USING 1`. The policies
+Either way, `apply` ends with `GRANT SHOW ROW POLICIES` (for the server's
+startup check) and `GRANT SELECT ON <db>.* TO <target>`, issued after every
+policy. Everyone except the target gets `USING 1`. The policies
 are scoped to this one database, so the target's access to its other
 databases is unchanged.
 
@@ -350,6 +351,132 @@ public studies. `--replace` rebuilds the database, but only if this tool
 created it (it checks the database comment). The emails in this repository
 are all example.org fakes; put real ones only in your local CSV.
 
+## Server startup check (study filtering on)
+
+With `CBIOPORTAL_MCP_STUDY_FILTERING=on` the server refuses to start (one
+`CRITICAL` line, exit code 2) unless its own ClickHouse user is covered. It
+runs `study_authz/startup_check.py` over a client built like mcp-clickhouse's,
+as `currentUser()`, and never logs an email or driver error text (failures name
+the check plus the exception class and ClickHouse error code):
+
+- `SQL_cbio_user` reaches `getSettingOrDefault` under `readonly=1` (ClickHouse
+  >= 24.10 and the `SQL_` custom settings prefix).
+- The database-wide default-deny targets the user itself or one of its
+  *default* roles. A policy role that is granted but not default is refused.
+- `coverage.evaluate` (the same rules as `check`) passes over exactly the
+  policies that apply to the user and its enabled roles: every study table,
+  reference table and view has its own policy, `user_study` has only the
+  identity predicate, and `user_study_manual` and the other denied tables have
+  none. Unclassified tables are refused too.
+- Policy ownership (the same `sqlgen.policy_conflicts` as `apply` / `check`):
+  any row policy on the database not named `cbioportal_mcp_*`, or one of ours
+  attached to a different target, refuses. A foreign permissive policy that
+  applies to the MCP user is OR-ed with ours and widens what it reads; one on
+  another principal is widened by the catch-all.
+- The database, and the user or role the policies target, must be plain
+  identifiers (`sqlgen.validate_identifier`, as `apply` requires).
+- The runtime user's `SHOW GRANTS` and `SHOW GRANTS FINAL` are parsed
+  fail-closed. FINAL contains the union of all held privileges, including
+  non-default roles and roles granted to roles. `system.enabled_roles` checks
+  the policy role's default status. No `SELECT` on `system.grants` or
+  `system.role_grants`, and no `SHOW USERS`/`SHOW ROLES`, is needed.
+- User target: FINAL may contain only database-wide `SELECT` and
+  `SHOW ROW POLICIES` on the connected database, and `SELECT` on other
+  databases that pass the checks below. Role target: the direct grants must
+  contain only `GRANT <policy_role> TO <runtime_user>` without ADMIN OPTION;
+  that role must be default, and FINAL must satisfy the same allow list.
+- Explicit grants on **any object in `system`** are refused, including
+  `system.*`, `system.query_log`, and the two grant tables. Global grants,
+  wildcard names, grant/admin options, and privileges outside the allow list
+  also refuse startup. The self-scoped SHOW commands avoid exposing other
+  users' grants and email-named console identities to agent SQL.
+- Every other database selectable through FINAL is inspected using
+  `system.tables` and `system.columns`. Only plain storage engines are allowed:
+  the enumerated MergeTree families (including Shared/Replicated variants),
+  Memory, Log/TinyLog/StripeLog, Null, Set and Join. Merge, Distributed,
+  Buffer, MaterializedView, Dictionary and **all external/integration engines**
+  (including URL and MySQL) always refuse. Definitions, URL encoding and
+  embedded credentials do not affect that decision. There is **no
+  public-database override** for a non-plain engine.
+- Views must use INVOKER security. The shared startup/admin checker strips
+  backtick/double-quoted identifiers, string literals with escapes, and
+  comments before recognizing SQL SECURITY; malformed or ambiguous clauses
+  fail closed. A stored normal-view query with no clause is accepted as
+  implicit INVOKER: live tests on 25.8.33.6 and 26.6.8.7 verified caller row
+  filtering under both `default_normal_view_sql_security` defaults, including
+  DEFINER. Neither version exposes a structured security field in
+  `system.tables`. Explicit DEFINER/NONE views always refuse.
+- Any database with a table/view name classified in `catalog.py`, or a table
+  with `cancer_study_identifier`/`cancer_study_id`, is treated as study data.
+  Column names are matched case-insensitively. Catalog-defined linkage
+  columns (such as `genetic_profile_id` on renamed mutation copies) also
+  identify study data; generic `internal_id` alone does
+  not. Such a database must have an applicable `cbioportal_mcp_*` database-wide
+  default-deny or be explicitly declared public. This is metadata detection,
+  not a data-lineage proof: copies that rename both the table and every
+  recognized linkage column can evade classification. Operators must ensure
+  no other readable database contains gated data under disguised names.
+- **Startup snapshot:** grants, roles, policies, columns and engines are
+  inspected only when the MCP starts. Grant or DDL changes after startup are
+  not rechecked. Restart the MCP after any grant, policy or DDL change so the
+  gate runs against the new configuration.
+- As a random `@startup-probe.invalid` caller: visible `cancer_study` counts
+  and identifiers equal public studies in `user_study` (`email = ''`), with
+  no other caller's `user_study` rows and no `user_study_manual` rows.
+
+When filtering is **on**, the following setting is required, including for
+local stdio. There is no implicit default. Set it to the empty string when
+there are no trusted public study databases:
+
+```bash
+export CBIOPORTAL_MCP_STUDY_FILTERING_PUBLIC_DATABASES=''
+```
+
+The comma-separated entries use P4's plain identifier validation, with
+surrounding whitespace trimmed; empty entries are rejected. A listed database
+is **trusted to contain no gated data and only data every logged-in user may
+see**. This is the operator's responsibility: startup cannot distinguish a
+public LibreChat clone from an unfiltered private study copy. Listing does
+not grant access and never overrides the unsafe-object checks above. Do not
+list a private source copy to make a startup error disappear.
+
+For the laptop `llm_user` test with the existing five public LibreChat clones,
+the declaration is:
+
+```bash
+export CBIOPORTAL_MCP_STUDY_FILTERING_PUBLIC_DATABASES='cbioportal_public_librechat_blue,cbioportal_public_librechat_green,cbioportal_public_librechat_beta_blue,cbioportal_public_librechat_beta_green,cgds_public_librechat_20251209'
+```
+
+Confirm the current `SHOW GRANTS` against that list before using it. The list
+comes from the local clone/runbook configuration; the available Cloud
+credential could not inspect `llm_user`'s actual grants. It does not include
+the protected laptop test database (`cbioportal_authz_test`).
+
+The policy template grants `SHOW ROW POLICIES ON <db>.*` to the policy target
+(re-run `apply` on existing databases). This exposes policy predicates, not
+authentication grants; no additional system-table grants should be added.
+Refresh status (`system.view_refreshes`) remains an admin `check`. With
+filtering off, startup neither requires the public-database declaration nor
+runs these checks.
+
+Known conservative refusals: non-plain database/table names, any partial
+revoke, and table/column-level grants on **every database**, including listed
+public databases. Only database-wide grants (`ON <db>.*`) are accepted:
+column-scoped SELECT hides unreadable study-link columns from
+`system.columns`, so metadata classification cannot safely audit that shape.
+These are deliberate fail-closed limits of the parser/allow list. Use plain
+names and the documented database-wide grant shape rather than widening the runtime permissions.
+Docker 25.8 and 26.6 exercise these rules without system-table SELECT grants.
+A read-only Cloud 26.6.1.2455 metadata inspection observed `SharedMergeTree`.
+The allow list also includes `SharedReplacingMergeTree` and the other known
+Shared/Replicated MergeTree families. Docker does not register Shared engines,
+so these names have metadata/unit coverage; its live tests use the matching
+ordinary MergeTree families. The available Cloud credential could not verify
+`SharedReplacingMergeTree` tables or the full `llm_user` configuration.
+A full policy-enabled startup on Cloud 26.6.1 (with the P1 lock removed in a
+throwaway test commit) passed end to end; see "End-to-end test plan and
+results" on PR #193.
+
 ## Security notes and caveats
 
 - **Direct grant bypass (role targets only).** With role-targeted policies,
@@ -360,11 +487,10 @@ are all example.org fakes; put real ones only in your local CSV.
   `CREATE USER OR REPLACE`, which drops any old direct grant.
 - **User targets have no such bypass.** The policies name the user itself, so
   its direct grants, its roles, and `SET ROLE NONE` change nothing; the live
-  tests prove this too. That is why the planned server startup check should
-  verify that *every study table and view in the connected database has a
-  policy that applies to the current user* (via `system.row_policies`
-  `apply_to_list` / roles), not "role only, no direct grants". This is also
-  what `check --target` verifies.
+  tests prove this too. That is why the server's startup check (below)
+  verifies that *every study table and view in the connected database has a
+  policy that applies to the current user*, and refuses direct grants only
+  for role targets. `check --target` verifies the same policies as admin.
 - Do not grant the target `CREATE TEMPORARY TABLE`, `REMOTE` / table functions,
   `dictGet`, or create `DEFINER` views. All of these can read around row
   policies. `check` rejects DEFINER/NONE views, extra materialized views and
@@ -382,6 +508,32 @@ are all example.org fakes; put real ones only in your local CSV.
   the next successful refresh. A new clone picks it up immediately.
 - `mutation_event` / `cna_event` policies go through `mutation` /
   `sample_cna_event`, which is correct but can be slow on very large tables.
-- Only tested on ClickHouse 25.8 in Docker, not on ClickHouse Cloud.
-  Refreshable MVs in a Replicated database (Cloud's default) are documented
+- Tested on ClickHouse 25.8 and 26.6 in Docker, and end to end on ClickHouse
+  Cloud 26.6.1 (PR #193). Refreshable MVs in a Replicated database (Cloud's default) are documented
   to be coordinated across replicas. Run `check` after the first apply there.
+
+## Request identity wiring (P7)
+
+P7 sends the P2 verified email, stripped and lowercased, as `SQL_cbio_user`
+with `readonly=1` on every study-data SELECT. Context propagates through both
+application and mcp-clickhouse worker pools. Missing identity fails closed;
+schema-only tools remain available without an email setting. The custom setting
+is explicitly forwarded by clickhouse-connect (`invalid_setting_action=send`).
+User SQL cannot mention the identity setting, read settings through `getSetting`
+or `getSettingOrDefault`, or set `SQL_` settings, including quoted/escaped forms.
+
+With filtering on, study lists use bounded policy-filtered SQL. Dynamic study
+caches are bypassed, background warming is disabled, and curated guides check
+study visibility on every read. This makes revocations effective as soon as
+`user_study` refreshes (or its private grants expire), without an extra cache
+TTL. Schema and static file indexes retain their existing caches. Public-only
+callers receive a scope/frequency note in query metadata and study lists.
+
+P11 removed the P1 startup lock: `CBIOPORTAL_MCP_STUDY_FILTERING=on` now
+starts when both rollout switches are `enforce`, the public-database
+declaration is set, and the startup check above passes
+(`tests/test_study_filtering_on_startup.py`). The operator steps are in
+[`study-filtering-rollout.md`](study-filtering-rollout.md).
+`tests/test_send_identity.py` exercises the wiring with fakes;
+`test_p7_user_tools_and_cache_isolation` in `tests/test_study_authz_live.py`
+calls the wiring directly against P4's throwaway Docker fixture.

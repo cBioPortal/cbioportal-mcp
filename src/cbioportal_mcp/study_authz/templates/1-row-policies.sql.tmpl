@@ -873,4 +873,7 @@ CREATE ROW POLICY OR REPLACE cbioportal_mcp_view_treatment_regimens_in_study ON 
 -- 7. Only now let the target read the database. With a role target, give the
 -- MCP user the role via `python -m cbioportal_mcp.study_authz user-sql` (role
 -- only, no direct grants: a direct SELECT plus SET ROLE NONE bypasses policies).
+-- SHOW ROW POLICIES lets the MCP's startup check (study filtering on) verify
+-- that these policies apply to its own user; policy text holds no emails.
+GRANT SHOW ROW POLICIES ON __CLICKHOUSE_DATABASE__.* TO __POLICY_TARGET__;
 GRANT SELECT ON __CLICKHOUSE_DATABASE__.* TO __POLICY_TARGET__;
