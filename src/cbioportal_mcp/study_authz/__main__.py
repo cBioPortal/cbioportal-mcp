@@ -98,7 +98,10 @@ def cmd_render(args) -> int:
 
 
 def cmd_apply(args) -> int:
-    sqlgen.apply(_client(), _params(args))
+    try:
+        sqlgen.apply(_client(), _params(args), migrate=args.migrate)
+    except ValueError as e:
+        raise SystemExit(f"error: {e}") from e
     print("done; now run `check` for this database")
     return 0
 
@@ -179,12 +182,18 @@ def main(argv=None) -> int:
 
     p = sub.add_parser("apply", help="apply user_study + row policies to one database")
     _add_params(p)
+    p.add_argument(
+        "--migrate",
+        action="store_true",
+        help="replace the previous user_study layout (plain table + user_study_refresh): "
+        "drops both, keeps user_study_manual; filtered queries fail until user_study's "
+        "first refresh, so run it only on a copy that serves no traffic",
+    )
     p.set_defaults(func=cmd_apply)
 
     p = sub.add_parser(
         "user-sql",
-        help=f"SQL for a runtime user that reads only via the role "
-        f"(password from {PASSWORD_ENV})",
+        help=f"SQL for a runtime user that reads only via the role (password from {PASSWORD_ENV})",
     )
     p.add_argument("--user", required=True)
     p.add_argument("--database", required=True, help="the user's default database")

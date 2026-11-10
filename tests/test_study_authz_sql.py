@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from cbioportal_mcp.study_authz import catalog, sqlgen
-from cbioportal_mcp.study_authz.coverage import Policy, evaluate
+from cbioportal_mcp.study_authz.coverage import Policy, evaluate, user_study_shape_error
 from cbioportal_mcp.study_authz.groups import (
     grant_key_matches,
     group_entries,
@@ -27,9 +27,9 @@ PARAMS = sqlgen.Params(database="cbio_green", public_group="PUBLIC", app_name="c
 
 
 def test_generated_policy_template_is_up_to_date():
-    assert (
-        sqlgen.ROW_POLICIES_TEMPLATE.read_text() == sqlgen.row_policies_template()
-    ), "run: uv run python -m cbioportal_mcp.study_authz generate"
+    assert sqlgen.ROW_POLICIES_TEMPLATE.read_text() == sqlgen.row_policies_template(), (
+        "run: uv run python -m cbioportal_mcp.study_authz generate"
+    )
 
 
 def test_catalog_counts_and_buckets_are_disjoint():
@@ -98,19 +98,33 @@ def test_grant_comes_after_every_policy():
 def test_render_fills_every_placeholder_and_statements_split():
     files = dict(sqlgen.rendered_files(PARAMS))
     user_study = files["0-user-study.sql.tmpl"]
-    assert "`cbio_green`.user_study_refresh" in user_study
+    assert "user_study_refresh" not in sqlgen.statements(user_study)[0]
     assert "upperUTF8('PUBLIC')" in user_study and "app_name=cbioportal" in user_study
     assert "REFRESH EVERY 5 MINUTE" in user_study and "toIntervalMinute(15)" in user_study
     stmts = sqlgen.statements(user_study)
-    assert [s.split()[0] for s in stmts] == [
-        "CREATE",
-        "CREATE",
-        "ALTER",
-        "DROP",
-        "CREATE",
-        "SYSTEM",
-        "SYSTEM",
+    assert [" ".join(s.split()[:6]) for s in stmts] == [
+        "CREATE TABLE IF NOT EXISTS `cbio_green`.user_study_manual",
+        "CREATE MATERIALIZED VIEW IF NOT EXISTS",
+        "ALTER TABLE `cbio_green`.user_study MODIFY QUERY WITH",
+        "ALTER TABLE `cbio_green`.user_study MODIFY REFRESH EVERY",
+        "ALTER TABLE `cbio_green`.user_study MODIFY SQL SECURITY",
+        "ALTER TABLE `cbio_green`.user_study MODIFY COMMENT 'study-authz:",
+        "SYSTEM REFRESH VIEW `cbio_green`.user_study",
+        "SYSTEM WAIT VIEW `cbio_green`.user_study",
     ]
+    # Nothing drops user_study or recreates it: re-apply keeps the snapshot.
+    assert not any(re.match(r"(DROP|CREATE OR REPLACE)\b", s) for s in stmts)
+    create, modify = stmts[1], stmts[2]
+    assert create.startswith("CREATE MATERIALIZED VIEW IF NOT EXISTS `cbio_green`.user_study\n")
+    # Refreshable, implicit inner table (no TO), not APPEND, definer kept.
+    head = create.split("\nAS\n", 1)[0]
+    assert "REFRESH EVERY 5 MINUTE" in head and "ENGINE = MergeTree" in head
+    assert not re.search(r"\b(TO|APPEND)\b", head)
+    assert "DEFINER = CURRENT_USER SQL SECURITY DEFINER" in head
+    assert user_study_shape_error("MaterializedView", create) is None
+    # The CREATE and the re-apply ALTER run the very same query.
+    assert create.split("\nAS\n", 1)[1] == modify.split("MODIFY QUERY\n", 1)[1]
+    assert "FROM `cbio_green`.user_study_manual" in modify
     policies = sqlgen.statements(files["1-row-policies.sql.tmpl"])
     assert sum(s.startswith("CREATE ROW POLICY") for s in policies) == 2 + 1 + 45 + 17 + 21
 
@@ -360,17 +374,108 @@ def test_apply_refuses_on_conflict_without_running_anything():
         sqlgen.apply(Client(rows), PARAMS, log=lambda *_: None)
 
 
+class _ApplyClient:
+    """No foreign policies; ``tables`` answers apply's legacy-layout lookup."""
+
+    def __init__(self, tables):
+        self.tables = tables
+        self.commands = []
+
+    def query(self, sql, parameters=None):
+        if "system.row_policies" in sql:
+            rows = []
+        elif "system.tables" in sql:
+            assert set(parameters["names"]) == {"user_study", "user_study_refresh"}
+            rows = [[n, e, c] for n, (e, c) in self.tables.items() if n in parameters["names"]]
+        else:
+            raise AssertionError(sql)
+        return type("R", (), {"result_rows": rows})()
+
+    def command(self, sql):
+        self.commands.append(sql)
+
+
+_LEGACY = {
+    "user_study": ("MergeTree", "CREATE TABLE d.user_study (`email` String) ENGINE = MergeTree"),
+    "user_study_refresh": (
+        "MaterializedView",
+        "CREATE MATERIALIZED VIEW d.user_study_refresh REFRESH EVERY 5 MINUTE TO d.user_study "
+        "(`email` String) AS SELECT '' AS email",
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    "tables",
+    [
+        _LEGACY,
+        {"user_study": _LEGACY["user_study"]},  # refresh view already dropped
+        {"user_study_refresh": _LEGACY["user_study_refresh"]},  # table already dropped
+        {
+            "user_study": (
+                "MaterializedView",
+                "CREATE MATERIALIZED VIEW d.user_study REFRESH EVERY 5 MINUTE TO d.x "
+                "(`email` String) AS SELECT 1",
+            )
+        },
+    ],
+)
+def test_apply_refuses_previous_layout_without_migrate(tables):
+    client = _ApplyClient(tables)
+    with pytest.raises(ValueError) as exc:
+        sqlgen.apply(client, PARAMS, log=lambda *_: None)
+    message = str(exc.value)
+    assert "\n" not in message and "previous user_study layout" in message
+    assert "--migrate" in message and "inactive" in message
+    assert client.commands == []
+
+
+def test_apply_migrate_drops_previous_layout_then_creates_the_view():
+    client = _ApplyClient(dict(_LEGACY))
+    sqlgen.apply(client, PARAMS, log=lambda *_: None, migrate=True)
+    assert client.commands[:3] == [
+        "DROP VIEW IF EXISTS `cbio_green`.user_study_refresh SYNC",
+        "DROP TABLE IF EXISTS `cbio_green`.user_study SYNC",
+        sqlgen.statements(dict(sqlgen.rendered_files(PARAMS))["0-user-study.sql.tmpl"])[0],
+    ]
+    assert client.commands[3].startswith("CREATE MATERIALIZED VIEW IF NOT EXISTS")
+    assert "SYSTEM WAIT VIEW `cbio_green`.user_study" in client.commands
+    dropped = [c for c in client.commands if c.startswith("DROP")]
+    assert len(dropped) == 2 and not any("user_study_manual" in c for c in dropped)
+
+
+@pytest.mark.parametrize("migrate", [False, True])
+def test_apply_on_the_current_layout_drops_nothing(migrate):
+    tables = {"user_study": ("MaterializedView", _USER_STUDY_CREATE)}
+    for current in [tables, {}]:  # existing view, or a fresh database
+        client = _ApplyClient(current)
+        sqlgen.apply(client, PARAMS, log=lambda *_: None, migrate=migrate)
+        assert not any(c.startswith("DROP") for c in client.commands)
+
+
+def test_apply_cli_refusal_is_one_line(monkeypatch, capsys):
+    from cbioportal_mcp.study_authz import __main__ as cli
+
+    client = _ApplyClient(dict(_LEGACY))
+    monkeypatch.setattr(cli, "_client", lambda: client)
+    args = ["apply", "--database", "cbio_green", "--public-group", "P", "--app-name", "a"]
+    with pytest.raises(SystemExit, match="^error: refusing .*--migrate"):
+        cli.main(args)
+    assert client.commands == []
+    assert cli.main(args + ["--migrate"]) == 0
+    assert client.commands[0].startswith("DROP VIEW IF EXISTS `cbio_green`.user_study_refresh")
+
+
 def test_coverage_reports_conflicts():
     objects, policies = _good_objects_and_policies()
-    report = evaluate(
-        objects, policies, "d", conflicts=["x ON d.gene (not created by study_authz)"]
-    )
+    report = _evaluate(objects, policies, conflicts=["x ON d.gene (not created by study_authz)"])
     assert not report.ok and any("x ON d.gene" in e for e in report.errors)
 
 
 def _good_objects_and_policies(db="d"):
-    objects = {t: ("MergeTree", "") for t in ["cancer_study", "gene", "user_study", "users"]}
-    objects["user_study_refresh"] = ("MaterializedView", "")
+    objects = {t: ("MergeTree", "") for t in ["cancer_study", "gene", "users"]}
+    objects["user_study"] = ("MaterializedView", _USER_STUDY_CREATE)
+    objects[f".inner_id.{_UUID}"] = ("MergeTree", "")
     objects["top_mutated_genes_in_study"] = ("View", "CREATE VIEW d.v SQL SECURITY INVOKER AS")
     policies = [
         Policy("deny", "", "0"),
@@ -382,10 +487,111 @@ def _good_objects_and_policies(db="d"):
     return objects, policies
 
 
+_UUID = "6f1c1a52-0000-4000-8000-0000000000aa"
+# As system.tables stores the rendered CREATE (25.8 / 26.6).
+_USER_STUDY_CREATE = (
+    "CREATE MATERIALIZED VIEW d.user_study REFRESH EVERY 5 MINUTE (`email` String COMMENT "
+    "'x', `source` LowCardinality(String)) ENGINE = MergeTree ORDER BY (email, "
+    "cancer_study_identifier) SETTINGS index_granularity = 8192 DEFINER = admin SQL SECURITY "
+    "DEFINER COMMENT 'study-authz: TO APPEND' AS WITH now64(3) AS t SELECT '' AS email "
+    "FROM d.cancer_study"
+)
+_TO_FORM = (
+    "CREATE MATERIALIZED VIEW d.user_study REFRESH EVERY 5 MINUTE TO d.user_study_data "
+    "(`email` String) DEFINER = admin SQL SECURITY DEFINER AS SELECT '' AS email"
+)
+_APPEND_FORM = (
+    "CREATE MATERIALIZED VIEW d.user_study REFRESH EVERY 5 MINUTE APPEND (`email` String) "
+    "ENGINE = MergeTree ORDER BY email DEFINER = admin SQL SECURITY DEFINER AS SELECT '' AS email"
+)
+_APPEND_TO_FORM = (
+    "CREATE MATERIALIZED VIEW d.user_study REFRESH EVERY 5 MINUTE APPEND TO d.t "
+    "(`email` String) AS SELECT '' AS email"
+)
+_NOT_REFRESHABLE = (
+    "CREATE MATERIALIZED VIEW d.user_study (`email` String) ENGINE = MergeTree ORDER BY email "
+    "AS SELECT '' AS email FROM d.cancer_study"
+)
+
+
+def _evaluate(objects, policies, **kw):
+    return evaluate(objects, policies, "d", user_study_uuid=_UUID, **kw)
+
+
 def test_coverage_accepts_the_generated_shape():
     objects, policies = _good_objects_and_policies()
-    report = evaluate(objects, policies, "d")
+    report = _evaluate(objects, policies)
     assert report.ok, report
+    # The refresh's staging copy appears while a refresh runs.
+    objects[f".tmp.inner_id.{_UUID}"] = ("MergeTree", "")
+    assert _evaluate(objects, policies).ok
+
+
+def test_coverage_accepts_the_rendered_template_shape():
+    stmt = sqlgen.statements(dict(sqlgen.rendered_files(PARAMS))["0-user-study.sql.tmpl"])[1]
+    objects, policies = _good_objects_and_policies()
+    objects["user_study"] = ("MaterializedView", stmt)
+    assert _evaluate(objects, policies).ok
+
+
+@pytest.mark.parametrize(
+    ("engine", "create", "needle"),
+    [
+        ("MaterializedView", _TO_FORM, "writes TO another table"),
+        ("MaterializedView", _APPEND_FORM, "APPEND"),
+        ("MaterializedView", _APPEND_TO_FORM, "APPEND"),
+        ("MaterializedView", _NOT_REFRESHABLE, "not refreshable"),
+        ("MaterializedView", "CREATE MATERIALIZED VIEW d.user_study 'unterminated", "unreadable"),
+        ("MergeTree", "", "previous layout"),  # the old plain table
+        ("View", "CREATE VIEW d.user_study SQL SECURITY INVOKER AS SELECT 1", "not a refreshable"),
+    ],
+)
+def test_coverage_rejects_any_other_user_study_shape(engine, create, needle):
+    assert needle in (user_study_shape_error(engine, create) or "")
+    objects, policies = _good_objects_and_policies()
+    objects["user_study"] = (engine, create)
+    report = _evaluate(objects, policies)
+    assert any(e.startswith("user_study:") and needle in e for e in report.errors), report.errors
+
+
+@pytest.mark.parametrize(
+    "create",
+    [_USER_STUDY_CREATE.replace("user_study", "other_mv"), _TO_FORM, _APPEND_FORM],
+)
+def test_materialized_views_other_than_user_study_still_bypass(create):
+    objects, policies = _good_objects_and_policies()
+    objects["other_mv"] = ("MaterializedView", create)
+    objects["user_study_refresh"] = ("MaterializedView", _TO_FORM)  # previous layout's writer
+    report = _evaluate(objects, policies)
+    for name in ["other_mv", "user_study_refresh"]:
+        assert f"{name}: MaterializedView bypasses row policies; remove it" in report.errors
+
+
+@pytest.mark.parametrize("prefix", [".inner_id.", ".tmp.inner_id."])
+def test_user_study_inner_tables_are_denied(prefix):
+    objects, policies = _good_objects_and_policies()
+    inner = f"{prefix}{_UUID}"
+    objects[inner] = ("MergeTree", "")
+    assert _evaluate(objects, policies).ok
+    # A policy would expose every caller's grants, skipping the identity policy.
+    report = _evaluate(objects, policies + [Policy("leak", inner, "1")])
+    assert any(
+        e.startswith(f"{inner}: user_study's inner table has policies") for e in report.errors
+    )
+    objects[inner] = ("Dictionary", "")
+    assert any("not MergeTree" in e for e in _evaluate(objects, policies).errors)
+    # Another view's inner table (other uuid) is not classified.
+    other = f"{prefix}00000000-1111-4000-8000-000000000000"
+    objects = dict(_good_objects_and_policies()[0], **{other: ("MergeTree", "")})
+    assert _evaluate(objects, policies).unclassified == [other]
+    # Without the uuid nothing is classified as inner (fail closed).
+    assert evaluate(objects | {inner: ("MergeTree", "")}, policies, "d").unclassified
+
+
+def test_refresh_error_is_reported_on_user_study():
+    objects, policies = _good_objects_and_policies()
+    report = _evaluate(objects, policies, refresh_error="last refresh failed: boom")
+    assert report.errors == ["user_study: last refresh failed: boom"]
 
 
 @pytest.mark.parametrize(
@@ -405,20 +611,20 @@ def test_coverage_accepts_the_generated_shape():
         ),
         (lambda o, p: o.__setitem__("dict", ("Dictionary", "")), "bypasses"),
         (lambda o, p: p.append(Policy("f", "gene", "x IN (SELECT 1 FROM other.t)")), "other"),
-        (lambda o, p: o.pop("user_study_refresh"), "nothing refreshes"),
+        (lambda o, p: o.pop("user_study"), "user_study is missing"),
     ],
 )
 def test_coverage_flags_problems(mutate, needle):
     objects, policies = _good_objects_and_policies()
     mutate(objects, policies)
-    report = evaluate(objects, policies, "d")
+    report = _evaluate(objects, policies)
     assert any(needle in e for e in report.errors), report.errors
 
 
 def test_coverage_fails_on_unclassified():
     objects, policies = _good_objects_and_policies()
     objects["new_table"] = ("MergeTree", "")
-    report = evaluate(objects, policies, "d")
+    report = _evaluate(objects, policies)
     assert report.unclassified == ["new_table"] and not report.ok
 
 
@@ -669,7 +875,7 @@ def test_admin_coverage_rejects_view_security_alias_spoof():
     objects, policies = _good_objects_and_policies()
     objects["top_mutated_genes_in_study"] = (
         "View",
-        "CREATE VIEW d.v (`a SQL SECURITY INVOKER b` UInt64) " "SQL SECURITY DEFINER AS SELECT 1",
+        "CREATE VIEW d.v (`a SQL SECURITY INVOKER b` UInt64) SQL SECURITY DEFINER AS SELECT 1",
     )
     report = evaluate(objects, policies, "d")
     assert any("view is SQL SECURITY DEFINER" in error for error in report.errors)

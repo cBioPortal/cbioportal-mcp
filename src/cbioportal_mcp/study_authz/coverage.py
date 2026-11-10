@@ -6,12 +6,14 @@ For the policy target (the restricted role, or a user), against ``catalog.py``:
   database-wide policy opens every table;
 - every study-scoped table has its own policy that reads ``user_study`` with
   the caller-email predicate (never ``USING 1``);
-- ``user_study`` has exactly the identity predicate;
+- ``user_study`` has exactly the identity predicate, and is a refreshable
+  materialized view without ``TO`` or ``APPEND`` (``user_study_shape_error``);
+  it is the ONLY materialized view accepted, and its last refresh succeeded;
 - every reference table and view has a policy, and every view uses
   ``SQL SECURITY INVOKER`` (explicitly or implicitly) (DEFINER / NONE views leak every study);
-- denied tables have no policy; the only materialized view is
-  ``user_study_refresh``, and its last refresh succeeded; no dictionaries
-  (dictGet bypasses row policies);
+- denied tables, including ``user_study``'s implicit inner table and its
+  refresh staging copy, have no policy; no other materialized view and no
+  dictionaries (dictGet bypasses row policies);
 - policy subqueries reference only the target database;
 - no row policy on the database was created by anyone else, or attaches our
   policies to another target (``sqlgen.policy_conflicts``): the catch-all
@@ -36,8 +38,8 @@ from cbioportal_mcp.study_authz.catalog import (
     STUDY_AGNOSTIC_REFERENCE_TABLES,
     STUDY_SCOPED_TABLE_PATHS,
     STUDY_SCOPED_VIEWS,
-    USER_STUDY_REFRESH_VIEW,
     USER_STUDY_TABLE,
+    user_study_inner_tables,
 )
 from cbioportal_mcp.study_authz.sqlgen import (
     USER_STUDY_MATCH,
@@ -144,6 +146,34 @@ def view_sql_security(create_query: str) -> str | None:
     return None
 
 
+def user_study_shape_error(engine: str, create_query: str) -> str | None:
+    """Why ``user_study`` is not the expected refreshable view, or None if it is.
+
+    Expected: ``CREATE MATERIALIZED VIEW ... REFRESH EVERY|AFTER ...`` with an
+    implicit inner table. Refused: a plain table (the previous layout, written
+    by a separate ``... TO user_study`` refresh whose swap renames the table a
+    running query holds), a ``TO`` view (same swap), ``APPEND`` (rows are never
+    replaced, so revoked grants would stay), or a non-refreshable view.
+    """
+    if engine != "MaterializedView":
+        return (
+            f"{engine} table, not a refreshable materialized view (previous layout; "
+            "migrate with `apply --migrate`, docs/study-authz.md)"
+        )
+    sql = _unquoted_sql(create_query)
+    if sql is None or not re.match(r"\s*CREATE\s+MATERIALIZED\s+VIEW\b", sql, re.I):
+        return "materialized view definition is unreadable"
+    # Everything before the column list / AS: names are masked by _unquoted_sql.
+    head = re.split(r"\(|\bAS\b", sql, maxsplit=1, flags=re.I)[0]
+    if not re.search(r"\bREFRESH\s+(?:EVERY|AFTER)\b", head, re.I):
+        return "materialized view is not refreshable"
+    if re.search(r"\bAPPEND\b", head, re.I):
+        return "refreshable view uses APPEND (stale grants would never be removed)"
+    if re.search(r"\bTO\b", head, re.I):
+        return "refreshable view writes TO another table (its refresh swap races policy lookup)"
+    return None
+
+
 def _foreign_databases(select_filter: str, database: str) -> set[str]:
     refs = set(re.findall(r"\b(?:FROM|JOIN)\s+`?([A-Za-z0-9_]+)`?\s*\.", select_filter, re.I))
     return {ref for ref in refs if ref != database}
@@ -155,10 +185,12 @@ def evaluate(
     database: str,
     refresh_error: str | None = None,
     conflicts: list[str] = (),
+    user_study_uuid: str = "",
 ) -> Report:
     """Pure check over fetched metadata: ``objects`` is name -> (engine, create query).
 
     ``conflicts`` is ``sqlgen.policy_conflicts`` for the database and target.
+    ``user_study_uuid`` (``fetch_user_study_uuid``) names its inner tables.
     """
     report = Report()
     for conflict in conflicts:
@@ -180,15 +212,31 @@ def evaluate(
         if foreign:
             report.errors.append(f"{policy.table}: {policy.name} reads {sorted(foreign)}")
 
+    inner_tables = user_study_inner_tables(user_study_uuid)
     for name in sorted(objects):
         engine, create_query = objects[name]
         own = by_table.get(name, [])
         filters = [_squash(p.select_filter) for p in own]
 
+        if name in inner_tables:
+            if own:
+                report.errors.append(
+                    f"{name}: user_study's inner table has policies {[p.name for p in own]}"
+                )
+            if engine != "MergeTree":
+                report.errors.append(f"{name}: user_study's inner table is {engine}, not MergeTree")
+            continue
         if name in DENIED_TABLES:
             if own:
                 report.errors.append(f"{name}: denied object has policies {[p.name for p in own]}")
-            if name == USER_STUDY_REFRESH_VIEW and refresh_error:
+            continue
+        if name in IDENTITY_SCOPED_TABLES:
+            shape = user_study_shape_error(engine, create_query)
+            if shape:
+                report.errors.append(f"{name}: {shape}")
+            if not filters or any(f != _MATCH for f in filters):
+                report.errors.append(f"{name}: policy must be exactly {USER_STUDY_MATCH}")
+            if refresh_error:
                 report.errors.append(f"{name}: {refresh_error}")
             continue
         if engine in BYPASS_ENGINES:
@@ -202,10 +250,6 @@ def evaluate(
                 report.unclassified.append(name)
             elif not own:
                 report.errors.append(f"{name}: view has no pass-through policy (fully denied)")
-            continue
-        if name in IDENTITY_SCOPED_TABLES:
-            if not filters or any(f != _MATCH for f in filters):
-                report.errors.append(f"{name}: policy must be exactly {USER_STUDY_MATCH}")
             continue
         if name in STUDY_SCOPED_TABLE_PATHS:
             if not own:
@@ -223,8 +267,6 @@ def evaluate(
 
     if USER_STUDY_TABLE not in objects:
         report.errors.append(f"{USER_STUDY_TABLE} is missing (apply 0-user-study first)")
-    if USER_STUDY_REFRESH_VIEW not in objects:
-        report.errors.append(f"{USER_STUDY_REFRESH_VIEW} is missing: nothing refreshes grants")
     return report
 
 
@@ -284,11 +326,21 @@ def fetch_policy_rows(client, database: str) -> list[PolicyRow]:
     ]
 
 
+def fetch_user_study_uuid(client, database: str) -> str:
+    """``user_study``'s uuid ('' if absent), which names its inner tables."""
+    rows = client.query(
+        "SELECT toString(uuid) FROM system.tables "
+        "WHERE database = {db:String} AND name = {t:String}",
+        parameters={"db": database, "t": USER_STUDY_TABLE},
+    ).result_rows
+    return str(rows[0][0]) if rows else ""
+
+
 def fetch_refresh_error(client, database: str) -> str | None:
     refresh = client.query(
         "SELECT exception, last_success_time FROM system.view_refreshes "
         "WHERE database = {db:String} AND view = {v:String}",
-        parameters={"db": database, "v": USER_STUDY_REFRESH_VIEW},
+        parameters={"db": database, "v": USER_STUDY_TABLE},
     ).result_rows
     if not refresh:
         return "not scheduled (no row in system.view_refreshes)"
@@ -308,8 +360,13 @@ def fetch_and_evaluate(client, database: str, target: str) -> Report:
         raise SystemExit(f"no tables visible in {database}: wrong database or admin lacks SHOW")
     policies = [r.policy for r in fetch_policy_rows(client, database) if r.applies_to({target})]
     refresh_error = None
-    if USER_STUDY_REFRESH_VIEW in objects:
+    if objects.get(USER_STUDY_TABLE, ("",))[0] == "MaterializedView":
         refresh_error = fetch_refresh_error(client, database)
     return evaluate(
-        objects, policies, database, refresh_error, policy_conflicts(client, database, target)
+        objects,
+        policies,
+        database,
+        refresh_error,
+        policy_conflicts(client, database, target),
+        user_study_uuid=fetch_user_study_uuid(client, database),
     )

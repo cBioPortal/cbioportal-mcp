@@ -1,5 +1,5 @@
 -- ============================================================================
--- study-authz 0: user_study, its manual source, and the refresh that builds it
+-- study-authz 0: user_study (a refreshable materialized view) and its manual source
 -- ============================================================================
 -- TEMPLATE. Render and apply with
 --   uv run python -m cbioportal_mcp.study_authz apply --database <db> \
@@ -11,46 +11,52 @@
 --                             future JWT source's claim matching)
 --   __REFRESH_MINUTES__       refresh interval
 --   __PRIVATE_GRACE_MINUTES__ how long a private row outlives its last refresh
+-- The two query slots below (USER_STUDY_QUERY, double underscores) take
+-- user-study-query.sql.tmpl, inlined by sqlgen.user_study_template() before
+-- the placeholders above are filled.
 --
 -- Never part of sql/ or the daily public clone: filtering stays OFF there.
 -- Requires ClickHouse >= 24.10 (refreshable materialized views without the
 -- experimental flag; the row policies use getSettingOrDefault).
 --
--- Layout: user_study is the ONLY table the row policies read, and the refresh
--- below is its only writer. Every source lands in its own input table and is
--- folded in by the refresh, which builds a staging table and EXCHANGEs it with
--- user_study (that is what a non-APPEND refreshable materialized view does), so
--- readers always see one complete snapshot.
+-- Layout: user_study is the ONLY object the row policies read. It is itself a
+-- refreshable materialized view WITHOUT `TO`: its rows live in an implicit
+-- inner table (.inner_id.<uuid of user_study>) and its refresh is the only
+-- writer. Every source lands in its own input table and is folded in by the
+-- refresh, which builds .tmp.inner_id.<uuid> and swaps it with the inner table,
+-- so readers always see one complete snapshot.
 --   * public  - rows with email = '' for every study whose cancer_study.groups
 --               contains __PUBLIC_GROUP__. valid_until is the far future, so a
 --               failing refresh never removes public access.
 --   * manual  - user_study_manual, maintained by an admin.
 --   * (future) jwt - user_study_jwt, appended by an INSERT-only writer; the
 --               refresh keeps only each email's newest token (by issued_at).
---               Adding it is one more UNION ALL branch in `grants` below; no
---               policy or user_study schema change (docs/study-authz.md).
+--               Adding it is one more UNION ALL branch in `grants` in
+--               user-study-query.sql.tmpl; no policy or user_study schema
+--               change (docs/study-authz.md).
+--
+-- Why not `CREATE TABLE user_study` + `... REFRESH ... TO user_study` (the
+-- previous layout): there the refresh swaps the table named user_study itself.
+-- A running query resolves user_study early and looks its row policy up by
+-- name later; when the swap lands in between, the query holds a table now
+-- named .tmp.inner_id.<uuid>, which only the database-wide USING 0 covers, so
+-- every policy subquery `IN (SELECT ... FROM user_study)` silently returned 0
+-- rows (measured on 25.8 and 26.6). Here the swap happens behind the view:
+-- the policy is looked up on user_study, which never changes name.
 --
 -- Fail closed: private rows get valid_until = least(source valid_until,
 -- refresh time + __PRIVATE_GRACE_MINUTES__ minutes). If the refresh stops or
 -- keeps failing, user_study keeps its last snapshot, every private row expires
 -- within the grace period, and the public rows remain.
 --
--- Idempotent: CREATE TABLE IF NOT EXISTS keeps the tables (and the manual
--- grants); the refresh view is dropped and recreated so changed parameters take
--- effect (dropping a TO view leaves user_study's rows in place), then the file
--- waits for one refresh.
+-- Idempotent: CREATE ... IF NOT EXISTS keeps user_study_manual (the manual
+-- grants) and user_study with its current snapshot. Re-apply never drops
+-- user_study: the ALTERs below change its query, interval, definer and comment
+-- in place, so readers keep the old snapshot until the next refresh, and the
+-- file then waits for one refresh. A database with the previous layout (a
+-- plain user_study table and/or user_study_refresh) is refused by apply unless
+-- --migrate is given (docs/study-authz.md, "Migrating from user_study_refresh").
 -- ============================================================================
-
-CREATE TABLE IF NOT EXISTS __CLICKHOUSE_DATABASE__.user_study
-(
-    `email` String COMMENT 'Lower-cased caller email; empty string = every caller (public studies).',
-    `cancer_study_identifier` String COMMENT 'Study the email may read.',
-    `valid_until` DateTime64(3, 'UTC') COMMENT 'The row grants nothing from this instant on.',
-    `source` LowCardinality(String) COMMENT 'public | manual | jwt (future).',
-    `issued_at` DateTime64(3, 'UTC') COMMENT 'Refresh time (public/manual) or token issued-at (jwt) that produced the row.'
-)
-ENGINE = MergeTree
-ORDER BY (email, cancer_study_identifier);
 
 CREATE TABLE IF NOT EXISTS __CLICKHOUSE_DATABASE__.user_study_manual
 (
@@ -62,70 +68,35 @@ CREATE TABLE IF NOT EXISTS __CLICKHOUSE_DATABASE__.user_study_manual
 ENGINE = MergeTree
 ORDER BY (email, grant_key);
 
-ALTER TABLE __CLICKHOUSE_DATABASE__.user_study
-    MODIFY COMMENT 'study-authz: read by the row policies, written only by user_study_refresh. public_group=__PUBLIC_GROUP__ app_name=__APP_NAME__ refresh_minutes=__REFRESH_MINUTES__ private_grace_minutes=__PRIVATE_GRACE_MINUTES__';
-
-DROP VIEW IF EXISTS __CLICKHOUSE_DATABASE__.user_study_refresh SYNC;
-
-CREATE MATERIALIZED VIEW __CLICKHOUSE_DATABASE__.user_study_refresh
+CREATE MATERIALIZED VIEW IF NOT EXISTS __CLICKHOUSE_DATABASE__.user_study
 REFRESH EVERY __REFRESH_MINUTES__ MINUTE
-TO __CLICKHOUSE_DATABASE__.user_study
+(
+    `email` String COMMENT 'Lower-cased caller email; empty string = every caller (public studies).',
+    `cancer_study_identifier` String COMMENT 'Study the email may read.',
+    `valid_until` DateTime64(3, 'UTC') COMMENT 'The row grants nothing from this instant on.',
+    `source` LowCardinality(String) COMMENT 'public | manual | jwt (future).',
+    `issued_at` DateTime64(3, 'UTC') COMMENT 'Refresh time (public/manual) or token issued-at (jwt) that produced the row.'
+)
+ENGINE = MergeTree
+ORDER BY (email, cancer_study_identifier)
 DEFINER = CURRENT_USER SQL SECURITY DEFINER
 AS
-WITH
-    now64(3, 'UTC') AS refreshed_at,
-    refreshed_at + toIntervalMinute(__PRIVATE_GRACE_MINUTES__) AS private_until,
-    upperUTF8('__PUBLIC_GROUP__') AS public_group,
-    studies AS (
-        -- groups rule: split on ';', drop empty entries, whole-entry
-        -- case-insensitive comparison, no trimming.
-        SELECT
-            assumeNotNull(cancer_study_identifier) AS cancer_study_identifier,
-            upperUTF8(assumeNotNull(cancer_study_identifier)) AS study_key,
-            arrayMap(g -> upperUTF8(g), arrayFilter(g -> g != '', splitByChar(';', ifNull(`groups`, '')))) AS group_keys
-        FROM __CLICKHOUSE_DATABASE__.cancer_study
-        WHERE cancer_study_identifier IS NOT NULL AND cancer_study_identifier != ''
-    ),
-    study_keys AS (
-        -- Every grant key that unlocks a study (cBioPortal's rules).
-        SELECT
-            cancer_study_identifier,
-            arrayJoin(arrayDistinct(arrayConcat(
-                [study_key, 'ALL'],
-                group_keys,
-                if(endsWith(study_key, '_TCGA'), ['ALL_TCGA'], []),
-                if(endsWith(study_key, '_TARGET') OR study_key IN ('ALL_TARGET_PHASE1', 'ALL_TARGET_PHASE2'),
-                   ['ALL_NCI_TARGET'], [])
-            ))) AS match_key
-        FROM studies
-    ),
-    grants AS (
-        SELECT
-            lowerUTF8(email) AS email,
-            upperUTF8(grant_key) AS match_key,
-            least(valid_until, private_until) AS valid_until,
-            'manual' AS source,
-            refreshed_at AS issued_at
-        FROM __CLICKHOUSE_DATABASE__.user_study_manual
-        WHERE lowerUTF8(email) != '' AND grant_key != '' AND valid_until > refreshed_at
-    )
-SELECT
-    '' AS email,
-    cancer_study_identifier,
-    toDateTime64('2299-12-31 23:59:59.999', 3, 'UTC') AS valid_until,
-    'public' AS source,
-    refreshed_at AS issued_at
-FROM studies
-WHERE has(group_keys, public_group)
-UNION ALL
-SELECT
-    g.email AS email,
-    s.cancer_study_identifier AS cancer_study_identifier,
-    g.valid_until AS valid_until,
-    g.source AS source,
-    g.issued_at AS issued_at
-FROM grants AS g
-INNER JOIN study_keys AS s ON g.match_key = s.match_key;
+__USER_STUDY_QUERY__;
 
-SYSTEM REFRESH VIEW __CLICKHOUSE_DATABASE__.user_study_refresh;
-SYSTEM WAIT VIEW __CLICKHOUSE_DATABASE__.user_study_refresh;
+-- Re-apply: bring an existing user_study up to date without dropping it (a
+-- no-op right after the CREATE above).
+ALTER TABLE __CLICKHOUSE_DATABASE__.user_study
+    MODIFY QUERY
+__USER_STUDY_QUERY__;
+
+ALTER TABLE __CLICKHOUSE_DATABASE__.user_study
+    MODIFY REFRESH EVERY __REFRESH_MINUTES__ MINUTE;
+
+ALTER TABLE __CLICKHOUSE_DATABASE__.user_study
+    MODIFY SQL SECURITY DEFINER DEFINER = CURRENT_USER;
+
+ALTER TABLE __CLICKHOUSE_DATABASE__.user_study
+    MODIFY COMMENT 'study-authz: read by the row policies; a refreshable materialized view, its own only writer. public_group=__PUBLIC_GROUP__ app_name=__APP_NAME__ refresh_minutes=__REFRESH_MINUTES__ private_grace_minutes=__PRIVATE_GRACE_MINUTES__';
+
+SYSTEM REFRESH VIEW __CLICKHOUSE_DATABASE__.user_study;
+SYSTEM WAIT VIEW __CLICKHOUSE_DATABASE__.user_study;

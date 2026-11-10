@@ -21,7 +21,7 @@ from cbioportal_mcp.study_authz.catalog import (
     STUDY_SCOPED_TABLE_PATHS,
     STUDY_SCOPED_VIEWS,
     USER_STUDY_MANUAL_TABLE,
-    USER_STUDY_REFRESH_VIEW,
+    USER_STUDY_TABLE,
 )
 from cbioportal_mcp.study_authz.groups import NAME_RE, validate_name
 from cbioportal_mcp.study_authz.sqlgen import (
@@ -179,7 +179,7 @@ def make_test_db(
             database=target,
             column_names=["email", "grant_key", "valid_until", "note"],
         )
-    client.command(f"SYSTEM REFRESH VIEW {tgt}.{USER_STUDY_REFRESH_VIEW}")
-    client.command(f"SYSTEM WAIT VIEW {tgt}.{USER_STUDY_REFRESH_VIEW}")
+    client.command(f"SYSTEM REFRESH VIEW {tgt}.{USER_STUDY_TABLE}")
+    client.command(f"SYSTEM WAIT VIEW {tgt}.{USER_STUDY_TABLE}")
     log(f"seeded {len(grants)} manual grants; user_study refreshed")
     return counts

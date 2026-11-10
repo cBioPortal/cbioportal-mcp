@@ -1,4 +1,4 @@
-"""study-authz against a real ClickHouse 25.8 started in Docker.
+"""study-authz against a real ClickHouse (25.8 by default) started in Docker.
 
 Skipped when Docker is unavailable (like the repo's other live tests, which
 skip without a server). The module starts its own throwaway container, so it
@@ -7,7 +7,8 @@ never touches a shared server:
     uv run pytest tests/test_study_authz_live.py
 
 CBIOPORTAL_MCP_STUDY_AUTHZ_IMAGE overrides the image (default
-clickhouse/clickhouse-server:25.8). All emails are example.org fakes.
+clickhouse/clickhouse-server:25.8; also run against 26.6). All emails are
+example.org fakes.
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -67,6 +69,9 @@ EXPECTED = {
     None: PUBLIC,  # setting not sent at all
 }
 IDENT = {sid: ident for sid, (ident, _) in STUDIES.items()}
+# The refreshable view that rebuilds user_study: user_study itself. (The
+# previous layout refreshed user_study_refresh, which wrote TO user_study.)
+REFRESHER = "user_study"
 
 
 def _docker_ok() -> bool:
@@ -157,12 +162,26 @@ def server():
             [[e, k, v] for e, k, v in MANUAL],
             column_names=["email", "grant_key", "valid_until"],
         )
-        srv.admin.command(f"SYSTEM REFRESH VIEW {DB}.user_study_refresh")
-        srv.admin.command(f"SYSTEM WAIT VIEW {DB}.user_study_refresh")
+        _refresh(srv.admin)
         _create_users(srv.admin)
         yield srv
     finally:
         subprocess.run(["docker", "rm", "-f", name], capture_output=True)
+
+
+def _refresh(admin, db: str = DB) -> None:
+    admin.command(f"SYSTEM REFRESH VIEW {db}.{REFRESHER}")
+    admin.command(f"SYSTEM WAIT VIEW {db}.{REFRESHER}")
+
+
+def _inner_tables(admin, db: str = DB) -> tuple[str, str]:
+    """user_study's implicit inner table and its refresh staging copy."""
+    uuid_ = admin.query(
+        "SELECT toString(uuid) FROM system.tables WHERE database = {db:String} "
+        "AND name = 'user_study'",
+        parameters={"db": db},
+    ).result_rows[0][0]
+    return f".inner_id.{uuid_}", f".tmp.inner_id.{uuid_}"
 
 
 def _load_fixture(admin, db: str = DB) -> None:
@@ -298,14 +317,91 @@ def test_reference_tables_readable(server):
     assert server.studies_seen(f"SELECT hugo_gene_symbol FROM {DB}.gene") == {"TP53"}
 
 
-@pytest.mark.parametrize(
-    "table", ["users", "authorities", "user_study_manual", "user_study_refresh"]
-)
+@pytest.mark.parametrize("table", ["users", "authorities", "user_study_manual", "inner"])
 def test_restricted_role_cannot_read_denied_objects(server, table):
+    if table == "inner":
+        # Reading user_study's inner table directly would skip its identity policy.
+        table = f"`{_inner_tables(server.admin)[0]}`"
+        assert server.admin.query(f"SELECT count() FROM {DB}.{table}").result_rows[0][0] > 0
     out = server.http(
         f"SELECT count() FROM {DB}.{table}", "mcp_restricted", SQL_cbio_user="alice@example.org"
     )
     assert out == "0"
+
+
+def test_user_study_is_a_refreshable_view_without_to(server):
+    engine, create = server.admin.query(
+        f"SELECT engine, create_table_query FROM system.tables WHERE database = '{DB}' "
+        "AND name = 'user_study'"
+    ).result_rows[0]
+    assert engine == "MaterializedView" and " TO " not in create.split(" AS ")[0]
+    assert not server.admin.query(
+        f"SELECT 1 FROM system.tables WHERE database = '{DB}' AND name = 'user_study_refresh'"
+    ).result_rows
+    status = server.admin.query(
+        f"SELECT exception, last_success_time FROM system.view_refreshes "
+        f"WHERE database = '{DB}' AND view = 'user_study'"
+    ).result_rows
+    assert status and not status[0][0] and status[0][1] is not None
+
+
+# Reads issued while user_study refreshes in a tight loop. Before this layout
+# (refresh TO a plain user_study table) ~8% of them silently returned 0 rows.
+RACE_READS = 400
+
+
+def test_refresh_swap_never_empties_policy_filtered_reads(server):
+    """Regression: a policy-filtered read during a refresh must never see 0 rows.
+
+    The refresh swaps a freshly built table in. In the previous layout it
+    swapped the table named user_study, so a query that had resolved
+    user_study, but not yet looked up its row policy, held a table renamed to
+    .tmp.inner_id.<uuid>: only the database-wide USING 0 matched it, and every
+    `IN (SELECT ... FROM user_study)` policy subquery returned nothing.
+    """
+    import clickhouse_connect
+
+    stop = threading.Event()
+    refreshes, failures = [0], []
+
+    def refresh_loop():
+        client = clickhouse_connect.get_client(
+            host="127.0.0.1", port=server.port, username="admin", password="admin"
+        )
+        try:
+            while not stop.is_set():
+                _refresh(client)
+                refreshes[0] += 1
+        except Exception as e:  # noqa: BLE001 - reported below
+            failures.append(e)
+        finally:
+            client.close()
+
+    callers = {"nobody@example.org": PUBLIC, "alice@example.org": EXPECTED["alice@example.org"]}
+    queries = [
+        f"SELECT count() FROM {DB}.cancer_study",  # one policy subquery
+        f"SELECT count() FROM {DB}.sample",  # nested: sample -> patient -> user_study
+    ]
+    worker = threading.Thread(target=refresh_loop, daemon=True)
+    worker.start()
+    results = []
+    try:
+        while refreshes[0] < 3:  # the loop is really running
+            time.sleep(0.01)
+        for i in range(RACE_READS):
+            email = list(callers)[i % 2]
+            sql = queries[(i // 2) % 2]
+            out = server.http(sql, "mcp_restricted", SQL_cbio_user=email, readonly=1)
+            results.append((email, sql, out))
+    finally:
+        stop.set()
+        worker.join(timeout=60)
+    assert not failures, failures
+    empty = [r for r in results if r[2] == "0"]
+    wrong = [r for r in results if r[2] != str(len(callers[r[0]]))]
+    assert len(results) >= 300 and refreshes[0] >= 10, (len(results), refreshes[0])
+    assert not empty, f"{len(empty)}/{len(results)} filtered reads were empty"
+    assert not wrong, wrong[:5]
 
 
 def test_user_study_shows_only_own_and_public_rows(server):
@@ -375,7 +471,7 @@ def test_role_is_the_only_path_and_direct_grant_bypasses(server):
 
 def test_expired_rows_grant_nothing_and_stalled_refresh_fails_closed(server):
     admin = server.admin
-    admin.command(f"SYSTEM STOP VIEW {DB}.user_study_refresh")  # simulate a failing refresh
+    admin.command(f"SYSTEM STOP VIEW {DB}.{REFRESHER}")  # simulate a failing refresh
     try:
         now = datetime.now(timezone.utc)
         admin.insert(
@@ -392,9 +488,8 @@ def test_expired_rows_grant_nothing_and_stalled_refresh_fails_closed(server):
         # Private rows lapse with no refresh running; public rows remain.
         assert server.studies_seen(q, SQL_cbio_user="erin@example.org") == PUBLIC
     finally:
-        admin.command(f"SYSTEM START VIEW {DB}.user_study_refresh")
-        admin.command(f"SYSTEM REFRESH VIEW {DB}.user_study_refresh")
-        admin.command(f"SYSTEM WAIT VIEW {DB}.user_study_refresh")
+        admin.command(f"SYSTEM START VIEW {DB}.{REFRESHER}")
+        _refresh(admin)
     assert not admin.query(
         f"SELECT 1 FROM {DB}.user_study WHERE email = 'erin@example.org'"
     ).result_rows
@@ -547,7 +642,8 @@ def test_user_targeted_policies_direct_grant_is_not_a_bypass(server):
     # Direct grants + SET ROLE NONE change nothing: the policies name the user.
     server.http("SET ROLE NONE", "llm_user", session_id="s-llm-fake")
     assert server.studies_seen(q, "llm_user", session_id="s-llm-fake") == {"pub_a"}
-    for denied in ["user_study_manual", "user_study_refresh"]:
+    inner = _inner_tables(admin, "authz_user_target")[0]
+    for denied in ["user_study_manual", f"`{inner}`"]:
         assert server.http(f"SELECT count() FROM authz_user_target.{denied}", "llm_user") == "0"
     emails = server.studies_seen(
         "SELECT DISTINCT email FROM authz_user_target.user_study",
@@ -1065,8 +1161,7 @@ def test_startup_check_quoted_object_name_refused(server):
     _p6_user_target_db(admin, db, user)
     admin.command("CREATE DATABASE IF NOT EXISTS `p6 weird db`")
     admin.command(
-        "CREATE TABLE IF NOT EXISTS `p6 weird db`.`my table` (x Int64) "
-        "ENGINE=MergeTree ORDER BY x"
+        "CREATE TABLE IF NOT EXISTS `p6 weird db`.`my table` (x Int64) ENGINE=MergeTree ORDER BY x"
     )
     admin.command(f"GRANT SELECT ON `p6 weird db`.`my table` TO {user}")
     _refused(server, user, "p6 weird db", db)
@@ -1149,8 +1244,7 @@ def test_startup_check_unsafe_other_database_even_when_public(server, kind):
         needle = "Dictionary engine is not allowed"
     else:
         admin.command(
-            f"CREATE TABLE {other}.leak AS {db}.cancer_study "
-            f"ENGINE=Merge('{db}', '^cancer_study$')"
+            f"CREATE TABLE {other}.leak AS {db}.cancer_study ENGINE=Merge('{db}', '^cancer_study$')"
         )
         needle = "Merge engine is not allowed"
     admin.command(f"GRANT SELECT ON {other}.* TO {user}")
@@ -1314,3 +1408,133 @@ def test_startup_check_uppercase_study_column_detected(server, column, source_co
     admin.command(f"GRANT SELECT ON {other}.* TO {user}")
     _refused(server, user, "not declared public", db)
     assert _startup_check(server, user, db, frozenset({other})).public_studies == 1
+
+
+def _user_study_query(params: sqlgen.Params) -> str:
+    return sqlgen.render(sqlgen.USER_STUDY_QUERY_TEMPLATE.read_text(), params)
+
+
+def _restore_previous_layout(admin, params: sqlgen.Params) -> None:
+    """user_study as before this layout: a plain table that user_study_refresh
+    rebuilds with `REFRESH ... TO user_study` (same query)."""
+    db = f"`{params.database}`"
+    admin.command(f"DROP TABLE {db}.user_study SYNC")
+    admin.command(
+        f"CREATE TABLE {db}.user_study (email String, cancer_study_identifier String, "
+        "valid_until DateTime64(3, 'UTC'), source LowCardinality(String), "
+        "issued_at DateTime64(3, 'UTC')) ENGINE = MergeTree "
+        "ORDER BY (email, cancer_study_identifier)"
+    )
+    admin.command(
+        f"CREATE MATERIALIZED VIEW {db}.user_study_refresh REFRESH EVERY 5 MINUTE "
+        f"TO {db}.user_study DEFINER = CURRENT_USER SQL SECURITY DEFINER AS "
+        + _user_study_query(params)
+    )
+    admin.command(f"SYSTEM REFRESH VIEW {db}.user_study_refresh")
+    admin.command(f"SYSTEM WAIT VIEW {db}.user_study_refresh")
+
+
+def _engines(admin, db: str) -> dict[str, str]:
+    return dict(
+        admin.query(
+            "SELECT name, engine FROM system.tables WHERE database = {db:String} "
+            "AND name LIKE 'user_study%'",
+            parameters={"db": db},
+        ).result_rows
+    )
+
+
+def test_apply_refuses_previous_layout_and_migrate_replaces_it(server):
+    admin = server.admin
+    admin.command("CREATE USER mig_user IDENTIFIED BY 'pw'")
+    source = "authz_source_mig"
+    _load_fixture(admin, source)
+    params = sqlgen.Params(
+        database="authz_mig",
+        public_group="PUBLIC",
+        app_name="cbioportal",
+        policy_target="mig_user",
+        target_is_user=True,
+    )
+    grants = [Grant("hank@example.org", "TEAM_A", FUTURE)]
+    make_test_db(admin, source, params, {"priv_1": "TEAM_A"}, ["pub_a"], grants, log=lambda *_: None)
+    q = f"SELECT cancer_study_identifier FROM {params.database}.cancer_study"
+    hank = {"pub_a", "priv_1"}
+
+    def assert_filtered_and_checked():
+        assert server.studies_seen(q, "mig_user", SQL_cbio_user="hank@example.org") == hank
+        assert server.studies_seen(q, "mig_user") == {"pub_a"}
+        assert fetch_and_evaluate(admin, params.database, "mig_user").ok
+        assert _startup_check(server, "mig_user", params.database).public_studies == 1
+
+    assert_filtered_and_checked()
+
+    # 1. The previous layout: check and the startup check reject it.
+    _restore_previous_layout(admin, params)
+    assert _engines(admin, params.database) == {
+        "user_study": "MergeTree",
+        "user_study_manual": "MergeTree",
+        "user_study_refresh": "MaterializedView",
+    }
+    report = fetch_and_evaluate(admin, params.database, "mig_user")
+    assert any(e.startswith("user_study: MergeTree table, not a") for e in report.errors)
+    assert "user_study_refresh: MaterializedView bypasses row policies; remove it" in report.errors
+    _refused(server, "mig_user", "user_study: MergeTree table", params.database)
+
+    # 2. apply refuses, one line, and changes nothing.
+    with pytest.raises(ValueError) as exc:
+        sqlgen.apply(admin, params, log=lambda *_: None)
+    assert "previous user_study layout" in str(exc.value) and "\n" not in str(exc.value)
+    assert _engines(admin, params.database)["user_study"] == "MergeTree"
+
+    # 3. --migrate: drops both, keeps user_study_manual, recreates the view.
+    sqlgen.apply(admin, params, log=lambda *_: None, migrate=True)
+    engines = _engines(admin, params.database)
+    assert engines == {"user_study": "MaterializedView", "user_study_manual": "MergeTree"}
+    manual = admin.query(f"SELECT email FROM {params.database}.user_study_manual").result_rows
+    assert manual == [("hank@example.org",)]
+    assert_filtered_and_checked()
+    # Re-applying the new layout needs no flag and keeps the view (same uuid).
+    inner = _inner_tables(admin, params.database)
+    sqlgen.apply(admin, params, log=lambda *_: None)
+    assert _inner_tables(admin, params.database) == inner
+    assert_filtered_and_checked()
+
+    # 4. An APPEND view would never drop revoked grants: refused the same way.
+    db = f"`{params.database}`"
+    admin.command(f"DROP TABLE {db}.user_study SYNC")
+    admin.command(
+        f"CREATE MATERIALIZED VIEW {db}.user_study REFRESH EVERY 5 MINUTE APPEND "
+        "ENGINE = MergeTree ORDER BY (email, cancer_study_identifier) AS "
+        + _user_study_query(params)
+    )
+    admin.command(f"SYSTEM WAIT VIEW {db}.user_study")
+    report = fetch_and_evaluate(admin, params.database, "mig_user")
+    assert any("user_study: refreshable view uses APPEND" in e for e in report.errors)
+    _refused(server, "mig_user", "uses APPEND", params.database)
+    with pytest.raises(ValueError, match="previous user_study layout"):
+        sqlgen.apply(admin, params, log=lambda *_: None)
+    sqlgen.apply(admin, params, log=lambda *_: None, migrate=True)
+    assert_filtered_and_checked()
+
+    # 5. A TO view (the swap that races policy lookup) is refused too.
+    admin.command(f"DROP TABLE {db}.user_study SYNC")
+    admin.command(
+        f"CREATE TABLE {db}.mig_data (email String, cancer_study_identifier String, "
+        "valid_until DateTime64(3, 'UTC'), source LowCardinality(String), "
+        "issued_at DateTime64(3, 'UTC')) ENGINE = MergeTree ORDER BY email"
+    )
+    admin.command(
+        f"CREATE MATERIALIZED VIEW {db}.user_study REFRESH EVERY 5 MINUTE TO {db}.mig_data AS "
+        + _user_study_query(params)
+    )
+    try:
+        report = fetch_and_evaluate(admin, params.database, "mig_user")
+        assert any("user_study: refreshable view writes TO" in e for e in report.errors)
+        _refused(server, "mig_user", "writes TO another table", params.database)
+        with pytest.raises(ValueError, match="previous user_study layout"):
+            sqlgen.apply(admin, params, log=lambda *_: None)
+        sqlgen.apply(admin, params, log=lambda *_: None, migrate=True)
+    finally:
+        admin.command(f"DROP TABLE IF EXISTS {db}.mig_data SYNC")
+    assert_filtered_and_checked()

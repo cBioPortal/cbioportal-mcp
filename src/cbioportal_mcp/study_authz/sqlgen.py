@@ -3,9 +3,10 @@
 ``templates/1-row-policies.sql.tmpl`` is generated from ``catalog.py`` by
 ``row_policies_template()`` (``python -m cbioportal_mcp.study_authz generate``;
 ``tests/test_study_authz_sql.py`` fails on drift).
-``templates/0-user-study.sql.tmpl`` is hand-written. Both keep placeholders
-that ``render()`` fills in per database, so the same files serve blue and
-green deployments.
+``templates/0-user-study.sql.tmpl`` is hand-written; it inlines
+``templates/user-study-query.sql.tmpl`` (``user_study_template()``). Both keep
+placeholders that ``render()`` fills in per database, so the same files serve
+blue and green deployments.
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ from cbioportal_mcp.study_authz.catalog import (
     STUDY_SCOPED_TABLE_PATHS,
     STUDY_SCOPED_VIEWS,
     UNRESTRICTED_OTHERS_POLICY,
+    USER_STUDY_MANUAL_TABLE,
     USER_STUDY_TABLE,
     AllOf,
     StudyId,
@@ -37,6 +39,11 @@ from cbioportal_mcp.study_authz.groups import PLACEHOLDER_RE, validate_name
 
 TEMPLATES = Path(__file__).resolve().parent / "templates"
 USER_STUDY_TEMPLATE = TEMPLATES / "0-user-study.sql.tmpl"
+USER_STUDY_QUERY_TEMPLATE = TEMPLATES / "user-study-query.sql.tmpl"
+USER_STUDY_QUERY = "__USER_STUDY_QUERY__"
+# The previous layout's writer (`... REFRESH ... TO user_study`); only apply's
+# migration still names it (docs/study-authz.md, "Migrating from user_study_refresh").
+LEGACY_REFRESH_VIEW = "user_study_refresh"
 ROW_POLICIES_TEMPLATE = TEMPLATES / "1-row-policies.sql.tmpl"
 
 DB = "__CLICKHOUSE_DATABASE__"
@@ -307,6 +314,19 @@ def assert_only_database(sql: str, database: str) -> None:
         raise ValueError(f"rendered SQL references databases other than {database}: {others}")
 
 
+def user_study_template() -> str:
+    """0-user-study.sql.tmpl with the user_study query inlined (still templated)."""
+    lines = USER_STUDY_QUERY_TEMPLATE.read_text().splitlines()
+    while lines and lines[0].startswith("--"):
+        lines.pop(0)  # the file's own header comment
+    query = "\n".join(lines).strip()
+    template = USER_STUDY_TEMPLATE.read_text()
+    slot = re.compile(rf"^{USER_STUDY_QUERY}(?=;$)", re.M)
+    if len(slot.findall(template)) != 2 or query.endswith(";"):
+        raise ValueError("0-user-study.sql.tmpl must inline the query exactly twice")
+    return slot.sub(lambda _: query, template)
+
+
 def rendered_files(params: Params) -> list[tuple[str, str]]:
     """(name, SQL) in apply order. A role target is created first; a user target
     must already exist (apply checks)."""
@@ -315,7 +335,7 @@ def rendered_files(params: Params) -> list[tuple[str, str]]:
         role = quote_identifier("policy role", params.policy_target)
         policies = f"CREATE ROLE IF NOT EXISTS {role};\n\n{policies}"
     files = [
-        (USER_STUDY_TEMPLATE.name, render(USER_STUDY_TEMPLATE.read_text(), params)),
+        (USER_STUDY_TEMPLATE.name, render(user_study_template(), params)),
         (ROW_POLICIES_TEMPLATE.name, policies),
     ]
     for _, sql in files:
@@ -368,14 +388,58 @@ def policy_conflicts(client, database: str, target: str) -> list[str]:
     return conflicts
 
 
-def apply(client, params: Params, log=print) -> None:
+def legacy_layout(client, database: str) -> list[str]:
+    """What is left of the previous user_study layout on ``database`` (empty if none).
+
+    That layout is a plain ``user_study`` table written by
+    ``user_study_refresh`` (``REFRESH ... TO user_study``), whose refresh swap
+    could make a running filtered query read zero rows. Any ``user_study``
+    that is not a refreshable view without TO/APPEND counts, too.
+    """
+    from cbioportal_mcp.study_authz.coverage import user_study_shape_error
+
+    validate_identifier("database", database)
+    rows = client.query(
+        "SELECT name, engine, create_table_query FROM system.tables "
+        "WHERE database = {db:String} AND name IN {names:Array(String)}",
+        parameters={"db": database, "names": [USER_STUDY_TABLE, LEGACY_REFRESH_VIEW]},
+    ).result_rows
+    found = {row[0]: (row[1], row[2] or "") for row in rows}
+    legacy = []
+    if LEGACY_REFRESH_VIEW in found:
+        legacy.append(f"{LEGACY_REFRESH_VIEW} exists")
+    if USER_STUDY_TABLE in found and user_study_shape_error(*found[USER_STUDY_TABLE]):
+        engine = found[USER_STUDY_TABLE][0]
+        legacy.append(f"{USER_STUDY_TABLE} is a {engine}, not the refreshable view")
+    return legacy
+
+
+def migration_statements(database: str) -> list[str]:
+    """Drop the previous layout; never touches user_study_manual.
+
+    Between these drops and the end of user_study's first refresh, filtered
+    queries fail (unknown table user_study) and then briefly see no private or
+    public studies, so migrate a copy that serves no traffic.
+    """
+    db = quote_identifier("database", database)
+    return [
+        f"DROP VIEW IF EXISTS {db}.{LEGACY_REFRESH_VIEW} SYNC",
+        f"DROP TABLE IF EXISTS {db}.{USER_STUDY_TABLE} SYNC",
+    ]
+
+
+def apply(client, params: Params, log=print, *, migrate: bool = False) -> None:
     """Run both rendered files, statement by statement, with an admin client.
 
     Before any query: re-validates the parameters and renders every file
     (single-pass substitution, then assert_only_database). Then refuses,
     before changing anything, if the database has row policies this tool does
-    not own (policy_conflicts). Policy administration on the database must be
-    serialized with apply; run `check` afterwards (docs/study-authz.md).
+    not own (policy_conflicts), or still has the previous user_study layout
+    (legacy_layout) and ``migrate`` is false. With ``migrate``, drops that
+    layout first (migration_statements); the rendered file then creates
+    user_study and waits for its first refresh. Policy administration on the
+    database must be serialized with apply; run `check` afterwards
+    (docs/study-authz.md).
     """
     params.validate()
     files = rendered_files(params)
@@ -394,6 +458,20 @@ def apply(client, params: Params, log=print) -> None:
             "the database, and its catch-all USING 1 for non-targets would widen these "
             "(drop or move them first): " + "; ".join(conflicts)
         )
+    legacy = legacy_layout(client, params.database)
+    if legacy and not migrate:
+        raise ValueError(
+            f"refusing to apply to {params.database}: it has the previous user_study layout "
+            f"({'; '.join(legacy)}). To migrate: take this copy out of service (the inactive "
+            "blue/green database, or study filtering off), then rerun apply with --migrate, "
+            f"which drops {LEGACY_REFRESH_VIEW} and the user_study table, recreates user_study "
+            f"as a refreshable view and waits for its first refresh ({USER_STUDY_MANUAL_TABLE} "
+            "is kept); see docs/study-authz.md"
+        )
+    if legacy:
+        log(f"migrate {params.database}: {'; '.join(legacy)}")
+        for statement in migration_statements(params.database):
+            client.command(statement)
     for name, sql in files:
         log(f"apply  {name} -> {params.database}")
         for statement in statements(sql):

@@ -103,10 +103,10 @@ anything that slipped in.
 |---|---|
 | every table in the DB (`db.*`) | `USING 0`: default-deny, so an unclassified or new table fails closed. Everyone except the target gets `USING 1`. |
 | 45 study tables (`catalog.STUDY_SCOPED_TABLE_PATHS`) | resolve the row's study through its real FK path (`sample -> patient -> cancer_study`, `mutation -> genetic_profile -> cancer_study`, `mutation_event <- mutation -> ...`) and check it against `user_study` |
-| `user_study` | the caller's rows plus the public rows only |
+| `user_study` (a refreshable materialized view) | the caller's rows plus the public rows only |
 | 17 reference tables (genes, panels, OncoTree...) | `USING 1` |
 | 21 views (`sql/4`, `sql/5`, `sql/7`) | `USING 1` pass-through. This is safe because every view is `SQL SECURITY INVOKER`, so the underlying tables' policies filter the rows. |
-| `users`, `authorities`, `data_access_tokens`, `user_study_manual`, `user_study_jwt`, `user_study_refresh` | no policy, so the default-deny returns zero rows |
+| `users`, `authorities`, `data_access_tokens`, `user_study_manual`, `user_study_jwt`, and `user_study`'s inner tables `.inner_id.<uuid>` / `.tmp.inner_id.<uuid>` | no policy, so the default-deny returns zero rows |
 
 A study is visible when its identifier is in:
 
@@ -159,12 +159,35 @@ user_study(email, cancer_study_identifier, valid_until DateTime64(3,'UTC'),
 ORDER BY (email, cancer_study_identifier)
 ```
 
-Only the row policies read `user_study`, and the refreshable materialized
-view `user_study_refresh` is the only thing that writes it. Each refresh
-rebuilds the whole table into a staging table and EXCHANGEs it in (that is
-how a non-APPEND refreshable MV works), so readers always see one complete
-snapshot. The refresh runs as its definer (the admin who applied it). That is
-how it can read `user_study_manual`.
+Only the row policies read `user_study`. It is itself a refreshable
+materialized view **without `TO`** (`REFRESH EVERY <n> MINUTE ... ENGINE =
+MergeTree`), so its own refresh is the only thing that writes it. Its rows
+live in an implicit inner table, `.inner_id.<uuid of user_study>`. Each
+refresh rebuilds the whole snapshot in `.tmp.inner_id.<uuid>` and swaps it
+with the inner table, so readers always see one complete snapshot. The refresh
+runs as its definer (the admin who applied it). That is how it can read
+`user_study_manual`. Both inner tables are denied (default-deny only): a
+direct read of them would skip `user_study`'s identity policy, so `check` and
+the startup check refuse any policy on them.
+
+**Why no `TO` table.** The previous layout was a plain `user_study` table plus
+a refreshable view `user_study_refresh ... TO user_study`. Its refresh swaps
+the table *named* `user_study`. A running query resolves `user_study` early
+and looks up its row policy by name later. If the swap lands in between, the
+query holds a table now named `.tmp.inner_id.<uuid>`, which only the
+database-wide `USING 0` covers, so every policy subquery
+`IN (SELECT ... FROM user_study)` silently returns 0 rows. The data was never
+missing (direct reads were always complete). Measured with a forced refresh
+loop on Docker ClickHouse: 31/400 (25.8) and 23/400 (26.6) policy-filtered
+reads came back empty; EXCHANGE-TABLES variants 27-47/300; this layout 0/300
+on both. With no `TO`, the swap happens behind the view: the name the policy
+is looked up by never moves. `tests/test_study_authz_live.py::test_refresh_swap_never_empties_policy_filtered_reads`
+is the regression test (it fails on the previous layout).
+
+`check` and the startup check accept a `MaterializedView` **only** for
+`user_study`, and only when it is refreshable, has no `TO` and no `APPEND`
+(`APPEND` would never remove revoked grants), and carries exactly the identity
+policy. Every other materialized view still refuses.
 
 - **public**: rows with `email = ''`, one per study whose `cancer_study.groups`
   contains the public group. The rule: split on `;`, drop empty entries,
@@ -230,7 +253,7 @@ GRANT INSERT ON <db>.user_study_jwt TO <jwt_writer>;   -- nothing else
   `grant_key = ''`. The sentinel lets a token with no grants still replace an
   older one.
 - **Refresh.** Add one `UNION ALL` branch to the `grants` CTE in
-  `0-user-study.sql.tmpl` that keeps only each email's newest token:
+  `user-study-query.sql.tmpl` that keeps only each email's newest token:
   `WHERE (lowerUTF8(email), issued_at) IN (SELECT lowerUTF8(email), max(issued_at) FROM user_study_jwt GROUP BY 1) AND grant_key != ''`,
   with `source = 'jwt'` and `issued_at` = the token's iat. A late-arriving
   older token loses to the newer one, so it cannot bring back a revoked grant.
@@ -241,7 +264,7 @@ GRANT INSERT ON <db>.user_study_jwt TO <jwt_writer>;   -- nothing else
 **Trade-off.** JWT grants and revocations take effect at the next refresh, not
 the moment the token is written. That delay is at most `--refresh-minutes`;
 lower it to 1 if needed. The alternative was letting the writer insert into
-`user_study` directly. That would either lose rows to the next EXCHANGE, or
+`user_study` directly. That would either lose rows to the next refresh swap, or
 force every policy subquery to resolve "newest token per email" at query time
 (an `argMax` on every query, and a different predicate than the agreed one).
 Same-millisecond `issued_at` ties grant the union of both tokens.
@@ -299,7 +322,52 @@ CBIOPORTAL_MCP_RESTRICTED_PASSWORD=... uv run python -m cbioportal_mcp.study_aut
   `templates/1-row-policies.sql.tmpl`. `tests/test_study_authz_sql.py` fails
   if you forget.
 - `--public-group` and `--app-name` have no defaults.
-- Re-running `apply` keeps `user_study_manual`.
+- Re-running `apply` keeps `user_study_manual` and never drops `user_study`:
+  it updates the view's query, interval, definer and comment in place
+  (`ALTER TABLE ... MODIFY QUERY / MODIFY REFRESH / MODIFY SQL SECURITY /
+  MODIFY COMMENT`), so readers keep the current snapshot, then waits for one
+  refresh.
+- `apply` refuses a database that still has the previous layout (see
+  [Migrating from `user_study_refresh`](#migrating-from-user_study_refresh)).
+
+### Refresh status and forcing a refresh
+
+```sql
+SELECT status, last_success_time, exception FROM system.view_refreshes
+WHERE database = '<db>' AND view = 'user_study';
+SYSTEM REFRESH VIEW <db>.user_study;   -- then SYSTEM WAIT VIEW <db>.user_study;
+```
+
+### Migrating from `user_study_refresh`
+
+Databases applied before this change have a plain `user_study` table and a
+`user_study_refresh` view. `apply` detects that (and any `user_study` that is
+not a refreshable view without `TO`/`APPEND`) and refuses with one line,
+changing nothing. `check` reports `user_study: MergeTree table, not a
+refreshable materialized view` and `user_study_refresh: MaterializedView
+bypasses row policies`, and a server with study filtering on refuses that
+database.
+
+To migrate one database:
+
+1. Take it out of service: migrate the **inactive** blue/green copy, or run
+   with study filtering off for this database. Between the drop and the
+   create, filtered queries fail with `UNKNOWN_TABLE` for `user_study` (an
+   error, not silent zeros). After the create, until the view's first
+   refresh finishes, `user_study` is readable but empty, so filtered queries
+   return no studies at all, public ones included.
+2. Run apply with `--migrate`:
+
+   ```bash
+   uv run python -m cbioportal_mcp.study_authz apply --migrate \
+       --database cbio_restricted_green --public-group PUBLIC --app-name cbioportal
+   ```
+
+   It drops `user_study_refresh`, drops the `user_study` table, creates the
+   `user_study` view, re-applies the policies and waits for the first refresh.
+   `user_study_manual` (the manual grants) is never touched. On a database
+   that already has the new layout `--migrate` does nothing extra.
+3. Run `check` for the database, then switch traffic to it.
 
 ### Manual grants
 
@@ -307,7 +375,7 @@ CBIOPORTAL_MCP_RESTRICTED_PASSWORD=... uv run python -m cbioportal_mcp.study_aut
 INSERT INTO <db>.user_study_manual (email, grant_key, valid_until, note)
 VALUES ('someone@example.org', 'TEAM_A', '2027-01-01 00:00:00', 'ticket-123');
 DELETE FROM <db>.user_study_manual WHERE email = 'someone@example.org' AND grant_key = 'TEAM_A';
-SYSTEM REFRESH VIEW <db>.user_study_refresh;   -- optional: apply now, not at the next tick
+SYSTEM REFRESH VIEW <db>.user_study;   -- optional: apply now, not at the next tick
 ```
 
 ## Test database for an end-to-end check
@@ -365,9 +433,11 @@ the check plus the exception class and ClickHouse error code):
   *default* roles. A policy role that is granted but not default is refused.
 - `coverage.evaluate` (the same rules as `check`) passes over exactly the
   policies that apply to the user and its enabled roles: every study table,
-  reference table and view has its own policy, `user_study` has only the
-  identity predicate, and `user_study_manual` and the other denied tables have
-  none. Unclassified tables are refused too.
+  reference table and view has its own policy, `user_study` is a refreshable
+  view without `TO`/`APPEND` with only the identity predicate, and
+  `user_study_manual`, `user_study`'s inner tables and the other denied tables
+  have none. Unclassified tables are refused too. (The refresh status in
+  `system.view_refreshes` is admin-only, so only `check` reports it.)
 - Policy ownership (the same `sqlgen.policy_conflicts` as `apply` / `check`):
   any row policy on the database not named `cbioportal_mcp_*`, or one of ours
   attached to a different target, refuses. A foreign permissive policy that
