@@ -123,7 +123,7 @@ def _docker_ok() -> bool:
     if not shutil.which("docker"):
         return False
     try:
-        return subprocess.run(["docker", "info"], capture_output=True, timeout=10).returncode == 0
+        return subprocess.run(["docker", "info"], capture_output=True, timeout=60).returncode == 0
     except (OSError, subprocess.TimeoutExpired):
         return False
 
@@ -173,8 +173,8 @@ class Server:
 @pytest.fixture(scope="module")
 def server():
     if not DOCKER_AVAILABLE:
-        if "CI" in os.environ:
-            pytest.fail("Docker is required when CI is set")
+        if os.getenv("CI", "").strip().lower() in {"1", "true", "yes"}:
+            pytest.fail("Docker is required when CI is truthy")
         pytest.skip("Docker is not available")
     name = f"study-authz-indirect-{uuid.uuid4().hex[:8]}"
     try:
@@ -243,6 +243,10 @@ def server():
             ("b@example.org", "B"),
             ("c@example.org", "C"),
         ]
+        # Keep the asserted grant snapshot fixed: non-APPEND refreshes can
+        # briefly expose an empty user_study while replacing its contents.
+        srv.admin.command(f"SYSTEM STOP VIEW {DB}.user_study_refresh")
+        srv.admin.command(f"SYSTEM WAIT VIEW {DB}.user_study_refresh")
         yield srv
     finally:
         subprocess.run(["docker", "rm", "-f", name], capture_output=True)
@@ -290,6 +294,18 @@ def _load_fixture(server: Server) -> None:
             row["row_tag"] = study
             server.rows[table].append(row)
             server.expected[table][study] = {sid}
+
+    # This profile has no link (including no self-link) and no assay/sample
+    # children. Direct profile visibility must not depend on either relation.
+    server.rows["genetic_profile"].append(
+        {
+            "genetic_profile_id": 305,
+            "cancer_study_id": 2,
+            "stable_id": "profile_305",
+            "row_tag": "unlinked_A",
+        }
+    )
+    server.expected["genetic_profile"]["unlinked_A"] = {2}
 
     # Every ordered pair: either endpoint may independently be inaccessible.
     for referring in STUDIES:
@@ -345,6 +361,14 @@ def test_bare_table_exact_rows(server, table, email, allowed):
         f"{table}, email={email!r}: leaked={sorted(set(actual) - set(expected))}, "
         f"missing={sorted(set(expected) - set(actual))}; actual={actual}, expected={expected}"
     )
+
+
+@pytest.mark.parametrize("email,allowed", IDENTITIES)
+def test_profiles_include_unlinked_profile(server, email, allowed):
+    expected = sorted(
+        tag for tag, studies in server.expected["genetic_profile"].items() if studies & allowed
+    )
+    assert server.select("genetic_profile", email) == expected
 
 
 @pytest.mark.parametrize("table", ["mutation", "clinical_sample"])
