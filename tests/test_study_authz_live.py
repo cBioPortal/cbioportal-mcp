@@ -573,6 +573,71 @@ def test_user_targeted_policies_direct_grant_is_not_a_bypass(server):
         )
 
 
+def test_p7_user_tools_and_cache_isolation(server, monkeypatch):
+    """Test wiring directly while P1 intentionally keeps filtering locked at startup."""
+    import mcp_clickhouse.mcp_server as upstream
+    from clickhouse_connect import common
+
+    from cbioportal_mcp import identity, rollout
+    from cbioportal_mcp import server as mcp_server
+
+    # A first server import validates filtering=off and pins it after fixtures
+    # have reset rollout. Unlock only this test's direct wiring after import.
+    monkeypatch.setattr(rollout, "_PIN", None)
+
+    # The P4 minimal fixture omits list_studies' deployment metadata columns.
+    for column in ("description String", "type_of_cancer_id String", "sample_count UInt64"):
+        server.admin.command(f"ALTER TABLE {DB}.cancer_study ADD COLUMN IF NOT EXISTS {column}")
+    previous = common.get_setting("invalid_setting_action")
+    monkeypatch.setenv("CBIOPORTAL_MCP_STUDY_FILTERING", "on")
+    # Upstream client preparation also validates environment-based credentials.
+    monkeypatch.setenv("CLICKHOUSE_HOST", "127.0.0.1")
+    monkeypatch.setenv("CLICKHOUSE_USER", "mcp_restricted")
+    monkeypatch.setenv("CLICKHOUSE_PASSWORD", "pw")
+    config = dict(
+        host="127.0.0.1",
+        port=server.port,
+        username="mcp_restricted",
+        password="pw",
+        database=DB,
+        secure=False,
+        verify=True,
+        connect_timeout=10,
+        send_receive_timeout=30,
+    )
+    monkeypatch.setattr(upstream, "_resolve_client_config", lambda: config)
+    tool = mcp_server.clickhouse_run_select_query.fn.__wrapped__
+    studies = mcp_server.list_studies.fn.__wrapped__
+    try:
+        for email in (
+            "alice@example.org",
+            "carol@example.org",
+            "nobody@example.org",
+            "alice@example.org",
+        ):
+            token = identity._CURRENT.set(
+                identity.Decision(identity.Identity("id", email, "oauth"), True, True)
+            )
+            try:
+                result = tool("SELECT cancer_study_identifier FROM cancer_study")
+                assert {r[0] for r in result["rows"]} == EXPECTED[email]
+                listed = studies(limit=100)
+                assert {
+                    r["cancer_study_identifier"] for r in listed if "cancer_study_identifier" in r
+                } == EXPECTED[email]
+                assert ("study_scope_note" in result) == (email == "nobody@example.org")
+                assert (
+                    "identity settings"
+                    in tool("SELECT 1 SETTINGS SQL_cbio_user='alice@example.org'")["error_message"]
+                )
+            finally:
+                identity._CURRENT.reset(token)
+        assert "verified user identity" in tool("SELECT 1")["error_message"]
+        assert "verified user identity" in studies()[0]["error"]
+    finally:
+        common.set_setting("invalid_setting_action", previous)
+
+
 def test_apply_refuses_to_widen_an_existing_restricted_principal(server):
     """Reviewer repro: a foreign policy is OR-ed with the catch-all USING 1."""
     admin = server.admin

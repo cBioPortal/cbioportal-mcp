@@ -508,3 +508,25 @@ A full policy-enabled startup on Cloud 26.6.1 remains unverified.
 - Only tested on ClickHouse 25.8 in Docker, not on ClickHouse Cloud.
   Refreshable MVs in a Replicated database (Cloud's default) are documented
   to be coordinated across replicas. Run `check` after the first apply there.
+
+## Request identity wiring (P7)
+
+P7 sends the P2 verified email, stripped and lowercased, as `SQL_cbio_user`
+with `readonly=1` on every study-data SELECT. Context propagates through both
+application and mcp-clickhouse worker pools. Missing identity fails closed;
+schema-only tools remain available without an email setting. The custom setting
+is explicitly forwarded by clickhouse-connect (`invalid_setting_action=send`).
+User SQL cannot mention the identity setting, read settings through `getSetting`
+or `getSettingOrDefault`, or set `SQL_` settings, including quoted/escaped forms.
+
+With filtering on, study lists use bounded policy-filtered SQL. Dynamic study
+caches are bypassed, background warming is disabled, and curated guides check
+study visibility on every read. This makes revocations effective as soon as
+`user_study` refreshes (or its private grants expire), without an extra cache
+TTL. Schema and static file indexes retain their existing caches. Public-only
+callers receive a scope/frequency note in query metadata and study lists.
+
+The P1 startup lock remains: filtering cannot be enabled in production until
+P11 unlocks it. `tests/test_send_identity.py` exercises the wiring with fakes;
+`test_p7_user_tools_and_cache_isolation` in `tests/test_study_authz_live.py`
+calls the wiring directly against P4's throwaway Docker fixture.
