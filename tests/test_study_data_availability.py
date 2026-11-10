@@ -227,13 +227,21 @@ def test_fresh_import_is_blocked_before_and_after_pinning(raw):
         }
     )
     script = """
+import os
 from fastmcp.exceptions import ToolError
 from cbioportal_mcp import rollout
 from cbioportal_mcp.study_authz import availability
 assert rollout._PIN is None
 for pinned in (False, True):
     if pinned:
-        rollout.initialize('on', local_dev=False)
+        filtering = os.environ.get('CBIOPORTAL_MCP_STUDY_FILTERING', 'on')
+        rollout.initialize(filtering, local_dev=False)
+        assert rollout._PIN.filtering == filtering
+        if filtering == 'off':
+            assert availability.reason() == 'filtering_off'
+            assert availability.available()
+            availability.require()
+            continue
     assert availability.reason() == 'checks_pending'
     assert not availability.available()
     try:
@@ -335,11 +343,62 @@ async def test_prompts_require_explicit_classification():
     assert await server.mcp.get_prompts() == {}
 
 
-def test_custom_http_routes_require_explicit_classification():
-    routes = server.mcp._get_additional_http_routes()
-    assert [(route.path, route.methods, route.endpoint) for route in routes] == [
-        ("/health", {"GET", "HEAD"}, server.study_data_health)
-    ]
+@pytest.mark.parametrize("transport", ["http", "sse"])
+def test_served_http_routes_require_explicit_classification(monkeypatch, transport):
+    from starlette.routing import Mount
+
+    for name, value in {
+        "CBIOPORTAL_MCP_GOOGLE_CLIENT_ID": "test-client",
+        "CBIOPORTAL_MCP_GOOGLE_CLIENT_SECRET": "test-secret",
+        "CBIOPORTAL_MCP_GOOGLE_BASE_URL": "https://mcp.example.org",
+    }.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.delenv("REDIS_URL", raising=False)
+    # The module-level server predates this test's login configuration. Use the
+    # real provider factory and mount path, including OAuth's directly added routes.
+    monkeypatch.setattr(
+        server.mcp, "identity_auth", identity.CombinedAuth(server._build_auth_provider())
+    )
+    app = server.mcp.http_app(transport=transport)
+
+    def paths(routes, prefix=""):
+        for route in routes:
+            path = prefix + route.path
+            yield path
+            if isinstance(route, Mount):
+                yield from paths(route.routes, path)
+
+    # Literal classifications deliberately require review for every new HTTP
+    # surface, including routes added outside FastMCP's custom-route registry.
+    classified = {
+        "http": {
+            "mcp_middleware": {"/mcp"},
+            "health": {"/health"},
+            "login": {
+                "/authorize",
+                "/auth/callback",
+                "/consent",
+                "/register",
+                "/token",
+                "/.well-known/oauth-authorization-server",
+                "/.well-known/oauth-protected-resource/mcp",
+            },
+        },
+        "sse": {
+            "mcp_middleware": {"/sse", "/messages"},
+            "health": {"/health"},
+            "login": {
+                "/authorize",
+                "/auth/callback",
+                "/consent",
+                "/register",
+                "/token",
+                "/.well-known/oauth-authorization-server",
+                "/.well-known/oauth-protected-resource/sse",
+            },
+        },
+    }
+    assert set(paths(app.routes)) == set().union(*classified[transport].values())
 
 
 @pytest.mark.asyncio
