@@ -31,6 +31,7 @@ PARAMS = sqlgen.Params(
     app_name="cbioportal",
     policy_target=USER,
     target_is_user=True,
+    private_grace_minutes=7 * 24 * 60,  # Frozen grants survive slow CI/debug runs.
 )
 TABLES = sorted(
     {table for table, path in STUDY_SCOPED_TABLE_PATHS.items() if isinstance(path, (Via, AllOf))}
@@ -295,8 +296,8 @@ def _load_fixture(server: Server) -> None:
             server.rows[table].append(row)
             server.expected[table][study] = {sid}
 
-    # This profile has no link (including no self-link) and no assay/sample
-    # children. Direct profile visibility must not depend on either relation.
+    # This profile has no link, including no self-link. Its child rows below
+    # must be visible without a detour through genetic_profile_link.
     server.rows["genetic_profile"].append(
         {
             "genetic_profile_id": 305,
@@ -306,6 +307,26 @@ def _load_fixture(server: Server) -> None:
         }
     )
     server.expected["genetic_profile"]["unlinked_A"] = {2}
+
+    # Derive children from the independent seed schema, not their catalog
+    # paths: mutating a path (e.g. N11) must not remove its discriminating row.
+    for table, column_names in SEED_COLUMNS.items():
+        if table == "genetic_profile":
+            continue
+        profile_columns = {"genetic_profile_id", "profile_stable_id"} & set(column_names.split())
+        if not profile_columns:
+            continue
+        assert len(profile_columns) == 1, f"Ambiguous profile-child seed for {table}"
+        column = next(iter(profile_columns))
+        row = dict(server.rows[table][1])  # Other foreign keys still belong to A.
+        row.update(
+            {
+                column: "profile_305" if column == "profile_stable_id" else 305,
+                "row_tag": "unlinked_A_child",
+            }
+        )
+        server.rows[table].append(row)
+        server.expected[table]["unlinked_A_child"] = {2}
 
     # Every ordered pair: either endpoint may independently be inaccessible.
     for referring in STUDIES:
