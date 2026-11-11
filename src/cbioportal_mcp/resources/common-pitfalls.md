@@ -744,6 +744,26 @@ If the deployment/study only has `Colon` and `Rectum`, answer:
 
 > I do not see the anatomical subsite detail needed to compare left- vs right-sided CRC in this study. I should not substitute colon-vs-rectum, because that is a different comparison.
 
+### 17e. 🚨 SOURCE FILES ARE NOT IN THE DATABASE
+
+The database holds the rows each study loaded, not the files they were loaded from. No table records file names, which file an attribute came from, or the raw contents of meta files. Patient attributes from every patient-level clinical file land in the same patient-level rows.
+
+Questions about a study's file layout cannot be answered from ClickHouse:
+
+- "Which studies use a separate `data_clinical_outcomes.txt` instead of putting outcomes in `data_clinical_patient.txt`?"
+- "Show me a study with its own outcomes file and the matching meta file."
+- "Which file did `PFS_STATUS` come from?"
+
+#### ❌ Wrong: infer the file layout from loaded attributes
+
+> Agent: *"This study has `PFS_STATUS` and `PFS_MONTHS`, so it must load them from a separate outcomes file."*
+
+#### ✅ Correct: state the limit and point to the source files
+
+> This database stores the loaded data, not the files a study was loaded from, so I can't tell which studies keep outcomes in a separate file. Each public study's files are in cBioPortal DataHub at `https://github.com/cBioPortal/datahub/tree/master/public/<study_id>`, and the formats are documented at https://docs.cbioportal.org/file-formats/.
+
+The database can still tell you whether a study has an attribute loaded. For example, survival plots use patient attributes paired as `<PREFIX>_STATUS` / `<PREFIX>_MONTHS` (e.g. `OS_STATUS` / `OS_MONTHS`, `PFS_STATUS` / `PFS_MONTHS`); list a study's attributes with the `clinical_attribute_meta` query in `cbioportal://clinical-data-guide`.
+
 ### 18. 🚨 OUT-OF-SCOPE DRIFT AFTER USER PUSHBACK
 
 If you decline a request because it is outside cBioPortal scope, hold that boundary when the user rephrases or pushes gently.
@@ -813,6 +833,7 @@ Example:
 23. **Hold scope boundaries after refusal** — do not provide paper critiques, slide outlines, external pipeline code, or medical advice after user pushback.
 24. **Do not promise unavailable outputs** — provide data/handoffs instead of claiming to create plots, CSV files, or external apps.
 25. **LEFT JOIN yields '' / 0, not NULL** — use `IN (SELECT …)` / `NOT IN (SELECT …)` for group membership (pitfall #22)
+26. **Source files are not in the database** — which file a study loaded an attribute from (e.g. a separate `data_clinical_outcomes.txt`) cannot be queried; point to the study's DataHub folder (pitfall #17e)
 
 ### 21. 🚨 ENUMERATION / CATALOG QUESTIONS TRIGGER SCHEMA EXPLORATION
 
