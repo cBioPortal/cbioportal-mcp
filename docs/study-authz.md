@@ -167,8 +167,9 @@ refresh rebuilds the whole snapshot in `.tmp.inner_id.<uuid>` and swaps it
 with the inner table, so readers always see one complete snapshot. The refresh
 runs as its definer (the admin who applied it). That is how it can read
 `user_study_manual`. Both inner tables are denied (default-deny only): a
-direct read of them would skip `user_study`'s identity policy, so `check` and
-the startup check refuse any policy on them.
+direct read of them returns zero rows to the restricted target, because only
+the database-wide `USING 0` matches them. A policy on them would skip
+`user_study`'s identity policy, so `check` and the startup check refuse any.
 
 **Why no `TO` table.** The previous layout was a plain `user_study` table plus
 a refreshable view `user_study_refresh ... TO user_study`. Its refresh swaps
@@ -436,7 +437,13 @@ the check plus the exception class and ClickHouse error code):
   reference table and view has its own policy, `user_study` is a refreshable
   view without `TO`/`APPEND` with only the identity predicate, and
   `user_study_manual`, `user_study`'s inner tables and the other denied tables
-  have none. Unclassified tables are refused too. (The refresh status in
+  have none. A denied name never admits a MaterializedView, Dictionary,
+  LiveView or WindowView: those are refused under every name except
+  `user_study` itself. DDL dictionaries show up in `system.tables` (engine
+  `Dictionary`), which the runtime user can read; it cannot read
+  `system.dictionaries`. The identity predicate is compared with its AND/OR
+  grouping kept, so `a OR b AND c` does not pass for `(a OR b) AND c`.
+  Unclassified tables are refused too. (The refresh status in
   `system.view_refreshes` is admin-only, so only `check` reports it.)
 - Policy ownership (the same `sqlgen.policy_conflicts` as `apply` / `check`):
   any row policy on the database not named `cbioportal_mcp_*`, or one of ours

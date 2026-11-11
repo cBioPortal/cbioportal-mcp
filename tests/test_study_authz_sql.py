@@ -879,3 +879,62 @@ def test_admin_coverage_rejects_view_security_alias_spoof():
     )
     report = evaluate(objects, policies, "d")
     assert any("view is SQL SECURITY DEFINER" in error for error in report.errors)
+
+
+_BYPASS_CREATES = {
+    "MaterializedView": _TO_FORM,
+    "Dictionary": "",
+    "LiveView": "",
+    "WindowView": "",
+}
+
+
+@pytest.mark.parametrize("engine", sorted(_BYPASS_CREATES))
+@pytest.mark.parametrize("name", sorted(catalog.DENIED_TABLES))
+def test_denied_names_refuse_policy_bypassing_engines(name, engine):
+    # A denied name only means "no policy"; it must not admit an engine that
+    # bypasses row policies (an MV/dictionary at user_study_manual, users...).
+    objects, policies = _good_objects_and_policies()
+    objects[name] = (engine, _BYPASS_CREATES[engine])
+    report = _evaluate(objects, policies)
+    assert f"{name}: {engine} bypasses row policies; remove it" in report.errors, report.errors
+
+
+_IDENTITY_AS_STORED = (  # system.row_policies.select_filter on 25.8 and 26.6
+    "((email = '') OR (email = lowerUTF8(getSettingOrDefault('SQL_cbio_user', '')))) "
+    "AND (valid_until > now64(3))"
+)
+
+
+@pytest.mark.parametrize(
+    "select_filter",
+    [sqlgen.USER_STUDY_MATCH, _IDENTITY_AS_STORED],
+)
+def test_identity_policy_accepts_clickhouse_renderings(select_filter):
+    objects, policies = _good_objects_and_policies()
+    policies[1] = Policy("id", "user_study", select_filter)
+    assert _evaluate(objects, policies).ok
+
+
+@pytest.mark.parametrize(
+    "select_filter",
+    [
+        # No outer parentheses: AND binds tighter, so public rows never expire
+        # and the caller's rows are not ORed under the validity check.
+        "email = '' OR email = lowerUTF8(getSettingOrDefault('SQL_cbio_user', '')) "
+        "AND valid_until > now64(3)",
+        # The same, as ClickHouse stores it.
+        "(email = '') OR ((email = lowerUTF8(getSettingOrDefault('SQL_cbio_user', ''))) "
+        "AND (valid_until > now64(3)))",
+        "(email = '' OR email = lowerUTF8(getSettingOrDefault('SQL_cbio_user', '')))",
+        "((email = '') OR (email = lowerUTF8(getSettingOrDefault('SQL_cbio_user', '')))) "
+        "AND (valid_until > now64(3)) OR 1",
+        "(email = '' OR email = lowerUTF8(getSettingOrDefault('SQL_cbio_user', ''))) "
+        "AND valid_until > now64(3",
+    ],
+)
+def test_identity_policy_grouping_must_match_exactly(select_filter):
+    objects, policies = _good_objects_and_policies()
+    policies[1] = Policy("id", "user_study", select_filter)
+    report = _evaluate(objects, policies)
+    assert any(e.startswith("user_study: policy must be exactly") for e in report.errors)

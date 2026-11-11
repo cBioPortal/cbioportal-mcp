@@ -13,7 +13,8 @@ For the policy target (the restricted role, or a user), against ``catalog.py``:
   ``SQL SECURITY INVOKER`` (explicitly or implicitly) (DEFINER / NONE views leak every study);
 - denied tables, including ``user_study``'s implicit inner table and its
   refresh staging copy, have no policy; no other materialized view and no
-  dictionaries (dictGet bypasses row policies);
+  dictionaries (dictGet bypasses row policies), under any name, denied ones
+  included;
 - policy subqueries reference only the target database;
 - no row policy on the database was created by anyone else, or attaches our
   policies to another target (``sqlgen.policy_conflicts``): the catch-all
@@ -74,6 +75,82 @@ def _squash(text: str) -> str:
 
 
 _MATCH = _squash(USER_STUDY_MATCH)
+
+_FILTER_TOKEN = re.compile(r"'(?:[^'\\]|\\.|'')*'|\w+|[()]|[^\w\s'()]+|\s+", re.S)
+
+
+def filter_tree(text: str):
+    """AND/OR structure of a policy filter with grouping kept, or None if unparsed.
+
+    ClickHouse re-renders filters with extra parentheses
+    (``((email = '') OR (...)) AND (...)``), so plain text comparison fails;
+    ``_squash`` drops parentheses entirely and so also equates
+    ``a OR b AND c`` with ``(a OR b) AND c``. This keeps precedence
+    (AND binds tighter than OR), drops only redundant parentheses and flattens
+    nested same-operator groups. Leaves are whitespace-free token strings.
+    """
+    tokens: list[str] = []
+    pos = 0
+    while pos < len(text):
+        match = _FILTER_TOKEN.match(text, pos)
+        if not match:
+            return None
+        if not match.group().isspace():
+            tokens.append(match.group())
+        pos = match.end()
+    i = 0
+
+    def peek() -> str | None:
+        return tokens[i] if i < len(tokens) else None
+
+    def is_op(token: str | None, op: str) -> bool:
+        return token == op  # ClickHouse renders AND / OR upper-case
+
+    def group(op: str, parse_child):
+        nonlocal i
+        children = [parse_child()]
+        while is_op(peek(), op):
+            i += 1
+            children.append(parse_child())
+        if any(c is None for c in children):
+            return None
+        flat = []
+        for child in children:
+            flat.extend(child[1] if isinstance(child, tuple) and child[0] == op else [child])
+        return flat[0] if len(flat) == 1 else (op, tuple(flat))
+
+    def parse_or():
+        return group("OR", parse_and)
+
+    def parse_and():
+        return group("AND", parse_primary)
+
+    def parse_primary():
+        nonlocal i
+        if peek() == "(":
+            i += 1
+            inner = parse_or()
+            if peek() != ")":
+                return None
+            i += 1
+            nxt = peek()
+            if nxt is None or nxt == ")" or is_op(nxt, "AND") or is_op(nxt, "OR"):
+                return inner
+            return None  # e.g. `(a) = b`: not a shape we compare, fail closed
+        depth, leaf = 0, []
+        while (tok := peek()) is not None:
+            if depth == 0 and (tok == ")" or is_op(tok, "AND") or is_op(tok, "OR")):
+                break
+            depth += {"(": 1, ")": -1}.get(tok, 0)
+            leaf.append(tok)
+            i += 1
+        return "".join(leaf) if leaf and depth == 0 else None
+
+    tree = parse_or()
+    return tree if tree is not None and i == len(tokens) else None
+
+
+_MATCH_TREE = filter_tree(USER_STUDY_MATCH)
 
 
 def _unquoted_sql(sql: str) -> str | None:
@@ -229,12 +306,14 @@ def evaluate(
         if name in DENIED_TABLES:
             if own:
                 report.errors.append(f"{name}: denied object has policies {[p.name for p in own]}")
+            if engine in BYPASS_ENGINES:
+                report.errors.append(f"{name}: {engine} bypasses row policies; remove it")
             continue
         if name in IDENTITY_SCOPED_TABLES:
             shape = user_study_shape_error(engine, create_query)
             if shape:
                 report.errors.append(f"{name}: {shape}")
-            if not filters or any(f != _MATCH for f in filters):
+            if not own or any(filter_tree(p.select_filter) != _MATCH_TREE for p in own):
                 report.errors.append(f"{name}: policy must be exactly {USER_STUDY_MATCH}")
             if refresh_error:
                 report.errors.append(f"{name}: {refresh_error}")

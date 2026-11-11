@@ -14,7 +14,11 @@ the study row policies of its database. Using that same connection:
    only the identity predicate and the denied tables (``user_study_manual``,
    ``user_study``'s inner tables...) have none. ``user_study`` must be a
    refreshable materialized view without TO/APPEND; no other materialized
-   view is accepted.
+   view, dictionary, LiveView or WindowView is accepted under any name,
+   denied names included. DDL dictionaries are listed in system.tables
+   (engine Dictionary), which is how this check sees them: the runtime user
+   cannot read system.dictionaries (ACCESS_DENIED on 25.8 and 26.6), and a
+   dictionary configured outside SQL belongs to no database.
    Every row policy on the database must be ours and attached to this target
    (``sqlgen.policy_conflicts``, P4's ownership rule): a foreign PERMISSIVE
    policy is OR-ed with ours.
@@ -231,6 +235,8 @@ def _check(
     reasons: list[str] = []
     principals = {user} | set(enabled)
     applicable = [r.policy for r in rows if r.applies_to(principals)]
+    # DDL dictionaries appear here with engine Dictionary, so evaluate refuses
+    # them by engine; system.dictionaries is admin-only (see the docstring).
     objects = step(
         f"system.tables for {database}",
         lambda: fetch_objects(_SessionClient(s), database, dictionaries=False),

@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 import pytest
 
 from cbioportal_mcp import server
-from cbioportal_mcp.study_authz import sqlgen, startup_check
+from cbioportal_mcp.study_authz import catalog, sqlgen, startup_check
 from cbioportal_mcp.study_authz.startup_check import (
     PolicyCoverageError,
     check,
@@ -791,3 +791,30 @@ def test_other_materialized_view_still_refused_next_to_user_study():
     fake.tables["shadow"] = "MaterializedView"
     fake.creates["shadow"] = USER_STUDY_CREATE.replace("user_study", "shadow")
     refused(fake, "shadow: MaterializedView bypasses row policies")
+
+
+@pytest.mark.parametrize("engine", ["Dictionary", "LiveView", "MaterializedView", "WindowView"])
+@pytest.mark.parametrize("name", sorted(catalog.DENIED_TABLES))
+def test_denied_names_refuse_policy_bypassing_engines(name, engine):
+    # system.tables lists DDL dictionaries with engine Dictionary (25.8, 26.6),
+    # so the startup check sees them without reading system.dictionaries.
+    fake = FakeClickHouse()
+    fake.tables[name] = engine
+    if engine == "MaterializedView":
+        fake.creates[name] = (
+            f"CREATE MATERIALIZED VIEW {DB}.{name} REFRESH EVERY 5 MINUTE TO {DB}.data "
+            "(`email` String) AS SELECT '' AS email"
+        )
+    refused(fake, f"{name}: {engine} bypasses row policies")
+
+
+def test_identity_policy_without_outer_parentheses_refused():
+    fake = FakeClickHouse()
+    loose = (
+        "email = '' OR email = lowerUTF8(getSettingOrDefault('SQL_cbio_user', '')) "
+        "AND valid_until > now64(3)"
+    )
+    fake.policies = [
+        (p[0], p[1], loose, *p[3:]) if p[1] == "user_study" else p for p in fake.policies
+    ]
+    refused(fake, "user_study: policy must be exactly")
