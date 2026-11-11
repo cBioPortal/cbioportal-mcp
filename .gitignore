@@ -71,3 +71,6 @@ clickhouse-data/
 
 # Local configuration
 .env.localsql/clone_db.sql
+
+# MCP contract tier (scripts/contract/up.sh)
+.contract.env
