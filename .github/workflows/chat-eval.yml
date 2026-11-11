@@ -84,9 +84,9 @@ jobs:
       contents: read
       id-token: write # Bedrock via an AWS role assumed with GitHub OIDC
     # TODO: switch to a tag (e.g. @v1) once cBioPortal/cbioportal-mcp-qa#90 merges; keep qa-ref in sync.
-    uses: cBioPortal/cbioportal-mcp-qa/.github/workflows/chat-eval.yml@9262d62bfdba19ba5ede4ea76580f9891743b6d2
+    uses: cBioPortal/cbioportal-mcp-qa/.github/workflows/chat-eval.yml@8259c122e328c94b922f901cce39a0e4660f99df
     with:
-      qa-ref: 9262d62bfdba19ba5ede4ea76580f9891743b6d2
+      qa-ref: 8259c122e328c94b922f901cce39a0e4660f99df
       repeats: ${{ fromJSON(inputs.repeats || '2') }}
       agent-model: ${{ inputs.agent-model || 'haiku' }}
       max-pass-drop: ${{ fromJSON(inputs.max-pass-drop || '10') }}
