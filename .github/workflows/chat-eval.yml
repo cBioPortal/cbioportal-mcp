@@ -1,0 +1,96 @@
+# Behavioral regression test of this server as the chat (chat.cbioportal.org) uses it: an LLM agent answers the
+# 26-question subset of cbioportal-mcp-qa through this PR's image and through cbioportal/mcp:latest on the same
+# ClickHouse, an LLM judge grades both, and the check fails when this PR's answers are worse (pass rate, tool
+# errors, hallucinated study ids). It catches changes that break no tool call but degrade answers: the system
+# prompt (served as the chat's server instructions), tool descriptions, result formats, new tools.
+#
+# Runs on PRs that touch the server (src/, resources/, sql/, docker/, pyproject.toml, uv.lock), on any PR when
+# it gets the `mcp-behavior-change` label, nightly, and on demand. Required secrets: docs/chat-eval.md.
+# Workflow and benchmark: https://github.com/cBioPortal/cbioportal-mcp-qa (.github/workflows/chat-eval.yml).
+name: Chat eval
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, labeled]
+  schedule:
+    - cron: "17 7 * * *"
+  workflow_dispatch:
+    inputs:
+      repeats:
+        description: "Times each question is asked per server"
+        required: false
+        default: "2"
+      agent-model:
+        description: "Agent model key (haiku = Haiku 4.5, as prod runs; haiku-5.5 needs ANTHROPIC_API_KEY)"
+        required: false
+        default: haiku
+      max-pass-drop:
+        description: "Fail when the pass rate drops by more than this many points"
+        required: false
+        default: "10"
+      baseline-image:
+        description: "Image to compare against"
+        required: false
+        default: cbioportal/mcp:latest
+
+permissions:
+  contents: read
+
+jobs:
+  # A paths filter on `pull_request` would also drop the `labeled` event of a PR outside these paths, so the
+  # decision is made here.
+  changes:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    outputs:
+      run: ${{ steps.decide.outputs.run }}
+    steps:
+      - id: decide
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACTION: ${{ github.event.action }}
+          ADDED_LABEL: ${{ github.event.label.name }}
+          HAS_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'mcp-behavior-change') }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          if [ "$ACTION" = "labeled" ]; then
+            # Only the label that asks for the eval; other labels don't re-run it.
+            [ "$ADDED_LABEL" = "mcp-behavior-change" ] && run=true || run=false
+          elif [ "$HAS_LABEL" = "true" ]; then
+            run=true
+          elif gh api "repos/$GITHUB_REPOSITORY/pulls/$PR/files" --paginate --jq '.[].filename' \
+              | grep -qE '^(src/|resources/|sql/|docker/)|^pyproject\.toml$|^uv\.lock$'; then
+            run=true
+          else
+            run=false
+          fi
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+          echo "Chat eval: run=$run (event $ACTION)"
+
+  chat-eval:
+    needs: changes
+    # `changes` is skipped outside pull_request; always() keeps this job from being skipped with it.
+    if: always() && (github.event_name != 'pull_request' || needs.changes.outputs.run == 'true')
+    # A new push to the PR cancels the eval of the superseded commit.
+    concurrency:
+      group: chat-eval-${{ github.event.pull_request.number || github.ref }}
+      cancel-in-progress: true
+    permissions:
+      contents: read
+      id-token: write # Bedrock via an AWS role assumed with GitHub OIDC
+    # TODO: switch to a tag (e.g. @v1) once cBioPortal/cbioportal-mcp-qa#90 merges; keep qa-ref in sync.
+    uses: cBioPortal/cbioportal-mcp-qa/.github/workflows/chat-eval.yml@6ed3cd795c1706b252a65e33218dede4027fbd31
+    with:
+      qa-ref: 6ed3cd795c1706b252a65e33218dede4027fbd31
+      repeats: ${{ fromJSON(inputs.repeats || '2') }}
+      agent-model: ${{ inputs.agent-model || 'haiku' }}
+      max-pass-drop: ${{ fromJSON(inputs.max-pass-drop || '10') }}
+      baseline-image: ${{ inputs.baseline-image || 'cbioportal/mcp:latest' }}
+      # PRs from forks get no secrets: skip there; nightly and manual runs must have them.
+      require-secrets: ${{ github.event_name != 'pull_request' }}
+    secrets: inherit
