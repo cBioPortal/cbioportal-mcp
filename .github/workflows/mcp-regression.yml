@@ -12,10 +12,10 @@ permissions:
 jobs:
   mcp-regression:
     # TODO: switch uses and qa-ref to @v2 after the linked QA PR merges and v2 is tagged.
-    uses: cBioPortal/cbioportal-mcp-qa/.github/workflows/mcp-regression.yml@bdee0fde14533c6d5f6ba4b7d22f0e04c70cecaa
+    uses: cBioPortal/cbioportal-mcp-qa/.github/workflows/mcp-regression.yml@1782c5e2d8dfc94620173326ed2b6fd73fe3ff3c
     with:
       server: mcp
-      qa-ref: bdee0fde14533c6d5f6ba4b7d22f0e04c70cecaa
+      qa-ref: 1782c5e2d8dfc94620173326ed2b6fd73fe3ff3c
       http_path: /db/mcp
       librechat_headers: true
       fail_on_missing_secrets: ${{ github.event_name == 'workflow_dispatch' || github.base_ref != 'beta' }}
