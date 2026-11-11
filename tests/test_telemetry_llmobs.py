@@ -121,6 +121,10 @@ def _make_app():
     def boom() -> str:
         raise ValueError("kaboom")
 
+    @mcp.tool()
+    def error_result() -> dict:
+        return {"error_message": "permission denied"}
+
     return mcp.http_app(path="/mcp", stateless_http=False)
 
 
@@ -224,6 +228,18 @@ def test_erroring_tool_emits_llmobs_span_with_error(llmobs_events):
     assert event["meta"]["error"]["type"] == "fastmcp.exceptions.ToolError"
     assert "kaboom" in event["meta"]["error"]["message"]
     assert event["meta"]["output"]["value"] == "error"
+
+
+def test_returned_error_marks_llmobs_span_as_error(llmobs_events):
+    with TestClient(_make_app()) as client:
+        _, response = _call_tool(client, "error_result", {})
+    assert "permission denied" in response.text
+    (event,) = _tool_events(llmobs_events)
+    assert event["status"] == "error"
+    assert _tags(event)["error"] == "1"
+    assert event["meta"]["error"]["type"] == "tool_error_result"
+    assert event["meta"]["error"]["message"] == "permission denied"
+    assert "permission denied" in event["meta"]["output"]["value"]
 
 
 def test_each_tool_call_gets_its_own_span(llmobs_events):

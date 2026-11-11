@@ -14,6 +14,7 @@ from typing import Any, NamedTuple
 
 import mcp.types as mt
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
+from fastmcp.tools.tool import ToolResult
 from opentelemetry import context as otel_context
 from opentelemetry import trace
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
@@ -136,6 +137,7 @@ def _emit_tool_metrics(
     success: bool,
     client_kind: str,
     client_name: str | None,
+    error_kind: str | None = None,
 ) -> None:
     """Emit aggregate Datadog metrics for MCP tool call frequency and latency."""
     client = _get_dogstatsd_client()
@@ -148,6 +150,8 @@ def _emit_tool_metrics(
         "client_kind": client_kind,
         "client_name": client_name,
     }
+    if error_kind is not None:
+        tags["error_kind"] = error_kind
     try:
         client.increment("tool.calls", tags)
         client.distribution("tool.duration_ms", round(duration_ms, 3), tags)
@@ -642,6 +646,45 @@ def _llmobs_tool_span(
         return None
 
 
+def _tool_result_error(result: object) -> str | None:
+    """Find a top-level error payload without inspecting nested tool data.
+
+    FastMCP middleware receives ToolResult, before conversion to the MCP wire
+    result. Also accept CallToolResult and JSON text-only results from proxies.
+    Return only a bounded message for spans; never use it as a metric tag.
+    """
+    if isinstance(result, dict):
+        payloads = [result]
+    elif isinstance(result, (ToolResult, mt.CallToolResult)):
+        structured = (
+            result.structured_content
+            if isinstance(result, ToolResult)
+            else result.structuredContent
+        )
+        payloads = [structured]
+        if isinstance(structured, dict) and isinstance(structured.get("result"), dict):
+            payloads.append(structured["result"])
+        if structured is None:
+            for block in result.content:
+                if (
+                    isinstance(block, mt.TextContent)
+                    and len(block.text) < 64 * 1024
+                    and block.text.lstrip()[:1] == "{"
+                    and len(block.text.encode("utf-8")) < 64 * 1024
+                ):
+                    try:
+                        payloads.append(json.loads(block.text))
+                    except Exception:
+                        continue
+    else:
+        return None
+
+    for payload in payloads:
+        if isinstance(payload, dict) and payload.get("error_message"):
+            return str(payload["error_message"])[:1000]
+    return None
+
+
 def _llmobs_output(result) -> str:
     """Serialize the MCP result content to a compact string for the output field."""
     try:
@@ -655,11 +698,14 @@ def _llmobs_output(result) -> str:
         return str(result)
 
 
-def _llmobs_finish(span, result, *, error: BaseException | None = None) -> None:
+def _llmobs_finish(
+    span, result, *, error: BaseException | None = None, result_error: str | None = None
+) -> None:
     """Annotate and finish a LLMObs span returned by _llmobs_tool_span.
 
     ``error`` is the exception the tool call raised, if any; it is recorded on the
     span (error type/message/stack) so the LLMObs span has status "error".
+    Returned error payloads set the same error status without raising an exception.
     """
     if span is None:
         return
@@ -670,6 +716,10 @@ def _llmobs_finish(span, result, *, error: BaseException | None = None) -> None:
             span.set_exc_info(type(error), error, error.__traceback__)
             output = "error"
         else:
+            if result_error is not None:
+                span.error = 1
+                span.set_tag("error.type", "tool_error_result")
+                span.set_tag("error.message", result_error)
             output = _llmobs_output(result)
         LLMObs.annotate(span=span, output_data=output)
     except Exception as exc:
@@ -689,8 +739,8 @@ class TelemetryMiddleware(Middleware):
     OTel attributes:
       mcp.tool.name        Tool name
       network.client.ip    Original client IP from X-Forwarded-For (HTTP only)
-      mcp.tool.success     True on success, False when an exception propagates
-      error.type           Exception class name on failure
+      mcp.tool.success     False on an error payload or propagated exception
+      error.type           Exception class name or tool_error_result on failure
       mcp.client_kind       "oauth" | "librechat" | "direct" | "unknown". "oauth"
                             means the caller completed a real OAuth login and
                             enduser.id is a verified identity (see
@@ -761,6 +811,7 @@ class TelemetryMiddleware(Middleware):
         started = time.perf_counter()
         result: mt.CallToolResult | None = None
         error: BaseException | None = None
+        result_error: str | None = None
 
         try:
             with self._tracer.start_as_current_span(f"mcp.tool/{tool_name}") as span:
@@ -771,13 +822,23 @@ class TelemetryMiddleware(Middleware):
                     result = await call_next(context)
                     duration_ms = (time.perf_counter() - started) * 1000
                     span.set_attribute("mcp.tool.duration_ms", duration_ms)
-                    span.set_attribute("mcp.tool.success", True)
+                    try:
+                        result_error = _tool_result_error(result)
+                    except Exception as exc:
+                        logger.debug("Tool result error check failed for %s: %s", tool_name, exc)
+                        result_error = None
+                    span.set_attribute("mcp.tool.success", result_error is None)
+                    if result_error is not None:
+                        span.set_attribute("error.type", "tool_error_result")
+                        span.set_attribute("error.message", result_error)
+                        span.set_status(Status(StatusCode.ERROR, result_error))
                     _emit_tool_metrics(
                         tool_name=tool_name,
                         duration_ms=duration_ms,
-                        success=True,
+                        success=result_error is None,
                         client_kind=caller.client_kind,
                         client_name=caller.client_name,
+                        error_kind="result" if result_error is not None else None,
                     )
                     return result
                 except Exception as exc:
@@ -792,6 +853,7 @@ class TelemetryMiddleware(Middleware):
                         success=False,
                         client_kind=caller.client_kind,
                         client_name=caller.client_name,
+                        error_kind="exception",
                     )
                     raise
         except BaseException as exc:
@@ -800,7 +862,7 @@ class TelemetryMiddleware(Middleware):
         finally:
             # Always finish the LLMObs span (it is the active ddtrace span for this
             # task until then), on success, error, or cancellation.
-            _llmobs_finish(llmobs_span, result, error=error)
+            _llmobs_finish(llmobs_span, result, error=error, result_error=result_error)
 
     async def _trace_discovery(
         self,
