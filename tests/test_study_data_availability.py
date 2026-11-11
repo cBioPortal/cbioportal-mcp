@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import sys
+from collections import Counter
 
 import pytest
 from fastmcp import Client
@@ -361,44 +362,48 @@ def test_served_http_routes_require_explicit_classification(monkeypatch, transpo
     )
     app = server.mcp.http_app(transport=transport)
 
-    def paths(routes, prefix=""):
+    def signatures(routes, prefix=""):
         for route in routes:
             path = prefix + route.path
-            yield path
+            methods = getattr(route, "methods", None)
+            yield (
+                path,
+                type(route).__name__,
+                tuple(sorted(methods)) if methods is not None else None,
+            )
             if isinstance(route, Mount):
-                yield from paths(route.routes, path)
+                yield from signatures(route.routes, path)
 
-    # Literal classifications deliberately require review for every new HTTP
-    # surface, including routes added outside FastMCP's custom-route registry.
-    classified = {
-        "http": {
-            "mcp_middleware": {"/mcp"},
-            "health": {"/health"},
-            "login": {
-                "/authorize",
-                "/auth/callback",
-                "/consent",
-                "/register",
-                "/token",
-                "/.well-known/oauth-authorization-server",
-                "/.well-known/oauth-protected-resource/mcp",
-            },
-        },
-        "sse": {
-            "mcp_middleware": {"/sse", "/messages"},
-            "health": {"/health"},
-            "login": {
-                "/authorize",
-                "/auth/callback",
-                "/consent",
-                "/register",
-                "/token",
-                "/.well-known/oauth-authorization-server",
-                "/.well-known/oauth-protected-resource/sse",
-            },
-        },
+    # Literal classifications require review of every surface, including method
+    # changes and duplicate paths added outside FastMCP's custom-route registry.
+    expected = {
+        "http": [
+            # MCP middleware, health, then login routes.
+            ("/mcp", "Route", None),
+            ("/health", "Route", ("GET", "HEAD")),
+            ("/.well-known/oauth-authorization-server", "Route", ("GET", "HEAD", "OPTIONS")),
+            ("/authorize", "Route", ("GET", "HEAD", "POST")),
+            ("/token", "Route", ("OPTIONS", "POST")),
+            ("/register", "Route", ("OPTIONS", "POST")),
+            ("/.well-known/oauth-protected-resource/mcp", "Route", ("GET", "HEAD", "OPTIONS")),
+            ("/auth/callback", "Route", ("GET", "HEAD")),
+            ("/consent", "Route", ("GET", "HEAD", "POST")),
+        ],
+        "sse": [
+            # The opaque messages ASGI mount is itself a served surface.
+            ("/sse", "Route", ("GET", "HEAD")),
+            ("/messages", "Mount", None),
+            ("/health", "Route", ("GET", "HEAD")),
+            ("/.well-known/oauth-authorization-server", "Route", ("GET", "HEAD", "OPTIONS")),
+            ("/authorize", "Route", ("GET", "HEAD", "POST")),
+            ("/token", "Route", ("OPTIONS", "POST")),
+            ("/register", "Route", ("OPTIONS", "POST")),
+            ("/.well-known/oauth-protected-resource/sse", "Route", ("GET", "HEAD", "OPTIONS")),
+            ("/auth/callback", "Route", ("GET", "HEAD")),
+            ("/consent", "Route", ("GET", "HEAD", "POST")),
+        ],
     }
-    assert set(paths(app.routes)) == set().union(*classified[transport].values())
+    assert Counter(signatures(app.routes)) == Counter(expected[transport])
 
 
 @pytest.mark.asyncio
