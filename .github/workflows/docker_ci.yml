@@ -13,9 +13,24 @@ on:
         required: true
 
 jobs:
+  # Publishing gates: nothing is pushed or tagged (:latest, :beta, or a
+  # dispatched ref) unless the unit tests and the hermetic MCP contract tier
+  # (mcp-contract.yml: the built image against a fixture ClickHouse with prod's
+  # chat env) pass for the exact commit being published.
+  unit-tests:
+    uses: ./.github/workflows/unit-tests.yml
+    with:
+      ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.ref || github.sha }}
+
+  contract:
+    uses: ./.github/workflows/mcp-contract.yml
+    with:
+      ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.ref || github.sha }}
+
   # Per-architecture build on a native runner. arm64 uses ubuntu-24.04-arm
   # (free on public repos), avoiding the ~5-10x slowdown of QEMU emulation.
   build:
+    needs: [unit-tests, contract]
     strategy:
       fail-fast: false
       matrix:
@@ -27,9 +42,11 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.ref != '' && github.event.inputs.ref || github.ref }}
+          # github.sha, not github.ref: build exactly the commit the gates tested,
+          # even if the branch has moved since.
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.ref != '' && github.event.inputs.ref || github.sha }}
 
       - name: Set image tag
         shell: bash

@@ -8,12 +8,22 @@ on:
   push:
     branches:
       - beta
+  # docker_ci.yml calls this before publishing an image.
+  workflow_call:
+    inputs:
+      ref:
+        description: "Commit, branch or tag to test (default: the triggering SHA)"
+        type: string
+        required: false
+        default: ""
 
 permissions:
   contents: read
 
 concurrency:
-  group: unit-tests-${{ github.ref }}
+  # github.workflow is the caller's name under workflow_call, so the copy
+  # docker_ci.yml runs never cancels (or is cancelled by) the standalone run.
+  group: unit-tests-${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -23,7 +33,11 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
 
+      # 3.10, not the Dockerfile's 3.11 base: .python-version pins 3.10, so
+      # `uv sync` in the image installs and runs 3.10. Test what ships.
       - name: Set up uv
         uses: astral-sh/setup-uv@v5
         with:

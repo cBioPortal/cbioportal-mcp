@@ -136,6 +136,22 @@ docker build -t cbioportal-mcp -f docker/Dockerfile .
 docker run -i -p 8000:8000 cbioportal-mcp
 ```
 
+### Contract tests (gate image publishing)
+
+Every PR runs a hermetic, secret-free contract tier: it builds the image, runs
+it against a throwaway ClickHouse seeded with fixture data and `sql/` applied,
+using prod's chat config (`http` at `/db/mcp`, read-only `app_user`), and checks
+startup, the exact endpoint (no redirects), the `tools/list` snapshot, one call
+per tool, every `sql/` view, and the guide resources. `docker_ci.yml` publishes
+nothing unless it and the unit tests pass.
+
+```bash
+scripts/contract/run.sh                                  # needs Docker + uv
+UPDATE_SNAPSHOT=1 scripts/contract/run.sh -k snapshot    # after an intended tool change
+```
+
+See [docs/contract-tests.md](docs/contract-tests.md).
+
 ## License
 
 Apache License 2.0 - see [LICENSE](LICENSE) for details.
