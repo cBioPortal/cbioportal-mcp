@@ -28,7 +28,9 @@ permissions:
 concurrency:
   # github.workflow is the caller's name under workflow_call, so the copy
   # docker_ci.yml runs never cancels (or is cancelled by) the standalone run.
-  group: mcp-contract-${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  # inputs.ref is the SHA docker_ci.yml resolved: runs gating different commits
+  # (e.g. two concurrent dispatches) never cancel each other.
+  group: mcp-contract-${{ github.workflow }}-${{ github.event_name }}-${{ inputs.ref || github.ref }}
   cancel-in-progress: true
 
 jobs:

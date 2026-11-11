@@ -26,4 +26,4 @@ set -a
 # shellcheck disable=SC1090
 . "$CONTRACT_ENV_FILE"
 set +a
-uv run --frozen pytest tests/contract -v -p no:cacheprovider "$@"
+uv run --frozen --extra dev pytest tests/contract -v -p no:cacheprovider "$@"

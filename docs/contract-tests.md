@@ -55,7 +55,7 @@ scripts/contract/down.sh                     # remove them afterwards
 
 With the containers up, `.contract.env` holds the URL and container names, so
 you can rerun just the tests with
-`set -a; . ./.contract.env; set +a; uv run --frozen pytest tests/contract`.
+`set -a; . ./.contract.env; set +a; uv run --frozen --extra dev pytest tests/contract`.
 Without `CBIOPORTAL_MCP_CONTRACT_URL` set, `tests/contract` is skipped, so a
 plain `uv run pytest` stays hermetic.
 
