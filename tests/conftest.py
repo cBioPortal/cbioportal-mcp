@@ -38,3 +38,11 @@ def _fresh_rollout_pin():
 def _mock_startup_db_permissions(monkeypatch):
     """Unit tests use fake data; exercise the real permission gate separately."""
     monkeypatch.setattr("cbioportal_mcp.server.ensure_db_permissions", lambda config: None)
+
+
+@pytest.fixture(autouse=True)
+def _fresh_study_availability():
+    from cbioportal_mcp.study_authz import availability
+    availability.complete("checks_pending")
+    yield
+    availability.complete("checks_pending")

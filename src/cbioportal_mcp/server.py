@@ -38,6 +38,7 @@ from typing import Any  # noqa: E402
 
 import mcp.types as mt  # noqa: E402
 from fastmcp import FastMCP  # noqa: E402
+from starlette.responses import JSONResponse  # noqa: E402
 
 from cbioportal_mcp import (  # noqa: E402
     redaction,  # noqa: E402
@@ -53,6 +54,7 @@ from cbioportal_mcp.env import (  # noqa: E402 (after LLMObs.enable)
 )
 from cbioportal_mcp.identity import CombinedAuth, IdentityMiddleware  # noqa: E402
 from cbioportal_mcp.metadata_cache import MetadataCache  # noqa: E402 (after LLMObs.enable)
+from cbioportal_mcp.study_authz import availability  # noqa: E402
 from cbioportal_mcp.study_authz import request as study_request  # noqa: E402
 from cbioportal_mcp.telemetry import (  # noqa: E402
     TelemetryMiddleware,
@@ -355,6 +357,14 @@ def _validate_server_startup(transport=None):
 async def _startup_lifespan(server):
     logging.basicConfig(level=logging.INFO)
     _validate_server_startup(server.startup_transport)
+    # Filtering-on study lists are request scoped; never preload them anonymously.
+    if getattr(server, "preload_studies", False) and not study_request.enabled():
+
+        def warm():
+            _refresh_studies_cache_once()
+            _refresh_studies_cache_forever()
+
+        threading.Thread(target=warm, daemon=True).start()
     yield
 
 
@@ -369,6 +379,8 @@ class ConfiguredFastMCP(FastMCP):
         # wrapper cannot admit bridge or rollout-exempt requests.
         super().__init__(**kwargs, auth=None, lifespan=_startup_lifespan)
         self.middleware.insert(0, IdentityMiddleware(self))
+        self.middleware.insert(1, availability.StudyDataMiddleware())
+        self.custom_route("/health", methods=["GET"])(study_data_health)
 
     async def run_async(self, transport=None, show_banner=True, **kwargs):
         # FastMCP's own default is stdio; use our configured HTTP default.
@@ -402,6 +414,15 @@ class ConfiguredFastMCP(FastMCP):
         return app
 
 
+async def study_data_health(request):
+    # Degraded is a serving state: keep readiness for login/schema/OncoTree.
+    # Pending checks are not ready. Never expose check details here.
+    return JSONResponse(
+        {"study_data_available": availability.available(), "reason": availability.reason()},
+        status_code=503 if availability.reason() == "checks_pending" else 200,
+    )
+
+
 # Construction validates even when main() is bypassed by fastmcp dev / ASGI.
 mcp = ConfiguredFastMCP(
     name="cBioPortal MCP Server",
@@ -415,30 +436,42 @@ mcp = ConfiguredFastMCP(
 
 
 def enforce_study_policy_coverage(database: str) -> None:
-    """With CBIOPORTAL_MCP_STUDY_FILTERING=on, refuse to start (exit 2) unless
-    the connected ClickHouse user is covered by the study row policies
-    (study_authz/startup_check.py). With filtering off this does nothing."""
+    """Run once at startup; filtering failures disable study data until restart."""
     from cbioportal_mcp.study_authz import startup_check
 
+    if not study_request.enabled() or availability.reason() != "checks_pending":
+        return
+    settings = rollout.get()
+    if (settings.auth_enforcement, settings.public_db_check) != ("enforce", "enforce"):
+        availability.complete("rollout_not_enforced")
+        logger.critical(
+            "Study data unavailable: rollout_not_enforced "
+            "(filtering requires both switches=enforce)"
+        )
+        return
     try:
         result = startup_check.run_startup_check(database)
+        if result is None:
+            raise RuntimeError("check did not complete")
     except startup_check.PolicyCoverageError as e:
+        availability.complete("filtering_check_failed")
         logger.critical("❌ study filtering startup check failed: %s", startup_check.redact(e))
-        sys.exit(2)
-    except Exception as e:  # noqa: BLE001 - unexpected; fail closed, never echo raw text
+        return
+    except Exception as e:  # noqa: BLE001 - fail closed, never echo raw text
+        availability.complete("filtering_check_failed")
         logger.critical(
             "❌ study filtering startup check failed: unexpected %s", type(e).__name__
         )
-        sys.exit(2)
-    if result is not None:
-        logger.info(
-            "Study filtering: %s is covered by the row policies on %s (%s %s, %d objects)",
-            result.user,
-            database,
-            "user" if result.target_is_user else "role",
-            result.target,
-            result.objects,
-        )
+        return
+    availability.complete("ready")
+    logger.info(
+        "Study filtering: %s is covered by the row policies on %s (%s %s, %d objects)",
+        result.user,
+        database,
+        "user" if result.target_is_user else "role",
+        result.target,
+        result.objects,
+    )
 
 
 def main():
@@ -449,18 +482,8 @@ def main():
     # Get config
     config = get_mcp_config()
 
-    # Warm the list_studies cache immediately, without blocking server
-    # startup on the ClickHouse round trip, then keep it proactively
-    # refreshed on the same background thread for the life of the process
-    # (see STUDIES_CACHE_REFRESH_INTERVAL_SECONDS) -- so it's not just the
-    # first caller after startup that benefits, but every caller, since a
-    # live request should almost never be the one paying for the refetch.
-    def _warm_then_keep_studies_cache_fresh():
-        _refresh_studies_cache_once()
-        _refresh_studies_cache_forever()
-
-    if not study_request.enabled():
-        threading.Thread(target=_warm_then_keep_studies_cache_fresh, daemon=True).start()
+    # The lifespan starts the preload only after all startup checks.
+    mcp.preload_studies = True
 
     # Set up OpenTelemetry → Datadog agent (no-op if env vars not set or agent unreachable).
     # DogStatsD tool metrics can still use the same middleware when only the
@@ -1513,7 +1536,7 @@ def _all_studies_query() -> tuple[tuple[tuple[str, object], ...], ...]:
     list_studies() filters this single snapshot in Python by search/limit/
     verbose, so every call is a cache hit regardless of the search term used.
 
-    In steady state the background loop in main() keeps this fresh before
+    In steady state the background loop started by _startup_lifespan keeps this fresh before
     TTL ever expires (see STUDIES_CACHE_REFRESH_INTERVAL_SECONDS), so this
     on-demand path is normally only exercised on the very first call after a
     cold start, or if that background loop has stalled.
@@ -1538,6 +1561,7 @@ def _refresh_studies_cache_once() -> None:
     failed fetch is logged and left for the next cycle rather than raised,
     so one bad refresh doesn't take down the background loop.
     """
+    availability.require()
     if study_request.enabled():
         return
     try:
@@ -1550,8 +1574,8 @@ def _refresh_studies_cache_once() -> None:
 def _refresh_studies_cache_forever() -> None:
     """Background loop: proactively refetch the study cache every
     STUDIES_CACHE_REFRESH_INTERVAL_SECONDS for the life of the process. Runs
-    on a daemon thread started from main(); see that call site for how this
-    combines with the initial startup warm-up.
+    on a daemon thread started by _startup_lifespan after startup checks,
+    when main() requests preload; it follows the initial startup warm-up.
     """
     while True:
         time.sleep(STUDIES_CACHE_REFRESH_INTERVAL_SECONDS)

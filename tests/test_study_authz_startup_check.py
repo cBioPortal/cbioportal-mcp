@@ -461,14 +461,20 @@ def test_filtering_on_runs_the_check():
     assert calls == [DB]
 
 
-def test_server_exits_2_with_one_critical_line(monkeypatch, caplog):
+def test_server_degrades_with_one_critical_line(monkeypatch, caplog):
     def failing(_db):
         raise PolicyCoverageError("d: cancer_study: study table has only the default-deny")
 
     monkeypatch.setattr(startup_check, "run_startup_check", failing)
-    with caplog.at_level(logging.CRITICAL), pytest.raises(SystemExit) as exc:
+    monkeypatch.setenv(startup_check.FILTERING_ENV, "on")
+    from cbioportal_mcp import rollout
+    from cbioportal_mcp.study_authz import availability
+    monkeypatch.setenv(rollout.AUTH_ENFORCEMENT_ENV, "enforce")
+    monkeypatch.setenv(rollout.PUBLIC_DB_CHECK_ENV, "enforce")
+    rollout.initialize("on", local_dev=False)
+    with caplog.at_level(logging.CRITICAL):
         server.enforce_study_policy_coverage(DB)
-    assert exc.value.code == 2
+    assert not availability.available()
     [record] = [r for r in caplog.records if r.levelno == logging.CRITICAL]
     assert "cancer_study" in record.getMessage() and "\n" not in record.getMessage()
 

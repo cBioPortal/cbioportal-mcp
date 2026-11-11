@@ -1,6 +1,6 @@
 """Startup gate for study filtering: the MCP's own user must be covered.
 
-With ``CBIOPORTAL_MCP_STUDY_FILTERING=on`` the server refuses to start unless
+With ``CBIOPORTAL_MCP_STUDY_FILTERING=on`` the server blocks study data unless
 the ClickHouse user it connects as (``currentUser()``) is really filtered by
 the study row policies of its database. Using that same connection:
 

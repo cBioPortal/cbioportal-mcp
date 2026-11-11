@@ -1540,3 +1540,46 @@ def test_apply_refuses_previous_layout_and_migrate_replaces_it(server):
     finally:
         admin.command(f"DROP TABLE IF EXISTS {db}.mig_data SYNC")
     assert_filtered_and_checked()
+
+
+@pytest.mark.asyncio
+async def test_misconfigured_runtime_starts_degraded_and_mcp_returns_no_rows(server, monkeypatch):
+    """Real runtime permissions + P6 connection + MCP dispatch, no checker stubs."""
+    from fastmcp import Client
+    from mcp_clickhouse import mcp_env
+
+    from cbioportal_mcp import identity, rollout
+    from cbioportal_mcp import server as app
+    from cbioportal_mcp.authentication.permissions import ensure_db_permissions
+    from cbioportal_mcp.study_authz import availability, startup_check
+
+    for key, value in {
+        "CLICKHOUSE_HOST": "127.0.0.1", "CLICKHOUSE_PORT": str(server.port),
+        "CLICKHOUSE_USER": "mcp_direct", "CLICKHOUSE_PASSWORD": "pw",
+        "CLICKHOUSE_SECURE": "false", "CLICKHOUSE_VERIFY": "false",
+        "CLICKHOUSE_DATABASE": DB,
+        "CBIOPORTAL_MCP_STUDY_FILTERING": "on",
+        rollout.AUTH_ENFORCEMENT_ENV: "enforce", rollout.PUBLIC_DB_CHECK_ENV: "enforce",
+        startup_check.PUBLIC_DATABASES_ENV: "", "CBIOPORTAL_MCP_BRIDGE_SECRET": "test-bridge",
+    }.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setattr(mcp_env, "_CONFIG_INSTANCE", None)
+    monkeypatch.setattr(app, "ensure_db_permissions", ensure_db_permissions)
+    rollout.initialize("on", local_dev=False)
+    token = identity._CURRENT.set(identity.Decision(
+        identity.Identity("test", "tester@example.org", "bridge"), True, True
+    ))
+    try:
+        async with Client(app.mcp) as client:
+            assert availability.reason() == "filtering_check_failed"
+            for name, args in [
+                ("clickhouse_run_select_query", {"query": f"SELECT * FROM {DB}.cancer_study"}),
+                ("list_studies", {}),
+            ]:
+                result = await client.call_tool(name, args, raise_on_error=False)
+                assert result.is_error
+                assert result.structured_content is None
+                assert "Study data unavailable" in result.content[0].text
+            assert (await app.study_data_health(None)).status_code == 200
+    finally:
+        identity._CURRENT.reset(token)
