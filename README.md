@@ -136,6 +136,13 @@ docker build -t cbioportal-mcp -f docker/Dockerfile .
 docker run -i -p 8000:8000 cbioportal-mcp
 ```
 
+### Chat eval (CI)
+
+PRs that change the server also run a behavioral eval: an LLM agent answers a fixed question set through this
+PR's image and through `cbioportal/mcp:latest`, and the check fails if the answers got worse. See
+[docs/chat-eval.md](docs/chat-eval.md) for what it measures and the repository secrets it needs
+(`CLICKHOUSE_*`, and `ANTHROPIC_API_KEY` or an AWS role for Bedrock via OIDC).
+
 ## License
 
 Apache License 2.0 - see [LICENSE](LICENSE) for details.
