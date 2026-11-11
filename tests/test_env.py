@@ -33,14 +33,16 @@ def test_filtering_rejects_missing_and_invalid(monkeypatch, value):
 
 
 @pytest.mark.parametrize("value", ["on", " ON "])
-def test_filtering_on_requires_enforced_switches(monkeypatch, value):
-    """`on` is a valid value; it starts only with both rollout switches at enforce.
+def test_filtering_on_accepts_switches_with_pending_gate(monkeypatch, value):
+    """`on` is valid even without enforce; study data stays blocked until checked.
 
     The full precondition matrix lives in test_study_filtering_on_startup.py.
     """
     monkeypatch.setenv("CBIOPORTAL_MCP_STUDY_FILTERING", value)
-    with pytest.raises(ValueError, match="STUDY_FILTERING=on requires"):
-        validate_startup()
+    assert validate_startup() == ("on", "http")
+    from cbioportal_mcp.study_authz import availability
+
+    assert not availability.available()
     rollout._reset_for_tests()
     monkeypatch.setenv("CBIOPORTAL_MCP_AUTH_ENFORCEMENT", "enforce")
     monkeypatch.setenv("CBIOPORTAL_MCP_PUBLIC_DB_CHECK", "enforce")
@@ -105,7 +107,7 @@ def test_required_list_rejects_missing_and_empty_items(monkeypatch, value):
         required_list("TEST_USERS")
 
 
-@pytest.mark.parametrize("value, success", [(None, False), ("on", False), ("off", True)])
+@pytest.mark.parametrize("value, success", [(None, False), ("on", True), ("off", True)])
 def test_non_main_module_import_validates(tmp_path, value, success):
     env = dict(os.environ)
     if value is not None:

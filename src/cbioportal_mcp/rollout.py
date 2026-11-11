@@ -83,11 +83,6 @@ def parse(filtering: str, local_dev: bool) -> RolloutSettings:
     enforcement = _mode(AUTH_ENFORCEMENT_ENV, local_dev)
     users = _test_users(local_dev)
     public_db_check = _mode(PUBLIC_DB_CHECK_ENV, local_dev)
-    if filtering == "on" and (enforcement, public_db_check) != ("enforce", "enforce"):
-        raise ValueError(
-            f"CBIOPORTAL_MCP_STUDY_FILTERING=on requires {AUTH_ENFORCEMENT_ENV}=enforce "
-            f"and {PUBLIC_DB_CHECK_ENV}=enforce"
-        )
     if enforcement == "enforce" and users:
         logger.warning(
             "%s is ignored (%d entries) because %s=enforce",
