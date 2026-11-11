@@ -1457,7 +1457,9 @@ def test_apply_refuses_previous_layout_and_migrate_replaces_it(server):
         target_is_user=True,
     )
     grants = [Grant("hank@example.org", "TEAM_A", FUTURE)]
-    make_test_db(admin, source, params, {"priv_1": "TEAM_A"}, ["pub_a"], grants, log=lambda *_: None)
+    make_test_db(
+        admin, source, params, {"priv_1": "TEAM_A"}, ["pub_a"], grants, log=lambda *_: None
+    )
     q = f"SELECT cancer_study_identifier FROM {params.database}.cancer_study"
     hank = {"pub_a", "priv_1"}
 
