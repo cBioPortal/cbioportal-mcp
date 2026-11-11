@@ -16,7 +16,7 @@
     {
       "name": "[cBioPortal MCP] Elevated tool error rate by client surface",
       "type": "trace-analytics alert",
-      "query": "spans(\"service:cbioportal-mcp mcp.tool.success:false\").rollup(\"count\").by(\"mcp.client.name\").last(\"10m\") > 20",
+      "query": "spans(\"service:cbioportal-mcp @mcp.tool.success:false\").rollup(\"count\").by(\"mcp.client.name\").last(\"10m\") > 20",
       "message": "One MCP client surface (mcp.client.name: {{mcp.client.name.name}}) has produced more than 20 failed tool calls in the last 10 minutes.\n\nBecause errors are broken out by client surface, this points at whether the problem is surface-specific (e.g. LibreChat sending malformed headers, a Claude Code/Codex connector version mismatch) or systemic (ClickHouse/backend issue affecting everyone).\n\n{{#is_warning}}@slack-cbioportal-mcp-alerts{{/is_warning}}\n{{#is_alert}}@pagerduty-cbioportal-mcp{{/is_alert}}",
       "tags": ["service:cbioportal-mcp", "team:cbioportal-mcp"],
       "options": {
