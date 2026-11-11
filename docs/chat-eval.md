@@ -36,7 +36,7 @@ Only this server may differ. The gate likewise refuses runs where most turns fai
 `max-questions` (default 30, ≤60) questions and `max-answers` (default 130, ≤300) answers per server, checked
 before any model call. Paths must be repo-relative. `CHAT_SYSTEM_PROMPT` is never written to the results, only
 its hash. Logs, results and the summary are scrubbed of the prompt, ClickHouse credentials, API key and AWS
-credentials before they are printed, shown or uploaded, and nothing is uploaded if scrubbing fails. The scrubber also catches escaped, base64 and line-wrapped forms of each value. The servers' logs are scrubbed too. Every `CLICKHOUSE_*` value it is given must be at least 4 characters, or the upload is refused.
+credentials before they are printed, shown or uploaded, and nothing is uploaded if scrubbing fails. The scrubber also catches escaped, base64 and line-wrapped forms of each value. JSON results are scrubbed by structure: any string holding a secret under stacked encodings is replaced whole, and numbers and booleans are left alone. The servers' logs are scrubbed too. Every `CLICKHOUSE_*` value it is given must be at least 4 characters, or the upload is refused.
 
 It runs on PRs to `main` that touch `src/`, `resources/`, `sql/`, `docker/`, `pyproject.toml` or `uv.lock`. It
 also runs on any PR when it gets the `mcp-behavior-change` label, nightly (07:17 UTC), and from **Actions → Chat
