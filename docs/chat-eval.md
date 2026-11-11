@@ -28,6 +28,16 @@ The reusable workflow in [cbioportal-mcp-qa](https://github.com/cBioPortal/cbiop
    The job summary lists pass rates per run, per track and per repeat, and every question that regressed, with
    the judge's reason. Both runs (run.json, HTML report, transcripts) are uploaded as the `chat-eval-*` artifact.
 
+The gate also refuses to pass runs that aren't comparable. Both runs must match in model, provider, judge (for
+every grade), repeats, agent prompt hash and navigator, and in every question's text, history and references.
+Only this server may differ. The gate likewise refuses runs where most turns failed.
+
+**Cost caps and secrets.** Inputs are validated before anything runs: repeats 1–5, concurrency 1–6, at most
+`max-questions` (default 30, ≤60) questions and `max-answers` (default 130, ≤300) answers per server, checked
+before any model call. Paths must be repo-relative. `CHAT_SYSTEM_PROMPT` is never written to the results, only
+its hash. Logs, results and the summary are scrubbed of the prompt, ClickHouse credentials, API key and AWS
+credentials before they are printed, shown or uploaded, and nothing is uploaded if scrubbing fails.
+
 It runs on PRs to `main` that touch `src/`, `resources/`, `sql/`, `docker/`, `pyproject.toml` or `uv.lock`. It
 also runs on any PR when it gets the `mcp-behavior-change` label, nightly (07:17 UTC), and from **Actions → Chat
 eval → Run workflow** (repeats, model, threshold and baseline image are inputs). A new push to a PR cancels the
