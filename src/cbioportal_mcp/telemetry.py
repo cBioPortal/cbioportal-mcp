@@ -662,12 +662,19 @@ def _tool_result_error(result: object) -> str | None:
             else result.structuredContent
         )
         payloads = [structured]
+        if isinstance(structured, dict) and isinstance(structured.get("result"), dict):
+            payloads.append(structured["result"])
         if structured is None:
             for block in result.content:
-                if isinstance(block, mt.TextContent):
+                if (
+                    isinstance(block, mt.TextContent)
+                    and len(block.text) < 64 * 1024
+                    and block.text.lstrip()[:1] == "{"
+                    and len(block.text.encode("utf-8")) < 64 * 1024
+                ):
                     try:
                         payloads.append(json.loads(block.text))
-                    except (ValueError, TypeError):
+                    except Exception:
                         continue
     else:
         return None
@@ -815,7 +822,11 @@ class TelemetryMiddleware(Middleware):
                     result = await call_next(context)
                     duration_ms = (time.perf_counter() - started) * 1000
                     span.set_attribute("mcp.tool.duration_ms", duration_ms)
-                    result_error = _tool_result_error(result)
+                    try:
+                        result_error = _tool_result_error(result)
+                    except Exception as exc:
+                        logger.debug("Tool result error check failed for %s: %s", tool_name, exc)
+                        result_error = None
                     span.set_attribute("mcp.tool.success", result_error is None)
                     if result_error is not None:
                         span.set_attribute("error.type", "tool_error_result")

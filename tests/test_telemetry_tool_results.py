@@ -1,5 +1,6 @@
 """Returned tool errors must fail telemetry while preserving the MCP result."""
 
+import logging
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -37,6 +38,22 @@ from cbioportal_mcp import telemetry
         (ToolResult(content='[ {"error_message": "nested"} ]'), None),
         (ToolResult(structured_content={"rows": []}), None),
         ("pong", None),
+        (
+            ToolResult(structured_content={"result": {"error_message": "wrapped error"}}),
+            "wrapped error",
+        ),
+        (
+            mt.CallToolResult(
+                content=[], structuredContent={"result": {"error_message": "wrapped MCP error"}}
+            ),
+            "wrapped MCP error",
+        ),
+        (
+            mt.CallToolResult(
+                content=[mt.TextContent(type="text", text='[{"error_message":"nested"}]')]
+            ),
+            None,
+        ),
     ],
 )
 def test_tool_result_error_shapes(result, expected):
@@ -44,8 +61,8 @@ def test_tool_result_error_shapes(result, expected):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("outcome", ["result", "success", "exception"])
-async def test_tool_outcome_spans_metrics_and_return(monkeypatch, outcome):
+@pytest.mark.parametrize("outcome", ["result", "success", "exception", "check_failure"])
+async def test_tool_outcome_spans_metrics_and_return(monkeypatch, caplog, outcome):
     exporter = InMemorySpanExporter()
     provider = TracerProvider()
     provider.add_span_processor(SimpleSpanProcessor(exporter))
@@ -58,6 +75,11 @@ async def test_tool_outcome_spans_metrics_and_return(monkeypatch, outcome):
     )
     result = {"error_message": "permission denied"} if outcome == "result" else {"rows": []}
     exception = RuntimeError("connection failed")
+    if outcome == "check_failure":
+        monkeypatch.setattr(
+            telemetry, "_tool_result_error", Mock(side_effect=RecursionError("too deeply nested"))
+        )
+        caplog.set_level(logging.DEBUG, logger=telemetry.__name__)
 
     async def call_next(_):
         if outcome == "exception":
@@ -73,7 +95,9 @@ async def test_tool_outcome_spans_metrics_and_return(monkeypatch, outcome):
         assert await middleware.on_call_tool(context, call_next) is result
 
     (span,) = exporter.get_finished_spans()
-    success = outcome == "success"
+    success = outcome in {"success", "check_failure"}
+    if outcome == "check_failure":
+        assert "Tool result error check failed for query" in caplog.text
     assert span.attributes["mcp.tool.success"] is success
     tags = metrics.increment.call_args_list[0].args[1]
     assert tags["success"] == str(success).lower()
@@ -121,3 +145,31 @@ async def test_fastmcp_middleware_receives_structured_error_result(monkeypatch):
     assert metrics.increment.call_args_list[0].args[1]["success"] == "false"
     assert metrics.increment.call_args_list[1].args[0] == "tool.errors"
     assert metrics.increment.call_args_list[1].args[1]["error_kind"] == "result"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "[" * 100000 + "]" * 100000,
+        '[{"error_message":"nested"}]',
+        "plain text",
+        '{"error_message":"' + "x" * (64 * 1024) + '"}',
+        '{"error_message":"' + "é" * (32 * 1024) + '"}',
+        "{" + " " * (64 * 1024 - 2) + "}",
+    ],
+)
+def test_text_fallback_skips_non_objects_and_large_blocks(monkeypatch, text):
+    loads = Mock()
+    monkeypatch.setattr(telemetry.json, "loads", loads)
+    result = mt.CallToolResult(content=[mt.TextContent(type="text", text=text)])
+    assert telemetry._tool_result_error(result) is None
+    loads.assert_not_called()
+
+
+def test_text_fallback_swallows_parser_exceptions(monkeypatch):
+    loads = Mock(side_effect=RecursionError("too deeply nested"))
+    monkeypatch.setattr(telemetry.json, "loads", loads)
+    text = ' {"error_message":"bad"}'
+    result = mt.CallToolResult(content=[mt.TextContent(type="text", text=text)])
+    assert telemetry._tool_result_error(result) is None
+    loads.assert_called_once_with(text)
