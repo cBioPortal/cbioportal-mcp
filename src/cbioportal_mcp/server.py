@@ -48,6 +48,7 @@ from cbioportal_mcp.telemetry import (
 )
 from cbioportal_mcp.metadata_cache import MetadataCache  # noqa: E402 (after LLMObs.enable)
 from cbioportal_mcp import result_format  # noqa: E402 (after LLMObs.enable)
+from cbioportal_mcp import query_errors  # noqa: E402 (after LLMObs.enable)
 
 logger = logging.getLogger(__name__)
 
@@ -563,7 +564,9 @@ DEFAULT_SELECT_MAX_ROWS = min(result_format.default_max_rows(), MAX_SELECT_MAX_R
           Text cells over {result_format.max_cell_chars() or "unlimited"} chars end in
           "…[+N chars]"; "cut_cells" counts them per column and "cell_note" gives the
           substringUTF8 offsets that fetch the rest. Numbers and arrays are never cut.
-        - On failure: an object with a single field "error_message" containing a string describing the error.
+        - On failure: {{"error_message": the ClickHouse error, "hint": how to fix the query}}.
+          "hint" is present only for common errors. Fix the query and retry; if it keeps
+          failing, tell the user in plain words which part of the request could not be run.
 """
 )
 @run_off_event_loop
@@ -600,9 +603,8 @@ def clickhouse_run_select_query(
             }
         return {"rows": result}
     except Exception as e:
-        error_message = str(e)
-        logger.error(f"clickhouse_run_select_query: {error_message}")
-        return {"error_message": error_message}
+        logger.error(f"clickhouse_run_select_query: {e}")
+        return query_errors.select_query_error(e)
 
 
 @mcp.tool(
