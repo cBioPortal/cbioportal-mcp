@@ -82,6 +82,26 @@ a different target. Re-applying to the same target is safe. Run `check` after
 every `apply`, and let only one person or job administer row policies on the
 database at a time.
 
+### Migrating a database applied before the `user_study` view
+
+Older databases have a plain `user_study` table written by a separate
+`user_study_refresh` view (`REFRESH ... TO user_study`). That refresh's table
+swap could make filtered queries silently return no rows (measured: 31/400 on
+25.8, 23/400 on 26.6 during a forced refresh loop). `apply`, `check` and the
+MCP startup check now refuse that layout; `apply` says so in one line and
+changes nothing. To migrate:
+
+1. Pick the copy that serves **no traffic**: the inactive blue/green
+   database, or this database with study filtering off. Between the drop and
+   the create, filtered queries fail with `UNKNOWN_TABLE` (not silent zeros);
+   after the create and until the first refresh finishes, `user_study` is
+   empty, so filtered queries see no studies at all.
+2. `uv run python -m cbioportal_mcp.study_authz apply --migrate --database <protected_db> --public-group <PUBLIC_GROUP> --app-name <app_name> [--policy-user <mcp_user>]`
+   drops `user_study_refresh` and the `user_study` table, creates the
+   `user_study` refreshable view, re-applies the policies and waits for the
+   first refresh. `user_study_manual` is kept.
+3. `check`, then restart the MCP (its startup check re-runs) and switch traffic.
+
 ## 3. Grants for the MCP runtime user
 
 The runtime user (or, for a role target, the role) needs exactly:
@@ -115,7 +135,7 @@ The simplest safe setup is a dedicated user with nothing else.
 ## 4. Populate grants (`user_study`)
 
 The row policies read only `<protected_db>.user_study`. Never write it
-directly: the refreshable view `user_study_refresh` rebuilds it from
+directly: it is itself a refreshable materialized view that rebuilds itself from
 
 - the public studies (stored under the empty email `''`), and
 - `user_study_manual`, which an admin maintains:
@@ -129,7 +149,7 @@ DELETE FROM <protected_db>.user_study_manual
 WHERE email = 'tester-a@example.org' AND grant_key = 'TEAM_A';
 
 -- optional: apply now instead of at the next refresh
-SYSTEM REFRESH VIEW <protected_db>.user_study_refresh;
+SYSTEM REFRESH VIEW <protected_db>.user_study;
 ```
 
 `grant_key` is a study id, a whole `cancer_study.groups` entry, or `ALL` /
@@ -330,7 +350,8 @@ filtering-off SQL accepts fully qualified names such as
    FORMAT TSVRaw;
    ```
    (The database-wide policies have an empty `table`.) Optionally drop
-   `user_study_refresh`, `user_study` and `user_study_manual`, and the role.
+   `user_study` (the view; its inner tables go with it) and
+   `user_study_manual`, and the role.
 
 P4 only manages row policies it created. `apply` refuses a database that has
 row policies it did not create, so remove or migrate any such policy by hand

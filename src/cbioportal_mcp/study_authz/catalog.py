@@ -9,10 +9,13 @@ copier (``testdb.py``). Every object falls in exactly one bucket:
 - ``STUDY_AGNOSTIC_REFERENCE_TABLES``: identical for every study (genes,
   panels, OncoTree...). Explicit ``USING 1`` policy, since the database-wide
   default-deny would otherwise hide them.
-- ``IDENTITY_SCOPED_TABLES``: ``user_study``. Its policy limits rows to the
-  caller's own email plus the public ('') rows.
-- ``DENIED_TABLES``: cBioPortal's auth tables and the study-authz inputs /
-  refresh view. No policy, so the default-deny returns zero rows for them.
+- ``IDENTITY_SCOPED_TABLES``: ``user_study``, a refreshable materialized view
+  (no ``TO``). Its policy limits rows to the caller's own email plus the
+  public ('') rows.
+- ``DENIED_TABLES``: cBioPortal's auth tables and the study-authz inputs. No
+  policy, so the default-deny returns zero rows for them. ``user_study``'s
+  implicit inner tables (``user_study_inner_tables``) are denied the same way;
+  their names carry the view's uuid, so they are matched per database.
 - ``STUDY_SCOPED_VIEWS``: views from ``sql/4``, ``sql/5`` and ``sql/7``. The
   default-deny matches views too, so each gets a ``USING 1`` pass-through; the
   underlying tables' policies filter the rows because every view is
@@ -161,7 +164,6 @@ STUDY_AGNOSTIC_REFERENCE_TABLES: frozenset[str] = frozenset(
 
 USER_STUDY_TABLE = "user_study"
 USER_STUDY_MANUAL_TABLE = "user_study_manual"
-USER_STUDY_REFRESH_VIEW = "user_study_refresh"
 # Reserved for the future per-email JWT source (docs/study-authz.md); listed
 # now so adding it needs no catalog or policy change.
 USER_STUDY_JWT_TABLE = "user_study_jwt"
@@ -175,9 +177,23 @@ DENIED_TABLES: frozenset[str] = frozenset(
         "users",
         USER_STUDY_MANUAL_TABLE,
         USER_STUDY_JWT_TABLE,
-        USER_STUDY_REFRESH_VIEW,
     }
 )
+
+
+def user_study_inner_tables(user_study_uuid: str) -> frozenset[str]:
+    """Names of ``user_study``'s implicit inner table and its refresh staging copy.
+
+    A refreshable materialized view without ``TO`` stores its rows in
+    ``.inner_id.<view uuid>`` and builds each snapshot in
+    ``.tmp.inner_id.<view uuid>`` before swapping (25.8 and 26.6). Both are
+    denied: reading them directly would skip ``user_study``'s identity policy,
+    so they must keep only the default-deny.
+    """
+    if not user_study_uuid or user_study_uuid.strip("0-") == "":
+        return frozenset()
+    return frozenset({f".inner_id.{user_study_uuid}", f".tmp.inner_id.{user_study_uuid}"})
+
 
 STUDY_SCOPED_VIEWS: frozenset[str] = frozenset(
     {

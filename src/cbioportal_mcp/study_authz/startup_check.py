@@ -11,8 +11,14 @@ the study row policies of its database. Using that same connection:
    ``coverage.evaluate`` (the admin ``check``) then runs over exactly the
    policies that apply to the user and its enabled roles, so every study
    table, reference table and view needs its own policy, ``user_study`` has
-   only the identity predicate and the denied tables (``user_study_manual``...)
-   have none.
+   only the identity predicate and the denied tables (``user_study_manual``,
+   ``user_study``'s inner tables...) have none. ``user_study`` must be a
+   refreshable materialized view without TO/APPEND; no other materialized
+   view, dictionary, LiveView or WindowView is accepted under any name,
+   denied names included. DDL dictionaries are listed in system.tables
+   (engine Dictionary), which is how this check sees them: the runtime user
+   cannot read system.dictionaries (ACCESS_DENIED on 25.8 and 26.6), and a
+   dictionary configured outside SQL belongs to no database.
    Every row policy on the database must be ours and attached to this target
    (``sqlgen.policy_conflicts``, P4's ownership rule): a foreign PERMISSIVE
    policy is OR-ed with ours.
@@ -47,6 +53,7 @@ from cbioportal_mcp.study_authz.coverage import (
     evaluate,
     fetch_objects,
     fetch_policy_rows,
+    fetch_user_study_uuid,
 )
 from cbioportal_mcp.study_authz.grants import (
     STUDY_LINK_COLUMNS,
@@ -228,6 +235,8 @@ def _check(
     reasons: list[str] = []
     principals = {user} | set(enabled)
     applicable = [r.policy for r in rows if r.applies_to(principals)]
+    # DDL dictionaries appear here with engine Dictionary, so evaluate refuses
+    # them by engine; system.dictionaries is admin-only (see the docstring).
     objects = step(
         f"system.tables for {database}",
         lambda: fetch_objects(_SessionClient(s), database, dictionaries=False),
@@ -244,7 +253,19 @@ def _check(
         "policy ownership",
         lambda: policy_conflicts(_SessionClient(s), database, target),
     )
-    report = evaluate(objects, applicable, database, refresh_error=None, conflicts=conflicts)
+    # user_study's inner tables are named after its uuid; they must stay denied.
+    user_study_uuid = step(
+        f"system.tables uuid of {USER_STUDY_TABLE}",
+        lambda: fetch_user_study_uuid(_SessionClient(s), database),
+    )
+    report = evaluate(
+        objects,
+        applicable,
+        database,
+        refresh_error=None,
+        conflicts=conflicts,
+        user_study_uuid=user_study_uuid,
+    )
     reasons += report.errors
     reasons += [
         f"{name}: unclassified table/view (classify in catalog.py)" for name in report.unclassified

@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 import pytest
 
 from cbioportal_mcp import server
-from cbioportal_mcp.study_authz import sqlgen, startup_check
+from cbioportal_mcp.study_authz import catalog, sqlgen, startup_check
 from cbioportal_mcp.study_authz.startup_check import (
     PolicyCoverageError,
     check,
@@ -23,6 +23,13 @@ from cbioportal_mcp.study_authz.startup_check import (
 DB = "d"
 ROLE = "cbioportal_mcp_study_restricted"
 EMAIL = "probe@startup-probe.invalid"
+USER_STUDY_UUID = "0b5e4a3c-0000-4000-8000-00000000c0de"
+# user_study as system.tables stores the rendered template's view.
+USER_STUDY_CREATE = (
+    f"CREATE MATERIALIZED VIEW {DB}.user_study REFRESH EVERY 5 MINUTE (`email` String) "
+    "ENGINE = MergeTree ORDER BY (email, cancer_study_identifier) DEFINER = admin "
+    f"SQL SECURITY DEFINER AS SELECT '' AS email FROM {DB}.cancer_study"
+)
 
 
 @pytest.fixture(autouse=True)
@@ -58,15 +65,17 @@ class FakeClickHouse:
     other_study_columns: dict = field(default_factory=dict)
     other_policies: dict = field(default_factory=dict)
     settings_seen: list = field(default_factory=list)
+    creates: dict = field(default_factory=lambda: {"user_study": USER_STUDY_CREATE})
+    user_study_uuid: str = USER_STUDY_UUID
 
     def __post_init__(self):
         if not self.tables:
             self.tables = {
                 "cancer_study": "MergeTree",
                 "gene": "MergeTree",
-                "user_study": "MergeTree",
+                "user_study": "MaterializedView",
+                f".inner_id.{USER_STUDY_UUID}": "MergeTree",
                 "user_study_manual": "MergeTree",
-                "user_study_refresh": "MaterializedView",
                 "top_mutated_genes_in_study": "View",
             }
         if not self.policies:
@@ -125,11 +134,17 @@ class FakeClickHouse:
             return [[p[0], p[1], p[4], p[5], p[6]] for p in self.policies]
         if "system.columns" in sql:
             return [(name,) for name in self.other_study_columns.get(parameters["db"], [])]
+        if "system.tables" in sql and "toString(uuid)" in sql:
+            assert parameters == {"db": DB, "t": "user_study"}
+            return [[self.user_study_uuid]] if "user_study" in self.tables else []
         if "system.tables" in sql:
             if parameters["db"] != DB:
                 return self.other_objects.get(parameters["db"], [])
-            create = "CREATE VIEW d.v SQL SECURITY INVOKER AS SELECT 1"
-            return [[n, e, create if e == "View" else ""] for n, e in self.tables.items()]
+            view = "CREATE VIEW d.v SQL SECURITY INVOKER AS SELECT 1"
+            return [
+                [n, e, self.creates.get(n, view if e == "View" else "")]
+                for n, e in self.tables.items()
+            ]
         if "groupUniqArray" in sql:
             kind = "public" if "user_study" in sql else "visible"
             return [[self.counts.get(kind + "_ids", list(range(self.counts[kind])))]]
@@ -715,3 +730,97 @@ def test_grants_must_be_database_wide_without_column_lists(scope, privilege):
         assert reasons == []
     else:
         assert any("table/column-scoped grants" in reason for reason in reasons)
+
+
+@pytest.mark.parametrize(
+    ("create", "needle"),
+    [
+        (
+            f"CREATE MATERIALIZED VIEW {DB}.user_study REFRESH EVERY 5 MINUTE TO {DB}.data "
+            "(`email` String) DEFINER = admin SQL SECURITY DEFINER AS SELECT '' AS email",
+            "user_study: refreshable view writes TO another table",
+        ),
+        (
+            f"CREATE MATERIALIZED VIEW {DB}.user_study REFRESH EVERY 5 MINUTE APPEND "
+            "(`email` String) ENGINE = MergeTree ORDER BY email AS SELECT '' AS email",
+            "user_study: refreshable view uses APPEND",
+        ),
+        (
+            f"CREATE MATERIALIZED VIEW {DB}.user_study REFRESH EVERY 5 MINUTE APPEND TO {DB}.data "
+            "(`email` String) AS SELECT '' AS email",
+            "user_study: refreshable view uses APPEND",
+        ),
+        (
+            f"CREATE MATERIALIZED VIEW {DB}.user_study (`email` String) ENGINE = MergeTree "
+            "ORDER BY email AS SELECT '' AS email",
+            "user_study: materialized view is not refreshable",
+        ),
+    ],
+)
+def test_user_study_view_must_be_refreshable_without_to_or_append(create, needle):
+    fake = FakeClickHouse()
+    fake.creates["user_study"] = create
+    refused(fake, needle)
+
+
+def test_previous_user_study_layout_refused():
+    fake = FakeClickHouse()
+    fake.tables["user_study"] = "MergeTree"
+    fake.tables.pop(f".inner_id.{USER_STUDY_UUID}")
+    fake.tables["user_study_refresh"] = "MaterializedView"
+    fake.creates["user_study_refresh"] = (
+        f"CREATE MATERIALIZED VIEW {DB}.user_study_refresh REFRESH EVERY 5 MINUTE "
+        f"TO {DB}.user_study (`email` String) AS SELECT '' AS email"
+    )
+    message = refused(fake, "user_study: MergeTree table, not a refreshable materialized view")
+    assert "user_study_refresh: MaterializedView bypasses row policies" in message
+
+
+@pytest.mark.parametrize("prefix", [".inner_id.", ".tmp.inner_id."])
+def test_user_study_inner_tables_must_stay_denied(prefix):
+    inner = f"{prefix}{USER_STUDY_UUID}"
+    fake = FakeClickHouse()
+    fake.tables[inner] = "MergeTree"
+    assert check(fake, DB, EMAIL).target == ROLE
+    fake.policies.append(("cbioportal_mcp_x", inner, "1", 0, False, (ROLE,), ()))
+    refused(fake, f"{inner}: user_study's inner table has policies")
+
+
+def test_inner_table_of_another_view_is_unclassified():
+    fake = FakeClickHouse()
+    fake.tables[".inner_id.00000000-1111-4000-8000-000000000000"] = "MergeTree"
+    refused(fake, "unclassified table/view")
+
+
+def test_other_materialized_view_still_refused_next_to_user_study():
+    fake = FakeClickHouse()
+    fake.tables["shadow"] = "MaterializedView"
+    fake.creates["shadow"] = USER_STUDY_CREATE.replace("user_study", "shadow")
+    refused(fake, "shadow: MaterializedView bypasses row policies")
+
+
+@pytest.mark.parametrize("engine", ["Dictionary", "LiveView", "MaterializedView", "WindowView"])
+@pytest.mark.parametrize("name", sorted(catalog.DENIED_TABLES))
+def test_denied_names_refuse_policy_bypassing_engines(name, engine):
+    # system.tables lists DDL dictionaries with engine Dictionary (25.8, 26.6),
+    # so the startup check sees them without reading system.dictionaries.
+    fake = FakeClickHouse()
+    fake.tables[name] = engine
+    if engine == "MaterializedView":
+        fake.creates[name] = (
+            f"CREATE MATERIALIZED VIEW {DB}.{name} REFRESH EVERY 5 MINUTE TO {DB}.data "
+            "(`email` String) AS SELECT '' AS email"
+        )
+    refused(fake, f"{name}: {engine} bypasses row policies")
+
+
+def test_identity_policy_without_outer_parentheses_refused():
+    fake = FakeClickHouse()
+    loose = (
+        "email = '' OR email = lowerUTF8(getSettingOrDefault('SQL_cbio_user', '')) "
+        "AND valid_until > now64(3)"
+    )
+    fake.policies = [
+        (p[0], p[1], loose, *p[3:]) if p[1] == "user_study" else p for p in fake.policies
+    ]
+    refused(fake, "user_study: policy must be exactly")

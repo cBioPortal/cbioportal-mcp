@@ -868,7 +868,7 @@ CREATE ROW POLICY OR REPLACE cbioportal_mcp_view_top_sv_genes_in_study ON __CLIC
 CREATE ROW POLICY OR REPLACE cbioportal_mcp_view_treatment_counts_in_study ON __CLICKHOUSE_DATABASE__.treatment_counts_in_study AS PERMISSIVE FOR SELECT USING 1 TO __POLICY_TARGET__;
 CREATE ROW POLICY OR REPLACE cbioportal_mcp_view_treatment_regimens_in_study ON __CLICKHOUSE_DATABASE__.treatment_regimens_in_study AS PERMISSIVE FOR SELECT USING 1 TO __POLICY_TARGET__;
 
--- 6. Deliberately denied (no policy, default-deny): authorities, data_access_tokens, user_study_jwt, user_study_manual, user_study_refresh, users.
+-- 6. Deliberately denied (no policy, default-deny): authorities, data_access_tokens, user_study_jwt, user_study_manual, users.
 
 -- 7. Only now let the target read the database. With a role target, give the
 -- MCP user the role via `python -m cbioportal_mcp.study_authz user-sql` (role

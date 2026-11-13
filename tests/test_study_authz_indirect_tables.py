@@ -233,8 +233,8 @@ def server():
             ],
             column_names=["email", "grant_key", "valid_until"],
         )
-        srv.admin.command(f"SYSTEM REFRESH VIEW {DB}.user_study_refresh")
-        srv.admin.command(f"SYSTEM WAIT VIEW {DB}.user_study_refresh")
+        srv.admin.command(f"SYSTEM REFRESH VIEW {DB}.user_study")
+        srv.admin.command(f"SYSTEM WAIT VIEW {DB}.user_study")
         assert srv.admin.query(
             f"SELECT email, cancer_study_identifier FROM {DB}.user_study ORDER BY 1, 2"
         ).result_rows == [
@@ -244,10 +244,11 @@ def server():
             ("b@example.org", "B"),
             ("c@example.org", "C"),
         ]
-        # Keep the asserted grant snapshot fixed: non-APPEND refreshes can
-        # briefly expose an empty user_study while replacing its contents.
-        srv.admin.command(f"SYSTEM STOP VIEW {DB}.user_study_refresh")
-        srv.admin.command(f"SYSTEM WAIT VIEW {DB}.user_study_refresh")
+        # Keep the asserted grant snapshot fixed for the whole module.
+        # (user_study is itself the refreshable view, so its refresh no longer
+        # exposes an empty snapshot; stopping it still pins the grants.)
+        srv.admin.command(f"SYSTEM STOP VIEW {DB}.user_study")
+        srv.admin.command(f"SYSTEM WAIT VIEW {DB}.user_study")
         yield srv
     finally:
         subprocess.run(["docker", "rm", "-f", name], capture_output=True)
