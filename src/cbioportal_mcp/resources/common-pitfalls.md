@@ -288,11 +288,12 @@ SELECT * FROM clinical_data_derived
 WHERE attribute_name = 'AGE' AND attribute_value > '50';  -- String comparison!
 ```
 
-#### ✅ Correct: Cast to appropriate type
+#### ✅ Correct: Convert with toFloat64OrNull
+`attribute_value` is a String for every attribute. `CAST(attribute_value AS Float64)` and `toFloat64(attribute_value)` fail the whole query on a value such as `'NA'` or `''`; `toFloat64OrNull` returns NULL for them instead.
 ```sql
 -- CORRECT - Numeric comparison
 SELECT * FROM clinical_data_derived
-WHERE attribute_name = 'AGE' AND CAST(attribute_value AS Float64) > 50;
+WHERE attribute_name = 'AGE' AND toFloat64OrNull(attribute_value) > 50;
 ```
 
 ### 7. 🚨 NULL VALUE HANDLING
@@ -300,7 +301,7 @@ WHERE attribute_name = 'AGE' AND CAST(attribute_value AS Float64) > 50;
 #### ❌ Wrong: Ignoring NULL values
 ```sql
 -- INCORRECT - NULLs are ignored in calculations
-SELECT AVG(CAST(attribute_value AS Float64)) as avg_age
+SELECT AVG(toFloat64OrNull(attribute_value)) as avg_age
 FROM clinical_data_derived
 WHERE attribute_name = 'AGE';
 ```
@@ -309,9 +310,9 @@ WHERE attribute_name = 'AGE';
 ```sql
 -- CORRECT - Handle NULLs explicitly
 SELECT
-    AVG(CAST(attribute_value AS Float64)) as avg_age,
+    AVG(toFloat64OrNull(attribute_value)) as avg_age,
     COUNT(*) as total_records,
-    COUNT(CASE WHEN attribute_value IS NOT NULL THEN 1 END) as non_null_records
+    countIf(toFloat64OrNull(attribute_value) IS NOT NULL) as numeric_records
 FROM clinical_data_derived
 WHERE attribute_name = 'AGE';
 ```
@@ -777,7 +778,7 @@ When a query returns tabular data, keep columns aligned with values. Prefer JSON
 
 When a complex query fails:
 
-1. Identify the failing part if visible from the error message.
+1. Identify the failing part from the error message. `clickhouse_run_select_query` adds a `hint` to common errors that says how to fix the query; apply it before rewriting the query another way.
 2. Say which table, join, field, or filter could not be executed.
 3. Offer a smaller stepwise query.
 4. If possible, return partial results and name what is missing.

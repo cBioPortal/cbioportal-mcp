@@ -220,7 +220,7 @@ WITH patient_filters AS (
     SELECT DISTINCT
         patient_unique_id,
         MAX(CASE WHEN attribute_name = 'SEX' THEN attribute_value END) as sex,
-        MAX(CASE WHEN attribute_name = 'AGE' THEN CAST(attribute_value AS Float64) END) as age
+        MAX(CASE WHEN attribute_name = 'AGE' THEN toFloat64OrNull(attribute_value) END) as age
     FROM clinical_data_derived
     WHERE
         cancer_study_identifier = 'your_study_id'
@@ -258,12 +258,12 @@ WHERE
 -- Filter by tumor purity
 SELECT DISTINCT
     sample_unique_id,
-    CAST(attribute_value AS Float64) as tumor_purity
+    toFloat64OrNull(attribute_value) as tumor_purity
 FROM clinical_data_derived
 WHERE
     cancer_study_identifier = 'your_study_id'
     AND attribute_name = 'TUMOR_PURITY'
-    AND CAST(attribute_value AS Float64) >= 0.3;  -- >= 30% purity
+    AND toFloat64OrNull(attribute_value) >= 0.3;  -- >= 30% purity
 ```
 
 ## Advanced Filtering Patterns
