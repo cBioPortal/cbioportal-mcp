@@ -1411,18 +1411,36 @@ def _filter_studies(search: str | None, limit: int, verbose: bool) -> list[dict]
 
     if search:
         # Every word must appear somewhere ("TARGET neuroblastoma" matches "Pediatric
-        # Neuroblastoma (TARGET, 2018)"); rows containing the whole phrase come first.
+        # Neuroblastoma (TARGET, 2018)"). Search words that stand as whole words in
+        # the identifier, name or cancer type rank first, then whole words anywhere,
+        # then the same letters inside longer words; so a search for "ALL" lists
+        # all_stjude_2015 before studies whose description says "small cell" or
+        # "overall survival". Within each tier, rows containing the whole phrase
+        # come first.
         needle = search.lower().strip()
         tokens = re.findall(r"[a-z0-9]+", needle)
 
-        def haystack(row: dict) -> str:
-            return " ".join(
-                [row["cancer_study_identifier"], row["name"], row["type_of_cancer_id"], row["description"] or ""]
-            ).lower()
+        def words(text: str) -> set[str]:
+            # Identifiers split too: "all_stjude_2015" -> all, stjude, 2015.
+            return set(re.findall(r"[a-z0-9]+", text))
 
-        phrase = [row for row in rows if needle in haystack(row)]
-        words = [row for row in rows if needle not in haystack(row) and all(t in haystack(row) for t in tokens)]
-        rows = phrase + words
+        def rank(row: dict) -> tuple[int, bool] | None:
+            title = " ".join(
+                [row["cancer_study_identifier"], row["name"], row["type_of_cancer_id"]]
+            ).lower()
+            haystack = f"{title} {(row['description'] or '').lower()}"
+            if not all(t in haystack for t in tokens):
+                return None
+            not_phrase = needle not in haystack
+            if tokens and words(title).issuperset(tokens):
+                return 0, not_phrase
+            if tokens and words(haystack).issuperset(tokens):
+                return 1, not_phrase
+            return 2, not_phrase
+
+        ranked = [(key, row) for row in rows if (key := rank(row)) is not None]
+        # Stable sort: within a tier rows keep the cached order (largest studies first).
+        rows = [row for _, row in sorted(ranked, key=lambda pair: pair[0])]
 
     rows = rows[:limit]
 
@@ -1449,7 +1467,7 @@ def list_studies(search: str = None, limit: int = 20, verbose: bool = False) -> 
     Studies with pre-generated guides (in resources/study-guides/) will have has_guide=True.
 
     Args:
-        search: Optional words to filter studies by; every word must appear in the name, identifier, cancer type, or description (any order). Search one study at a time.
+        search: Optional words to filter studies by; every word must appear in the name, identifier, cancer type, or description (any order). Studies where the words appear as whole words in the name, identifier, or cancer type are listed first, so abbreviations such as "ALL" work. Search one study at a time.
         limit: Maximum number of studies to return (default 20, max 100)
         verbose: Include longer study description text. Defaults to false for faster first-connect discovery.
 
