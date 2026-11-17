@@ -432,6 +432,29 @@ def _extract_client_ip() -> str | None:
     return None
 
 
+BENCHMARK_CLIENT_NAME = "cbioportal-mcp-qa"
+
+
+def _benchmark_user_ids() -> frozenset[str]:
+    """User ids whose calls are benchmark runs: the cbioportal-mcp-qa id plus any
+    ids or emails listed in CBIOPORTAL_MCP_BENCHMARK_IDS (comma-separated), e.g. the
+    LibreChat account that benchmark runs through the Agents API use."""
+    extra = os.getenv("CBIOPORTAL_MCP_BENCHMARK_IDS", "")
+    return frozenset({BENCHMARK_CLIENT_NAME, *(v.strip() for v in extra.split(",") if v.strip())})
+
+
+def traffic_class(
+    user_id: str | None, user_email: str | None, client_name: str | None
+) -> str:
+    """"benchmark" for cbioportal-mcp-qa runs (by client name, user id or email), else "user"."""
+    if client_name == BENCHMARK_CLIENT_NAME:
+        return "benchmark"
+    ids = _benchmark_user_ids()
+    if (user_id and user_id in ids) or (user_email and user_email in ids):
+        return "benchmark"
+    return "user"
+
+
 class _CallerContext(NamedTuple):
     """Everything known about who is making the current MCP request."""
 
@@ -465,10 +488,14 @@ def _resolve_caller_context(context: MiddlewareContext[Any]) -> _CallerContext:
 
 def _tag_caller_attributes(span, caller: _CallerContext) -> None:
     """Set the identity attributes shared by every instrumented MCP span:
-    mcp.client_kind, enduser.id, enduser.email, mcp.client.name,
-    mcp.client.version, mcp.session.id, and network.client.ip.
+    mcp.client_kind, mcp.traffic_class, enduser.id, enduser.email,
+    mcp.client.name, mcp.client.version, mcp.session.id, and network.client.ip.
     """
     span.set_attribute("mcp.client_kind", caller.client_kind)
+    span.set_attribute(
+        "mcp.traffic_class",
+        traffic_class(caller.user_id, caller.user_email, caller.client_name),
+    )
     if caller.user_id:
         span.set_attribute("enduser.id", caller.user_id)
     if caller.user_email:
@@ -604,7 +631,10 @@ def _llmobs_tool_span(
         span = LLMObs.tool(name=f"mcp.tool.{tool_name}", session_id=session_id)
 
         # APM span tags keep the dotted names used by the OTel spans and APM queries.
-        apm_tags: dict[str, str] = {"mcp.client_kind": client}
+        apm_tags: dict[str, str] = {
+            "mcp.client_kind": client,
+            "mcp.traffic_class": traffic_class(user_id, user_email, client_name),
+        }
         if user_id:
             apm_tags["usr.id"] = user_id
         if client_name:
@@ -760,6 +790,9 @@ class TelemetryMiddleware(Middleware):
                             is calling, since mcp.client_kind alone only says
                             "not librechat" for all of them.
       mcp.client.version    Client app version from the same handshake.
+      mcp.traffic_class     "benchmark" for cbioportal-mcp-qa runs (clientInfo name,
+                            x-user-id, or an id/email in CBIOPORTAL_MCP_BENCHMARK_IDS),
+                            otherwise "user". Filter it out of usage counts.
       mcp.session.id        MCP transport session ID (HTTP/SSE only) — a stable
                             per-connection ID usable to count distinct sessions
                             even when no user identity is attached.
