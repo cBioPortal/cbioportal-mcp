@@ -98,6 +98,19 @@ class McpConfig:
         return value if value else None
 
     @property
+    def mcp_stateless_http(self) -> bool:
+        """Whether the HTTP transport runs stateless: no MCP session IDs, a fresh
+        transport per request. On by default.
+
+        Session IDs live in process memory, so a restart (or a second replica)
+        makes every open session unknown, and the SDK answers an unknown
+        session with 400 instead of the 404 that makes clients start a new
+        one. Set CLICKHOUSE_MCP_STATELESS_HTTP=false to keep sessions.
+        """
+        value = os.getenv("CLICKHOUSE_MCP_STATELESS_HTTP", "true").strip().lower()
+        return value not in ("0", "false", "no", "off")
+
+    @property
     def mcp_user(self) -> str:
         """Get the clickhouse user for which the MCP server is running for.
 
