@@ -311,6 +311,10 @@ mcp = FastMCP(
 def main():
     """Main entry point for the server."""
     logging.basicConfig(level=logging.INFO)
+    # httpx logs full request URLs at INFO, and the OAuth token checks put the
+    # caller's access token in the query string.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
     logger.info("🚀 Starting cBioPortal MCP Server with FastMCP...")
 
     # Get config
@@ -367,6 +371,8 @@ def main():
             }
             if config.mcp_http_path:
                 run_kwargs["path"] = config.mcp_http_path
+            if transport == TransportType.HTTP.value and config.mcp_stateless_http:
+                run_kwargs["stateless_http"] = True
             # Behind a TLS-terminating reverse proxy, uvicorn must trust
             # X-Forwarded-Proto or the trailing-slash 307 on /mcp will
             # downgrade https → http and strict clients (e.g. Claude
