@@ -120,6 +120,17 @@ def test_alteration_type_is_case_insensitive(db):
 # --- SQL building ------------------------------------------------------------
 
 
+def test_profiled_counts_wes_samples_only_for_gene_based_profile_types():
+    sql = _norm(domain_tools.build_profiled_counts_live_sql(("s",)))
+    guard = (
+        "if(p.profile_type IN ('MUTATION_EXTENDED', 'COPY_NUMBER_ALTERATION', "
+        "'COPY_NUMBER_ALTERATION_DISCRETE', 'STRUCTURAL_VARIANT', 'ANY_MUT_CNA_SV'), "
+        "COUNT(DISTINCT if(p.gene_panel_id = 'WES', p.sample_unique_id, NULL)), toUInt64(0))"
+    )
+    assert guard in sql
+    assert "GENERIC_ASSAY" not in domain_tools._GENE_BASED_PROFILE_TYPES
+
+
 def test_single_study_live_sql_uses_discrete_cna_and_drops_uncalled_svs():
     for sql in (
         domain_tools.build_alteration_frequency_live_sql(("TP53",), ("s",)),
@@ -354,6 +365,7 @@ def test_profiled_counts_description_is_not_a_gene_denominator():
     assert "get_alteration_frequency" in description
     assert "wes_samples is always 0" in description
     assert "non-panel genome-wide CNA / SV" in description
+    assert "0 for non-gene types" in description
     assert "case-list counts" in description
 
 

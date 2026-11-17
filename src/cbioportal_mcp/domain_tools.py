@@ -395,6 +395,18 @@ def build_frequency_by_cancer_type_live_sql(genes, alteration_type, preference, 
     """
 
 
+# Profile types whose samples are gene-based, so 'WES' (no gene panel, every gene
+# profiled) means whole-exome / genome-wide coverage. Other types (generic assay,
+# expression, ...) have no gene panel at all and would all read as 'WES'.
+_GENE_BASED_PROFILE_TYPES = (
+    "MUTATION_EXTENDED",
+    "COPY_NUMBER_ALTERATION",
+    "COPY_NUMBER_ALTERATION_DISCRETE",
+    "STRUCTURAL_VARIANT",
+    "ANY_MUT_CNA_SV",
+)
+
+
 def build_profiled_counts_live_sql(studies) -> str:
     s = _sql_list(studies)
     return f"""
@@ -434,7 +446,9 @@ def build_profiled_counts_live_sql(studies) -> str:
             SELECT p.cancer_study_identifier, p.profile_type,
                    COUNT(DISTINCT p.sample_unique_id),
                    COUNT(DISTINCT nullIf(sp.patient_unique_id, '')),
-                   COUNT(DISTINCT if(p.gene_panel_id = 'WES', p.sample_unique_id, NULL))
+                   if(p.profile_type IN {_sql_list(_GENE_BASED_PROFILE_TYPES)},
+                      COUNT(DISTINCT if(p.gene_panel_id = 'WES', p.sample_unique_id, NULL)),
+                      toUInt64(0))
             FROM profiled p
             LEFT JOIN sample_patient sp ON p.sample_unique_id = sp.sample_unique_id
             GROUP BY p.cancer_study_identifier, p.profile_type
@@ -638,7 +652,7 @@ def get_gene_frequency_by_cancer_type(
     COPY_NUMBER_ALTERATION_DISCRETE; and each stored type (MUTATION_EXTENDED,
     COPY_NUMBER_ALTERATION incl. log2, STRUCTURAL_VARIANT, MRNA_EXPRESSION, ...).
     wes_samples = samples whose profile covers all genes (whole exome, or a
-    non-panel genome-wide CNA / SV profile). Counts come from sample profiles
+    non-panel genome-wide CNA / SV profile); 0 for non-gene types. Counts come from sample profiles
     and can differ from the portal's case-list counts (cancer_study.*_sample_count).
     """
 )
