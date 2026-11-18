@@ -330,6 +330,23 @@ def _validate_server_startup(transport=None):
         "ClickHouse query pool: %d workers", query_concurrency.query_pool_size()
     )
 
+    enforce_public_db_check()
+    # On P10 failure, skip the separate permission check so an unreachable
+    # database still allows the degraded server to start.
+    if availability.reason() != "public_db_check_failed":
+        _validate_db_permissions(config)
+        if filtering == "off" and availability.reason() == "checks_pending":
+            availability.complete("ready")
+
+    enforce_study_policy_coverage(config.mcp_database)
+
+    logger.info(
+        "cBioPortal MCP startup: study_filtering=%s transport=%s", filtering, effective_transport
+    )
+    logger.info("cBioPortal MCP rollout switches: %s", rollout.summary(filtering))
+
+
+def _validate_db_permissions(config):
     from cbioportal_mcp.study_authz.startup_check import redact
 
     try:
@@ -345,20 +362,17 @@ def _validate_server_startup(transport=None):
         )
         sys.exit(2)
 
-    enforce_study_policy_coverage(config.mcp_database)
-
-    logger.info(
-        "cBioPortal MCP startup: study_filtering=%s transport=%s", filtering, effective_transport
-    )
-    logger.info("cBioPortal MCP rollout switches: %s", rollout.summary(filtering))
-
 
 @asynccontextmanager
 async def _startup_lifespan(server):
     logging.basicConfig(level=logging.INFO)
     _validate_server_startup(server.startup_transport)
     # Filtering-on study lists are request scoped; never preload them anonymously.
-    if getattr(server, "preload_studies", False) and not study_request.enabled():
+    if (
+        getattr(server, "preload_studies", False)
+        and not study_request.enabled()
+        and availability.available()
+    ):
 
         def warm():
             _refresh_studies_cache_once()
@@ -433,6 +447,22 @@ mcp = ConfiguredFastMCP(
         mt.Icon(src="https://avatars.githubusercontent.com/u/9876251?s=48&v=4", mimeType="image/png")
     ],
 )
+
+
+def enforce_public_db_check() -> None:
+    """Verify a filtering-off deployment once before admitting study data."""
+    from cbioportal_mcp.study_authz import public_db_check
+
+    if study_request.enabled() or availability.reason() != "checks_pending":
+        return
+    allowed_groups = rollout.get().public_db_allowed_groups
+    if allowed_groups is None:
+        return
+    try:
+        public_db_check.check(allowed_groups)
+    except public_db_check.PublicDatabaseError as e:
+        availability.complete("public_db_check_failed")
+        logger.critical("Study data unavailable: public database startup check failed: %s", e)
 
 
 def enforce_study_policy_coverage(database: str) -> None:

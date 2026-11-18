@@ -1,10 +1,4 @@
-"""Auth rollout switches, parsed once at startup and frozen thereafter.
-
-Authentication uses `auth_checks_apply`. `public_db_check_enforced` is reserved
-for the public-database check (P10), which is not built yet: today
-PUBLIC_DB_CHECK=enforce is only validated, logged and required for study
-filtering `on`. Each switch is temporary: see `EXPIRES`.
-"""
+"""Auth rollout switches, parsed once at startup and frozen thereafter."""
 
 import logging
 import os
@@ -20,6 +14,7 @@ logger = logging.getLogger(__name__)
 AUTH_ENFORCEMENT_ENV = "CBIOPORTAL_MCP_AUTH_ENFORCEMENT"
 AUTH_TEST_USERS_ENV = "CBIOPORTAL_MCP_AUTH_TEST_USERS"
 PUBLIC_DB_CHECK_ENV = "CBIOPORTAL_MCP_PUBLIC_DB_CHECK"
+PUBLIC_DB_ALLOWED_GROUPS_ENV = "CBIOPORTAL_MCP_PUBLIC_DB_ALLOWED_GROUPS"
 MODES = ("off", "enforce")
 
 # Remove the "off" path and the tester list once these dates pass.
@@ -37,6 +32,7 @@ class RolloutSettings:
     auth_enforcement: str
     auth_test_users: frozenset[str]
     public_db_check: str
+    public_db_allowed_groups: frozenset[str] | None = None
 
 
 @dataclass(frozen=True)
@@ -49,7 +45,12 @@ class _Pin:
     settings: RolloutSettings
 
 
-_SWITCH_VARS = (AUTH_ENFORCEMENT_ENV, AUTH_TEST_USERS_ENV, PUBLIC_DB_CHECK_ENV)
+_SWITCH_VARS = (
+    AUTH_ENFORCEMENT_ENV,
+    AUTH_TEST_USERS_ENV,
+    PUBLIC_DB_CHECK_ENV,
+    PUBLIC_DB_ALLOWED_GROUPS_ENV,
+)
 _PIN: Optional[_Pin] = None
 
 
@@ -91,7 +92,20 @@ def parse(filtering: str, local_dev: bool) -> RolloutSettings:
             AUTH_ENFORCEMENT_ENV,
         )
         users = frozenset()
-    return RolloutSettings(enforcement, users, public_db_check)
+    allowed_groups = None
+    if filtering == "off" and public_db_check == "enforce":
+        raw = os.getenv(PUBLIC_DB_ALLOWED_GROUPS_ENV)
+        if raw is None:
+            raise ValueError(
+                f"{PUBLIC_DB_ALLOWED_GROUPS_ENV} is required and must be explicitly set"
+            )
+        entries = raw.split(",") if raw else []
+        if "" in entries:
+            raise ValueError(
+                f"{PUBLIC_DB_ALLOWED_GROUPS_ENV} must be a comma-separated list without empty items"
+            )
+        allowed_groups = frozenset(entries)
+    return RolloutSettings(enforcement, users, public_db_check, allowed_groups)
 
 
 def initialize(filtering: str, local_dev: bool) -> RolloutSettings:
@@ -102,10 +116,16 @@ def initialize(filtering: str, local_dev: bool) -> RolloutSettings:
     changed switch env raises rather than silently keeping stale values.
     """
     global _PIN
-    raw_env = tuple(os.getenv(name) for name in _SWITCH_VARS)
+    settings = parse(filtering, local_dev) if _PIN is None else _PIN.settings
+    raw_env = tuple(
+        os.getenv(name)
+        if name != PUBLIC_DB_ALLOWED_GROUPS_ENV or settings.public_db_allowed_groups is not None
+        else None
+        for name in _SWITCH_VARS
+    )
     if _PIN is None:
-        _PIN = _Pin(filtering, local_dev, raw_env, parse(filtering, local_dev))
-        return _PIN.settings
+        _PIN = _Pin(filtering, local_dev, raw_env, settings)
+        return settings
     if _PIN.local_dev != local_dev:
         raise ValueError(
             f"rollout switches were pinned for {_context(_PIN.local_dev)} but this "
