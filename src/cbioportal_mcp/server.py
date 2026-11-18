@@ -1161,8 +1161,10 @@ def _study_not_in_deployment_message(study_id: str) -> str:
 
     lines += [
         "",
-        f"Do not tell the user that '{study_id}' does not exist. Say it is not in this "
-        f"deployment, and offer the candidates above or the other instances.",
+        f"Do not tell the user that '{study_id}' does not exist. If none of the above "
+        f"resolves it, say it is not found among the studies available to their account "
+        f"(it may not exist here, or they may not have access), and offer the candidates "
+        f"above or the other instances.",
     ]
     return "\n".join(lines)
 
