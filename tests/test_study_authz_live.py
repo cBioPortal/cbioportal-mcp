@@ -1575,6 +1575,7 @@ async def test_misconfigured_runtime_starts_degraded_and_mcp_returns_no_rows(
         monkeypatch.setenv(key, value)
     monkeypatch.setattr(mcp_env, "_CONFIG_INSTANCE", None)
     monkeypatch.setattr(app, "ensure_db_permissions", ensure_db_permissions)
+    rollout._reset_for_tests()
     rollout.initialize("on", local_dev=False)
     token = identity._CURRENT.set(identity.Decision(
         identity.Identity("test", "tester@example.org", "bridge"), True, True
