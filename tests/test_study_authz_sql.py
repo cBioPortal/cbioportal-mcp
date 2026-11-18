@@ -568,6 +568,36 @@ def test_materialized_views_other_than_user_study_still_bypass(create):
 
 
 @pytest.mark.parametrize("prefix", [".inner_id.", ".tmp.inner_id."])
+@pytest.mark.parametrize("engine", ["MergeTree", "SharedMergeTree", "ReplicatedMergeTree"])
+def test_user_study_inner_accepts_plain_mergetree_rewrites(prefix, engine):
+    objects, policies = _good_objects_and_policies()
+    objects[f"{prefix}{_UUID}"] = (engine, "")
+    assert _evaluate(objects, policies).ok
+
+
+@pytest.mark.parametrize(
+    "engine", ["ReplacingMergeTree", "SharedReplacingMergeTree", "Memory", "Distributed"]
+)
+def test_user_study_inner_rejects_other_engines(engine):
+    objects, policies = _good_objects_and_policies()
+    objects[f".inner_id.{_UUID}"] = (engine, "")
+    assert any("not MergeTree" in error for error in _evaluate(objects, policies).errors)
+
+
+@pytest.mark.parametrize("engine", ["SharedMergeTree", "ReplicatedMergeTree"])
+def test_user_study_shape_accepts_rewritten_engine_with_arguments(engine):
+    create = _USER_STUDY_CREATE.replace(
+        "ENGINE = MergeTree",
+        f"ENGINE = {engine}('/clickhouse/tables/{{uuid}}/{{shard}}', '{{replica}}')",
+    )
+    assert user_study_shape_error("MaterializedView", create) is None
+    objects, policies = _good_objects_and_policies()
+    objects["user_study"] = ("MaterializedView", create)
+    objects[f".inner_id.{_UUID}"] = (engine, "")
+    assert _evaluate(objects, policies).ok
+
+
+@pytest.mark.parametrize("prefix", [".inner_id.", ".tmp.inner_id."])
 def test_user_study_inner_tables_are_denied(prefix):
     objects, policies = _good_objects_and_policies()
     inner = f"{prefix}{_UUID}"

@@ -31,6 +31,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
+# ClickHouse rewrites MergeTree families on replicated servers and in Cloud.
+def mergetree_engines(family: str) -> frozenset[str]:
+    return frozenset(prefix + family + "MergeTree" for prefix in ("", "Replicated", "Shared"))
+
+
 @dataclass(frozen=True)
 class StudyIdentifier:
     """``column`` holds cancer_study.cancer_study_identifier."""
