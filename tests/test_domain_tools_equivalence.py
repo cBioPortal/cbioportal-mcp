@@ -762,3 +762,15 @@ def test_real_apply_order_tools_equal_recipe_for_public_cohorts(applied, monkeyp
                 assert tool == recipe, (gene, alt, pref)
                 nonempty += bool(tool)
     assert nonempty > 0
+
+
+def test_gene_parameter_views_echo_the_gene(ch):
+    client, _ = ch
+    gene = next(iter(fx.GENES))
+    for view, args in [
+        ("gene_mutation_frequency_in_study", f"study='study_panel', gene='{gene}'"),
+        ("gene_mutation_variants_in_study", f"study='study_panel', gene='{gene}'"),
+    ]:
+        rows = _rows(client, f"SELECT hugo_gene_symbol FROM {view}({args})")
+        assert rows, view
+        assert {r["hugo_gene_symbol"] for r in rows} == {gene}, view
