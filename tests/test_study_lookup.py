@@ -76,6 +76,8 @@ def test_miss_message_never_asserts_nonexistence(monkeypatch):
     assert "does not exist" in out  # only as the instruction NOT to say it
     assert "Do not tell the user that 'totally_made_up_study' does not exist." in out
     assert "did not match any study in the database" in out
+    assert "not found among the studies available to their account" in out
+    assert "not in this deployment" not in out
 
 
 def test_miss_message_lists_the_three_recoverable_causes(monkeypatch):
