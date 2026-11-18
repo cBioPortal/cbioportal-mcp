@@ -894,7 +894,7 @@ SELECT s FROM a WHERE sample_unique_id IN (SELECT sample_unique_id FROM b)
 
 For `sample_unique_id` / `cancer_study_identifier` use `clinical_data_derived`, `genomic_event_derived` or `genetic_alteration_derived`; the raw `sample` table has neither. When unsure, call `clickhouse_list_table_columns` once instead of retrying.
 
-**Table-function output columns.** `gene_mutation_frequency_in_study(study=..., gene=...)` returns `cancer_type, altered_samples, profiled_samples, frequency_pct` and no `hugo_gene_symbol`, because the gene is a parameter. To compare several genes, call it once per gene (or use `get_alteration_frequency` / `get_top_altered_genes`) and add the gene as a literal: `SELECT 'TP53' AS gene, * FROM gene_mutation_frequency_in_study(study='x', gene='TP53')`.
+**Table-function output columns.** The gene-parameter views (`gene_mutation_frequency_in_study`, `gene_mutation_frequency_in_studies`, `gene_mutation_frequency_by_cancer_type`, `gene_alteration_frequency_by_cancer_type`, `gene_mutation_variants_in_study`) echo the gene as `hugo_gene_symbol`, so several genes can be stacked with `UNION ALL`. Output columns are those documented in each view's header comment; `top_*` views return one row per gene with `hugo_gene_symbol`.
 
 **Do not call the tool by a guessed name.** The tool is `clickhouse_run_select_query` exactly as listed; suffixed or prefixed variants fail with "Tool ... not found". Issue each tool call once; do not edit a call while it is running.
 
