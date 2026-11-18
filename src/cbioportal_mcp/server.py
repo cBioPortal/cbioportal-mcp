@@ -546,6 +546,11 @@ DEFAULT_SELECT_MAX_ROWS = min(result_format.default_max_rows(), MAX_SELECT_MAX_R
     description=f"""
     Execute a ClickHouse SQL SELECT query.
 
+    ClickHouse dialect: function names are case-sensitive (median, quantile, countIf, toFloat64OrNull;
+    not MEDIAN/QUANTILE/COUNTIF/TRY_CAST); use UNION ALL, never bare UNION; no correlated subqueries
+    (use JOIN or IN); no quoted aliases (AS 'x'); check columns with clickhouse_list_table_columns
+    before guessing. Details: cbioportal://common-pitfalls#24
+
     For complex analysis patterns, consult these query guides:
     - cbioportal://mutation-frequency-guide - Gene mutation frequency calculations with proper denominators
     - cbioportal://clinical-data-guide - Patient vs sample-level clinical data queries

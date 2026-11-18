@@ -858,6 +858,46 @@ A well-formed query that returns 0 rows or a count of 0 is often the correct res
 3. Do not re-derive the same count with different join forms, hex-dump ids, or re-count each side repeatedly. If three differently written queries agree, stop and answer.
 4. Background claims in a guide such as "~96% of patients are also in study X" describe the cohorts as a whole, not any one subtype, so they do not contradict a 0 for a subtype.
 
+### 24. 🚨 CLICKHOUSE DIALECT: FUNCTION NAMES, SUBQUERIES, UNION, ALIASES
+
+Most failed queries are SQL habits from other databases. ClickHouse function names are **case-sensitive** and a few common ones are spelled differently.
+
+| Don't write | Write |
+|-------------|-------|
+| `MEDIAN(x)`, `QUANTILE(0.5)(x)` | `median(x)`, `quantile(0.5)(x)` (lowercase) |
+| `COUNTIF(c)`, `COUNT_IF(c)`, `COUNTDistinct(x)` | `countIf(c)`, `uniqExact(x)` or `COUNT(DISTINCT x)` |
+| `TRY_CAST(x AS Float64)` | `toFloat64OrNull(x)` (also `toInt64OrNull`, `toDateOrNull`) |
+| `GROUP_CONCAT(x)`, `groupConcat(x, ', ')` | `arrayStringConcat(groupArray(x), ', ')` |
+| `arrayLength(a)` | `length(a)` |
+| `substringBefore(s, '-')`, `SUBSTRING_BEFORE` | `splitByChar('-', s)[1]` |
+| `'Quoted Alias'` in `AS 'Total'` | `AS Total` or a double-quoted/backticked alias: ``AS `Total Samples` `` |
+| `UNION` | `UNION ALL` (bare `UNION` is rejected) |
+| `ORDER BY` inside `groupArray(...)`/`arrayAgg` | `groupArray(x)` then `arraySort(...)`, or `arraySort(arrayZip(...))` |
+
+**Correlated subqueries are not supported.** A subquery that references a column of the outer query (`WHERE cd1.sample_unique_id = outer.sample_unique_id`, `EXISTS (SELECT ... WHERE x = outer.x)`) fails with "Resolved identifier ... in parent scope ... with correlated columns". Rewrite as a `JOIN` or `IN`:
+
+```sql
+-- INCORRECT
+SELECT s FROM a WHERE EXISTS (SELECT 1 FROM b WHERE b.sample_unique_id = a.sample_unique_id)
+-- CORRECT
+SELECT s FROM a WHERE sample_unique_id IN (SELECT sample_unique_id FROM b)
+```
+
+**Alias columns must exist on that table.** The mistakes seen most often, with the real columns:
+
+| Table | Real columns | Commonly invented |
+|-------|--------------|-------------------|
+| `sample` | `internal_id`, `stable_id`, `patient_id` | `cancer_study_id`, `sample_id`, `sample_unique_id`, `patient_unique_id` |
+| `genetic_profile` | `genetic_profile_id`, `stable_id`, `cancer_study_id`, `genetic_alteration_type`, `datatype`, `name` | `cancer_study_identifier`, `profile_name`, `molecular_profile_id` |
+| `genetic_alteration_derived` | `sample_unique_id`, `cancer_study_identifier`, `hugo_gene_symbol`, `profile_type`, `alteration_value` | `sample_id`, `protein_change` |
+| `cancer_study` | `cancer_study_id`, `cancer_study_identifier`, `type_of_cancer_id`, `sample_count`, ... | `type_of_cancer`, `patient_count` |
+
+For `sample_unique_id` / `cancer_study_identifier` use `clinical_data_derived`, `genomic_event_derived` or `genetic_alteration_derived`; the raw `sample` table has neither. When unsure, call `clickhouse_list_table_columns` once instead of retrying.
+
+**Table-function output columns.** `gene_mutation_frequency_in_study(study=..., gene=...)` returns `cancer_type, altered_samples, profiled_samples, frequency_pct` and no `hugo_gene_symbol`, because the gene is a parameter. To compare several genes, call it once per gene (or use `get_alteration_frequency` / `get_top_altered_genes`) and add the gene as a literal: `SELECT 'TP53' AS gene, * FROM gene_mutation_frequency_in_study(study='x', gene='TP53')`.
+
+**Do not call the tool by a guessed name.** The tool is `clickhouse_run_select_query` exactly as listed; suffixed or prefixed variants fail with "Tool ... not found". Issue each tool call once; do not edit a call while it is running.
+
 ## Validation Checklist
 
 Before trusting your results, ask:
