@@ -289,7 +289,7 @@ WHERE attribute_name = 'AGE' AND attribute_value > '50';  -- String comparison!
 ```
 
 #### ✅ Correct: Convert with toFloat64OrNull
-`attribute_value` is a String for every attribute. `CAST(attribute_value AS Float64)` and `toFloat64(attribute_value)` fail the whole query on a value such as `'NA'` or `''`; `toFloat64OrNull` returns NULL for them instead.
+`attribute_value` is a String for every attribute. `CAST(attribute_value AS Float64)` and `toFloat64(attribute_value)` fail the whole query on a value such as `'NA'` or `''`; `toFloat64OrNull` returns NULL for them instead, so those rows silently drop out of comparisons and averages. Count them with `countIf(toFloat64OrNull(attribute_value) IS NULL)` and report how many were excluded.
 ```sql
 -- CORRECT - Numeric comparison
 SELECT * FROM clinical_data_derived

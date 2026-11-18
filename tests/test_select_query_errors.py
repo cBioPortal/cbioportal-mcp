@@ -94,6 +94,7 @@ def _run_failing_query(monkeypatch, message: str) -> dict:
             ),
             "GROUP BY",
         ),
+        (CANNOT_PARSE, "tell the user how many were excluded"),
         (CANNOT_PARSE, "toFloat64OrNull"),
         (
             _ch_error(

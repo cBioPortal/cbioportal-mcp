@@ -44,8 +44,10 @@ _WRONG_TYPE = (
     "A value has the wrong type for how it is used. clinical_data_derived.attribute_value "
     "is a String for every attribute, numeric ones included: convert it with "
     "toFloat64OrNull(attribute_value), which returns NULL for values such as 'NA' "
-    "(CAST and toFloat64 fail on them). Both branches of if/CASE, and both sides of a "
-    "comparison or JOIN key, need compatible types."
+    "(CAST and toFloat64 fail on them). Those rows then drop out of filters and "
+    "averages silently, so also count them with countIf(toFloat64OrNull(attribute_value) "
+    "IS NULL) and tell the user how many were excluded. Both branches of if/CASE, and "
+    "both sides of a comparison or JOIN key, need compatible types."
 )
 _TOO_EXPENSIVE = (
     "Filter by cancer_study_identifier (and gene or attribute) as early as possible, "
