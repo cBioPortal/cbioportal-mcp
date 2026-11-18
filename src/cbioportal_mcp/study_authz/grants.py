@@ -16,6 +16,7 @@ from cbioportal_mcp.study_authz.catalog import (
     StudyIdentifier,
     Via,
     classified_names,
+    mergetree_engines,
 )
 from cbioportal_mcp.study_authz.coverage import PolicyRow, _squash, view_sql_security
 from cbioportal_mcp.study_authz.sqlgen import OWNED_POLICY_PREFIX, validate_identifier
@@ -241,8 +242,7 @@ def selected_databases(held: HeldGrants) -> set[str]:
 PLAIN_STORAGE_ENGINES = frozenset(
     {"Memory", "Log", "TinyLog", "StripeLog", "Null", "Set", "Join"}
 ) | frozenset(
-    prefix + family + "MergeTree"
-    for prefix in ("", "Replicated", "Shared")
+    engine
     for family in (
         "",
         "Replacing",
@@ -253,6 +253,7 @@ PLAIN_STORAGE_ENGINES = frozenset(
         "Graphite",
         "Coalescing",
     )
+    for engine in mergetree_engines(family)
 )
 CATALOG_NAMES = frozenset(classified_names())
 # Include catalog linkage columns: renamed mutation copies retain

@@ -40,6 +40,7 @@ from cbioportal_mcp.study_authz.catalog import (
     STUDY_SCOPED_TABLE_PATHS,
     STUDY_SCOPED_VIEWS,
     USER_STUDY_TABLE,
+    mergetree_engines,
     user_study_inner_tables,
 )
 from cbioportal_mcp.study_authz.sqlgen import (
@@ -300,7 +301,7 @@ def evaluate(
                 report.errors.append(
                     f"{name}: user_study's inner table has policies {[p.name for p in own]}"
                 )
-            if engine != "MergeTree":
+            if engine not in mergetree_engines(""):
                 report.errors.append(f"{name}: user_study's inner table is {engine}, not MergeTree")
             continue
         if name in DENIED_TABLES:
