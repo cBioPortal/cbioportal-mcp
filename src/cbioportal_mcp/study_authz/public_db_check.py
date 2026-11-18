@@ -27,6 +27,15 @@ def check(allowed_groups: frozenset[str]) -> None:
             raise PublicDatabaseError(f"{rule}: could not verify") from None
 
     try:
+        # Checked first: a row policy can hide rows from the checks below. The
+        # restricted runtime user needs SHOW ROW POLICIES ON <db>.* to read
+        # system.row_policies; without it the read fails and so does the check.
+        # With it, policies targeting any user or role are visible.
+        if found(
+            "row policies",
+            "SELECT EXISTS(SELECT 1 FROM system.row_policies WHERE database = currentDatabase())",
+        ):
+            raise PublicDatabaseError("row policies exist on the database")
         if found(
             "cancer_study.public",
             "SELECT EXISTS(SELECT 1 FROM cancer_study WHERE public = 0)",

@@ -106,11 +106,13 @@ tester emails. These switches are temporary and expire on 2027-06-30 (see
 With study filtering `off` and `CBIOPORTAL_MCP_PUBLIC_DB_CHECK=enforce`,
 the public-database check (P10) runs once per startup against the configured
 database. It checks for explicitly private studies (`cancer_study.public = 0`),
-study group entries outside the allowlist, and rows in `authorities` if that
-table exists. Set `CBIOPORTAL_MCP_PUBLIC_DB_ALLOWED_GROUPS` explicitly to a
-comma-separated list, or to an empty string if no groups are allowed. Derive
-the public portal's list from `SELECT DISTINCT` over the individual group
-entries on a verified public copy. Entries are case-insensitive and whitespace
+study group entries outside the allowlist, rows in `authorities` if that
+table exists, and any row policy on the database (the runtime user needs
+`SHOW ROW POLICIES ON <db>.*` to read `system.row_policies`). Set
+`CBIOPORTAL_MCP_PUBLIC_DB_ALLOWED_GROUPS` explicitly to a comma-separated list,
+or to an empty string if no groups are allowed. Derive the public portal's list
+from `SELECT DISTINCT` over the individual group entries on a verified public
+copy. Entries are case-insensitive and whitespace
 is significant. A failed check or database error blocks study data, reports
 `study_data_available=false` at `/health`, and triggers the Datadog monitor
 **Study data blocked**. See the [rollout guide](docs/study-filtering-rollout.md#public-database-check-p10)

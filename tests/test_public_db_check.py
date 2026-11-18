@@ -34,13 +34,15 @@ def test_allowlist_is_strict(enforced, monkeypatch, value):
 @pytest.mark.parametrize(
     "responses, rule",
     [
-        ([0, 0, 0], None),
-        ([0, 0, 1, 0], None),
-        ([1], "cancer_study.public"),
-        ([0, 1], "cancer_study.groups"),
-        ([0, 0, 1, 1], "authorities"),
-        ([0, RuntimeError("sensitive connection details")], "cancer_study.groups"),
-        ([0, 0, RuntimeError("sensitive connection details")], "authorities"),
+        ([0, 0, 0, 0], None),
+        ([0, 0, 0, 1, 0], None),
+        ([1], "row policies"),
+        ([RuntimeError("sensitive connection details")], "row policies"),
+        ([0, 1], "cancer_study.public"),
+        ([0, 0, 1], "cancer_study.groups"),
+        ([0, 0, 0, 1, 1], "authorities"),
+        ([0, 0, RuntimeError("sensitive connection details")], "cancer_study.groups"),
+        ([0, 0, 0, RuntimeError("sensitive connection details")], "authorities"),
         (None, "connection"),
     ],
 )
@@ -67,6 +69,7 @@ async def test_startup_check(enforced, monkeypatch, caplog, responses, rule):
     connect.assert_called_once()
     if responses is not None:
         assert db.query.call_count == len(responses)
+        assert "system.row_policies" in db.query.call_args_list[0].args[0]
         db.close.assert_called_once()
     response = await server.study_data_health(None)
     assert response.status_code == 200

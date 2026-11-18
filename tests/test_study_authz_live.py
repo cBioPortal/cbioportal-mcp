@@ -1586,20 +1586,28 @@ async def test_misconfigured_runtime_starts_degraded_and_mcp_returns_no_rows(ser
 
 
 @pytest.mark.parametrize(
-    "public, groups, allowed, authorities, failed_rule",
+    "public, groups, allowed, authorities, policy, failed_rule",
     [
-        (1, ";;Example;another;;", "EXAMPLE,ANOTHER", None, None),
-        (1, ";;", "", False, None),
-        (1, " Example", "Example", None, "cancer_study.groups"),
-        (1, " Example", " Example", None, None),
-        (1, "Example;extra", "Example", None, "cancer_study.groups"),
-        (0, "Example", "Example", None, "cancer_study.public"),
-        (1, "", "", True, "authorities"),
+        (1, ";;Example;another;;", "EXAMPLE,ANOTHER", None, None, None),
+        (1, ";;", "", False, None, None),
+        (1, " Example", "Example", None, None, "cancer_study.groups"),
+        (1, " Example", " Example", None, None, None),
+        (1, "Example;extra", "Example", None, None, "cancer_study.groups"),
+        (0, "Example", "Example", None, None, "cancer_study.public"),
+        (1, "", "", True, None, "authorities"),
+        # The reviewer's case: the policy hides the public = 0 row from the
+        # runtime user, so only the row-policy rule can catch it.
+        (0, "", "", None, "ON {db}.cancer_study USING public = 1 TO {user}", "row policies"),
+        (1, "", "", None, "ON {db}.cancer_study USING public = 1 TO p10_other", "row policies"),
+        (1, "", "", None, "ON {db}.* USING 1 TO p10_other", "row policies"),
+        # Without SHOW ROW POLICIES the runtime user cannot read
+        # system.row_policies at all, so the check fails closed.
+        (1, "", "", None, "no grant", "row policies"),
     ],
 )
 @pytest.mark.asyncio
 async def test_public_db_check_on_readonly_connection(
-    server, monkeypatch, caplog, public, groups, allowed, authorities, failed_rule
+    server, monkeypatch, caplog, public, groups, allowed, authorities, policy, failed_rule
 ):
     import httpx
     from fastmcp import Client
@@ -1616,12 +1624,19 @@ async def test_public_db_check_on_readonly_connection(
     admin.command(f"CREATE DATABASE {db}")
     try:
         admin.command(f"CREATE USER {user} IDENTIFIED BY 'pw' SETTINGS readonly = 1")
+        admin.command("CREATE USER p10_other IDENTIFIED BY 'pw'")
         admin.command(f"GRANT SELECT ON {db}.* TO {user}")
+        if policy != "no grant":
+            admin.command(f"GRANT SHOW ROW POLICIES ON {db}.* TO {user}")
         admin.command(
             f"CREATE TABLE {db}.cancer_study (public UInt8, groups Nullable(String)) "
             "ENGINE = MergeTree ORDER BY tuple()"
         )
         admin.insert(f"{db}.cancer_study", [(public, groups)])
+        if policy and policy != "no grant":
+            # Keep a visible public row so the hidden one is the only signal.
+            admin.insert(f"{db}.cancer_study", [(1, "")])
+            admin.command(f"CREATE ROW POLICY p10_policy {policy.format(db=db, user=user)}")
         if authorities is not None:
             admin.command(
                 f"CREATE TABLE {db}.authorities (id UInt8) ENGINE = MergeTree ORDER BY id"
@@ -1684,5 +1699,8 @@ async def test_public_db_check_on_readonly_connection(
         if failed_rule:
             assert failed_rule in caplog.text
     finally:
-        admin.command(f"DROP USER IF EXISTS {user}")
+        admin.command(
+            f"DROP ROW POLICY IF EXISTS p10_policy ON {db}.*, p10_policy ON {db}.cancer_study"
+        )
+        admin.command(f"DROP USER IF EXISTS {user}, p10_other")
         admin.command(f"DROP DATABASE {db} SYNC")

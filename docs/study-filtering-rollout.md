@@ -270,6 +270,22 @@ on semicolons, drops empty entries, and compares case-insensitively with
 whitespace preserved, as cBioPortal does. An absent or empty `authorities` table
 passes.
 
+P10 also fails if `system.row_policies` lists any row policy on the connected
+database, including database-wide `ON <db>.*` policies, whatever user or role
+it targets. A row policy can hide private rows from P10's own queries (for
+example `USING public = 1` hides `public = 0` studies), so a database served
+with filtering `off` must have no row policies. This rule runs first.
+
+The runtime user needs `GRANT SHOW ROW POLICIES ON <db>.*` for this rule, the
+same grant the filtering-on startup check uses. Without it, ClickHouse 25.8
+and 26.6 deny a user with only `SELECT ON <db>.*` any read of
+`system.row_policies` (`ACCESS_DENIED`), even for policies that target that
+user. The rule then fails as `row policies: could not verify`. With the grant,
+the user sees every policy on the server, including policies that target other
+users or roles and policies on other databases. P10 counts only those for the
+connected database. A policy that targets another user does not change what
+the runtime user reads, but P10 still fails on it.
+
 Derive the public portal allowlist from individual group entries on a verified
 public copy. Run this query against that copy and review the entries before
 setting the allowlist.
