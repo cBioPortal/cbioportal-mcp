@@ -11,10 +11,6 @@ import re
 from dataclasses import dataclass, field
 
 from cbioportal_mcp.study_authz.catalog import (
-    STUDY_SCOPED_TABLE_PATHS,
-    StudyId,
-    StudyIdentifier,
-    Via,
     classified_names,
     mergetree_engines,
 )
@@ -256,14 +252,6 @@ PLAIN_STORAGE_ENGINES = frozenset(
     for engine in mergetree_engines(family)
 )
 CATALOG_NAMES = frozenset(classified_names())
-# Include catalog linkage columns: renamed mutation copies retain
-# genetic_profile_id rather than a direct study ID. Generic internal_id alone
-# cannot identify study data. Renaming all linkage columns remains undetectable.
-STUDY_LINK_COLUMNS = frozenset({"cancer_study_identifier", "cancer_study_id"}) | frozenset(
-    path.column
-    for path in STUDY_SCOPED_TABLE_PATHS.values()
-    if isinstance(path, (StudyId, StudyIdentifier, Via)) and path.column != "internal_id"
-)
 
 
 def audit_other_database(
