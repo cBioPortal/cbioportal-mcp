@@ -197,6 +197,7 @@ def test_gate_remains_closed_during_check_and_off_bypasses(degraded, monkeypatch
     availability.require()
     rollout._reset_for_tests()
     monkeypatch.setenv("CBIOPORTAL_MCP_STUDY_FILTERING", "off")
+    monkeypatch.setenv(rollout.PUBLIC_DB_CHECK_ENV, "off")
     rollout.initialize("off", local_dev=False)
     availability.complete("filtering_check_failed")
     assert availability.reason() == "filtering_off"
@@ -223,7 +224,7 @@ def test_fresh_import_is_blocked_before_and_after_pinning(raw):
     env.update(
         {
             rollout.AUTH_ENFORCEMENT_ENV: "enforce",
-            rollout.PUBLIC_DB_CHECK_ENV: "enforce",
+            rollout.PUBLIC_DB_CHECK_ENV: "off" if raw == "off" else "enforce",
             rollout.AUTH_TEST_USERS_ENV: "",
         }
     )

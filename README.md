@@ -45,6 +45,8 @@ export CBIOPORTAL_MCP_STUDY_FILTERING=off  # required; no default
 export CBIOPORTAL_MCP_AUTH_ENFORCEMENT=off   # off | enforce
 export CBIOPORTAL_MCP_AUTH_TEST_USERS=      # comma-separated emails; may be empty
 export CBIOPORTAL_MCP_PUBLIC_DB_CHECK=off    # off | enforce
+# Set for STUDY_FILTERING=off with PUBLIC_DB_CHECK=enforce:
+# export CBIOPORTAL_MCP_PUBLIC_DB_ALLOWED_GROUPS='<comma-separated group entries>'
 export CLICKHOUSE_MCP_SERVER_TRANSPORT=http # default; or sse
 # Local stdio only: set BOTH of these explicitly.
 # export CLICKHOUSE_MCP_SERVER_TRANSPORT=stdio
@@ -67,8 +69,8 @@ export CLICKHOUSE_MCP_SERVER_TRANSPORT=http # default; or sse
 ```
 
 Study filtering accepts only `on` or `off` (case-insensitive, surrounding whitespace
-is ignored). Missing, blank, and other values refuse startup. `off` preserves
-current behavior and is the permanent setting for the public deployment. `on`
+is ignored). Missing, blank, and other values refuse startup. The public
+deployment uses `off`. `on`
 is for private deployments only and serves study data only when both
 `CBIOPORTAL_MCP_AUTH_ENFORCEMENT` and `CBIOPORTAL_MCP_PUBLIC_DB_CHECK` are
 `enforce`, `CBIOPORTAL_MCP_STUDY_FILTERING_PUBLIC_DATABASES` is set, and the
@@ -80,8 +82,8 @@ MCP errors before handlers or caches. Login, schema tools and OncoTree remain
 available under configured login rules. Checks retry only on restart. After
 configuration changes or rollback, inspect `GET /health` or the startup log:
 health returns `study_data_available` and a stable `reason` (`checks_pending`,
-`rollout_not_enforced`, `filtering_check_failed`, `ready`, `filtering_off`). HTTP
-503 (`checks_pending`) is observable on hosts that skip the lifespan. Normal
+`rollout_not_enforced`, `filtering_check_failed`, `public_db_check_failed`,
+`ready`, `filtering_off`). HTTP 503 (`checks_pending`) is observable on hosts that skip the lifespan. Normal
 uvicorn startup binds only after the lifespan checks finish, so probes during
 checks get connection refused. HTTP 200 means the server is serving, including
 degraded mode to keep Kubernetes routing login/schema requests. Check the boolean
@@ -100,10 +102,19 @@ Only local stdio (`CBIOPORTAL_MCP_LOCAL_DEV=1`) defaults unset switches to
 `off` / empty / `off`. The startup log shows each value and the tester count, never
 tester emails. These switches are temporary and expire on 2027-06-30 (see
 `cbioportal_mcp.rollout.EXPIRES`). Authentication enforcement is described below.
-The public-database check (P10) is not built yet: `CBIOPORTAL_MCP_PUBLIC_DB_CHECK=enforce`
-is validated, logged and required for study filtering `on`, but currently has no
-other effect. In particular, nothing yet refuses a filtering-`off` server pointed at
-a database with private studies.
+
+With study filtering `off` and `CBIOPORTAL_MCP_PUBLIC_DB_CHECK=enforce`,
+the public-database check (P10) runs once per startup against the configured
+database. It checks for explicitly private studies (`cancer_study.public = 0`),
+study group entries outside the allowlist, and rows in `authorities` if that
+table exists. Set `CBIOPORTAL_MCP_PUBLIC_DB_ALLOWED_GROUPS` explicitly to a
+comma-separated list, or to an empty string if no groups are allowed. Derive
+the public portal's list from `SELECT DISTINCT` over the individual group
+entries on a verified public copy. Entries are case-insensitive and whitespace
+is significant. A failed check or database error blocks study data, reports
+`study_data_available=false` at `/health`, and triggers the Datadog monitor
+**Study data blocked**. See the [rollout guide](docs/study-filtering-rollout.md#public-database-check-p10)
+for the discovery query.
 
 ### Required login (P2)
 

@@ -186,8 +186,7 @@ With `CBIOPORTAL_MCP_STUDY_FILTERING=on`, study data remains blocked unless
 **all** of these hold (the server stays running in degraded mode on failure):
 
 1. `CBIOPORTAL_MCP_AUTH_ENFORCEMENT=enforce`;
-2. `CBIOPORTAL_MCP_PUBLIC_DB_CHECK=enforce` (see "Known limits": the check
-   behind this switch, P10, is not built yet);
+2. `CBIOPORTAL_MCP_PUBLIC_DB_CHECK=enforce`;
 3. `CBIOPORTAL_MCP_STUDY_FILTERING_PUBLIC_DATABASES` is explicitly set;
 4. the database-side startup check passes (study-authz.md, "Server startup
    check").
@@ -221,8 +220,9 @@ is preloaded in degraded mode. Checks run once per process; fix configuration
 or grants and restart to retry.
 
 `GET /health` returns only `study_data_available` (boolean) and `reason`:
-`checks_pending`, `rollout_not_enforced`, `filtering_check_failed`, `ready`,
-or `filtering_off`. Normal uvicorn startup binds the listening socket only
+`checks_pending`, `rollout_not_enforced`, `filtering_check_failed`,
+`public_db_check_failed`, `ready`, or `filtering_off`. Normal uvicorn startup
+binds the listening socket only
 after the lifespan and checks finish: probes during checks get connection
 refused, not HTTP 503. Hosts that skip the lifespan can reach the endpoint
 before checks and receive HTTP 503 (`checks_pending`). After normal startup
@@ -237,8 +237,9 @@ tool metrics. Alert on the `Study data unavailable` refusal log line or on
 `/health` JSON with `study_data_available: false`. A probe that checks only
 HTTP status 200 will miss degraded mode.
 
-The general ClickHouse permission gate still exits with code 2. Missing or
-invalid filtering/rollout switch values, login configuration errors and
+The general ClickHouse permission gate exits with code 2 on failure. An MCP
+already degraded by P10 skips that permission gate. Missing or invalid
+filtering/rollout switch values, login configuration errors and
 transport/stdio violations still refuse startup. Driver errors are reported
 by class and ClickHouse error code, never free-form text.
 
@@ -257,6 +258,42 @@ line, with any traceback or stack folded into it after ` | `. A message that
 cannot be rendered is logged as `<unloggable message redacted>`; scrubbing
 never raises into the code that logs. Use the error code and check name to diagnose; reproduce with
 `clickhouse-client` as the runtime user when you need the full server text.
+
+### Public-database check (P10)
+
+With `CBIOPORTAL_MCP_STUDY_FILTERING=off` and
+`CBIOPORTAL_MCP_PUBLIC_DB_CHECK=enforce`, P10 checks the connected database once
+per startup, including when pods restart after a blue/green switch. It blocks study
+data if any study has `public = 0`, if any group entry falls outside the allowlist,
+or if an existing `authorities` table has rows. It splits `cancer_study.groups`
+on semicolons, drops empty entries, and compares case-insensitively with
+whitespace preserved, as cBioPortal does. An absent or empty `authorities` table
+passes.
+
+Derive the public portal allowlist from individual group entries on a verified
+public copy. Run this query against that copy and review the entries before
+setting the allowlist.
+
+```sql
+SELECT DISTINCT arrayJoin(splitByChar(';', ifNull(groups, ''))) AS group_entry
+FROM cancer_study
+WHERE group_entry != ''
+ORDER BY group_entry;
+```
+
+Set `CBIOPORTAL_MCP_PUBLIC_DB_ALLOWED_GROUPS` to those comma-separated values,
+preserving the whitespace in each entry. Use an explicitly empty string when
+no groups are allowed. The setting is required in this mode and ignored for all
+other switch combinations. With filtering `on`, the two enforcement switches
+are still required and the row-policy check runs.
+
+A rule failure, connection error, or query error leaves the server running in
+degraded mode. It logs one `CRITICAL` line identifying the failed check, blocks
+study-data tools and resources, sets `/health` to `study_data_available: false`
+with reason `public_db_check_failed`, and fires the Datadog monitor
+**Study data blocked**. Correct the database or configuration and restart to
+retry. Successful enforcement reports `ready`. With the public-database check
+`off`, a filtering-off deployment reports `filtering_off`.
 
 ## 6. Verify
 
@@ -310,8 +347,9 @@ protected database reads every study.** Changing `CLICKHOUSE_DATABASE` is
 filtering-off SQL accepts fully qualified names such as
 `SELECT * FROM <protected_db>.cancer_study`.
 
-1. Set `CBIOPORTAL_MCP_STUDY_FILTERING=off` and restart the MCP. (It no longer
-   sends `SQL_cbio_user`, so the policies show it public studies only.)
+1. Set `CBIOPORTAL_MCP_STUDY_FILTERING=off` and `CBIOPORTAL_MCP_PUBLIC_DB_CHECK=off`
+   and restart the MCP. Without `SQL_cbio_user`, the policies show the MCP only
+   public studies.
    Verify `/health` reports `study_data_available: true`, `reason: filtering_off`,
    and check the startup log. A previous degraded status does not survive restart.
 2. Remove the runtime access to the protected database, **before any policy is
@@ -372,13 +410,5 @@ before re-applying.
 - **JWT / Keycloak grant sources are not built yet.** Only the manual source
   (`user_study_manual`) feeds `user_study` today; the JWT layout is reserved
   (study-authz.md, "Future per-email (JWT) source").
-- **P10 is pending: `CBIOPORTAL_MCP_PUBLIC_DB_CHECK=enforce` currently has no
-  runtime effect.** It is required for `on` (so a later release can add
-  behaviour without changing deployments), validated and shown in the startup
-  log, but nothing acts on it. The planned P10 check (with filtering off,
-  refuse startup when the database has `cancer_study.public = 0`, group names
-  outside the public group or an allowlist, or non-empty authorities) does not
-  exist. Today nothing stops a filtering-**off** server from being pointed at
-  a database with private studies; keeping private data out of
-  filtering-off deployments is an operational responsibility until P10 ships.
-  With filtering `on`, the P6 startup check above is what protects the data.
+- **P10 checks only the configured database.** Control access to any other
+  databases through ClickHouse grants, including during rollback.
