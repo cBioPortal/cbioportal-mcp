@@ -1583,3 +1583,106 @@ async def test_misconfigured_runtime_starts_degraded_and_mcp_returns_no_rows(ser
             assert (await app.study_data_health(None)).status_code == 200
     finally:
         identity._CURRENT.reset(token)
+
+
+@pytest.mark.parametrize(
+    "public, groups, allowed, authorities, failed_rule",
+    [
+        (1, ";;Example;another;;", "EXAMPLE,ANOTHER", None, None),
+        (1, ";;", "", False, None),
+        (1, " Example", "Example", None, "cancer_study.groups"),
+        (1, " Example", " Example", None, None),
+        (1, "Example;extra", "Example", None, "cancer_study.groups"),
+        (0, "Example", "Example", None, "cancer_study.public"),
+        (1, "", "", True, "authorities"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_public_db_check_on_readonly_connection(
+    server, monkeypatch, caplog, public, groups, allowed, authorities, failed_rule
+):
+    import httpx
+    from fastmcp import Client
+    from mcp.shared.exceptions import McpError
+    from mcp_clickhouse import mcp_env
+
+    from cbioportal_mcp import rollout
+    from cbioportal_mcp import server as app
+    from cbioportal_mcp.authentication.permissions import ensure_db_permissions
+
+    db = "public_db_check"
+    user = "p10_readonly"
+    admin = server.admin
+    admin.command(f"CREATE DATABASE {db}")
+    try:
+        admin.command(f"CREATE USER {user} IDENTIFIED BY 'pw' SETTINGS readonly = 1")
+        admin.command(f"GRANT SELECT ON {db}.* TO {user}")
+        admin.command(
+            f"CREATE TABLE {db}.cancer_study (public UInt8, groups Nullable(String)) "
+            "ENGINE = MergeTree ORDER BY tuple()"
+        )
+        admin.insert(f"{db}.cancer_study", [(public, groups)])
+        if authorities is not None:
+            admin.command(
+                f"CREATE TABLE {db}.authorities (id UInt8) ENGINE = MergeTree ORDER BY id"
+            )
+            if authorities:
+                admin.insert(f"{db}.authorities", [(1,)])
+
+        for key, value in {
+            "CLICKHOUSE_HOST": "127.0.0.1",
+            "CLICKHOUSE_PORT": str(server.port),
+            "CLICKHOUSE_USER": user,
+            "CLICKHOUSE_PASSWORD": "pw",
+            "CLICKHOUSE_SECURE": "false",
+            "CLICKHOUSE_VERIFY": "false",
+            "CLICKHOUSE_DATABASE": db,
+            "CBIOPORTAL_MCP_STUDY_FILTERING": "off",
+            rollout.PUBLIC_DB_CHECK_ENV: "enforce",
+            "CBIOPORTAL_MCP_PUBLIC_DB_ALLOWED_GROUPS": allowed,
+        }.items():
+            monkeypatch.setenv(key, value)
+        monkeypatch.setattr(mcp_env, "_CONFIG_INSTANCE", None)
+        monkeypatch.setattr(app, "ensure_db_permissions", ensure_db_permissions)
+        rollout._reset_for_tests()
+        mcp = app.ConfiguredFastMCP(name="p10-live")
+        mcp.preload_studies = bool(failed_rule)
+
+        @mcp.tool()
+        def study_tool() -> str:
+            return "study data"
+
+        @mcp.resource("cbioportal://p10-live")
+        def study_resource() -> str:
+            return "study data"
+
+        def unexpected_preload():
+            pytest.fail("degraded server tried to preload study data")
+
+        monkeypatch.setattr(app, "_refresh_studies_cache_once", unexpected_preload)
+        asgi = mcp.http_app()
+        async with asgi.router.lifespan_context(asgi):
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=asgi), base_url="http://test"
+            ) as http:
+                response = await http.get("/health")
+            assert response.status_code == 200
+            assert response.json() == {
+                "study_data_available": failed_rule is None,
+                "reason": "public_db_check_failed" if failed_rule else "ready",
+            }
+            async with Client(mcp) as client:
+                result = await client.call_tool("study_tool", {}, raise_on_error=False)
+                if failed_rule:
+                    assert result.is_error
+                    assert "Study data unavailable" in result.content[0].text
+                    with pytest.raises(McpError, match="Study data unavailable"):
+                        await client.read_resource("cbioportal://p10-live")
+                else:
+                    assert not result.is_error
+                    assert await client.read_resource("cbioportal://p10-live")
+        if failed_rule:
+            assert failed_rule in caplog.text
+    finally:
+        admin.command(f"DROP USER IF EXISTS {user}")
+        admin.command(f"DROP DATABASE {db} SYNC")

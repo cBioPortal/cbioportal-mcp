@@ -254,6 +254,7 @@ def test_guard_allows_harmless_sql(sql):
 def test_filtering_follows_immutable_startup_pin(monkeypatch, filtering_mode):
     monkeypatch.setenv("CBIOPORTAL_MCP_AUTH_ENFORCEMENT", "enforce")
     monkeypatch.setenv("CBIOPORTAL_MCP_PUBLIC_DB_CHECK", "enforce")
+    monkeypatch.setenv(rollout.PUBLIC_DB_ALLOWED_GROUPS_ENV, "")
     monkeypatch.setenv("CBIOPORTAL_MCP_STUDY_FILTERING", filtering_mode)
     settings = rollout.initialize(filtering_mode, local_dev=True)
     pin = rollout._PIN

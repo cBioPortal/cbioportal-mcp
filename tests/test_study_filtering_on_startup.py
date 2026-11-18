@@ -642,6 +642,7 @@ def test_on_auth_enforce_still_needs_a_login_route(monkeypatch):
 
 def test_off_never_runs_p6_or_needs_public_databases(monkeypatch, caplog):
     monkeypatch.setenv(FILTERING, "off")
+    monkeypatch.setenv(DB_CHECK, "off")
     monkeypatch.delenv(PUBLIC_DBS)
     monkeypatch.setattr(
         startup_check, "_check", lambda *a, **k: pytest.fail("P6 must not run with off")

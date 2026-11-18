@@ -22,7 +22,9 @@ _reason = "checks_pending"
 def reason() -> str:
     if rollout._PIN is None:
         return "checks_pending"
-    return _reason if rollout._PIN.filtering == "on" else "filtering_off"
+    if rollout._PIN.filtering == "off" and not rollout.public_db_check_enforced():
+        return "filtering_off"
+    return _reason
 
 
 def available() -> bool:
