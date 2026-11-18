@@ -10,7 +10,6 @@ import re
 from dataclasses import dataclass, field
 
 import pytest
-from aggregate_fixture import INSERT_COLUMNS
 
 from cbioportal_mcp import server
 from cbioportal_mcp.study_authz import catalog, sqlgen, startup_check
@@ -581,10 +580,62 @@ def test_reference_classification_rejects_study_columns(monkeypatch, table, colu
     refused(fake, f"{table}: reference object has study-linking column {column}")
 
 
+# Public ClickHouse 3.1.0 schema export:
+# https://public-db-dump.assets.cbioportal.org/clickhouse/dump_2026_10_18_v3_1_0/schema.sql
+REFERENCE_SCHEMA_COLUMNS = {
+    # Legacy table absent from the public ClickHouse export:
+    # https://github.com/cBioPortal/cbioportal/blob/v6.0.0/src/main/resources/db-scripts/cgds.sql
+    "cosmic_mutation": (
+        "COSMIC_MUTATION_ID",
+        "CHR",
+        "START_POSITION",
+        "REFERENCE_ALLELE",
+        "TUMOR_SEQ_ALLELE",
+        "STRAND",
+        "CODON_CHANGE",
+        "ENTREZ_GENE_ID",
+        "PROTEIN_CHANGE",
+        "COUNT",
+        "KEYWORD",
+    ),
+    "gene": ("entrez_gene_id", "hugo_gene_symbol", "genetic_entity_id", "type"),
+    "gene_alias": ("entrez_gene_id", "gene_alias"),
+    "gene_panel": ("internal_id", "stable_id", "description"),
+    "gene_panel_list": ("internal_id", "gene_id"),
+    "gene_panel_to_gene_derived": ("gene_panel_id", "gene"),
+    "generic_assay_meta_derived": ("entity_stable_id", "entity_type", "properties"),
+    "generic_entity_properties": ("id", "genetic_entity_id", "name", "value"),
+    "genetic_entity": ("id", "entity_type", "stable_id"),
+    "geneset": ("id", "genetic_entity_id", "external_id", "name", "description", "ref_link"),
+    "geneset_gene": ("geneset_id", "entrez_gene_id"),
+    "geneset_hierarchy_leaf": ("node_id", "geneset_id"),
+    "geneset_hierarchy_node": ("node_id", "node_name", "parent_id"),
+    "info": ("db_schema_version", "geneset_version", "gene_table_version"),
+    "reference_genome": (
+        "reference_genome_id",
+        "species",
+        "name",
+        "build_name",
+        "genome_size",
+        "url",
+        "release_date",
+    ),
+    "reference_genome_gene": (
+        "entrez_gene_id",
+        "reference_genome_id",
+        "chr",
+        "cytoband",
+        "start",
+        "end",
+    ),
+    "type_of_cancer": ("type_of_cancer_id", "name", "dedicated_color", "short_name", "parent"),
+}
+
+
 def test_reference_tables_in_schema_fixture_pass():
-    fake = FakeClickHouse(columns={DB: {}})
-    for table in sorted(catalog.STUDY_AGNOSTIC_REFERENCE_TABLES & INSERT_COLUMNS.keys()):
-        fake.columns[DB][table] = INSERT_COLUMNS[table].split(", ")
+    assert REFERENCE_SCHEMA_COLUMNS.keys() == catalog.STUDY_AGNOSTIC_REFERENCE_TABLES
+    fake = FakeClickHouse(columns={DB: REFERENCE_SCHEMA_COLUMNS})
+    for table in REFERENCE_SCHEMA_COLUMNS:
         if table in fake.tables:
             continue
         fake.tables[table] = "MergeTree"
@@ -754,7 +805,17 @@ def test_every_catalog_classified_table_marks_another_database_as_study_data(nam
 
 
 @pytest.mark.parametrize(
-    "column", ["cancer_study_identifier", "cancer_study_id", "genetic_profile_id"]
+    "column",
+    [
+        "cancer_study_identifier",
+        "cancer_study_id",
+        "genetic_profile_id",
+        "sample_id",
+        "sample_list",
+        "sample_unique_id",
+        "patient_unique_id",
+        "genetic_profile_stable_id",
+    ],
 )
 def test_renamed_study_tables_detected_by_columns(column):
     fake = user_target()
@@ -762,6 +823,31 @@ def test_renamed_study_tables_detected_by_columns(column):
     fake.columns["other_pub"] = {"renamed": [column]}
     refused(fake, "not declared public")
     assert check(fake, DB, EMAIL, public_databases=frozenset({"other_pub"})).target_is_user
+
+
+def test_other_database_with_only_sample_id_degrades_startup(monkeypatch, caplog):
+    from cbioportal_mcp import rollout
+    from cbioportal_mcp.study_authz import availability
+
+    fake = user_target()
+    fake.other_objects["other_pub"] = [("unclassified_samples", "Memory", "")]
+    fake.columns["other_pub"] = {"unclassified_samples": ["sample_id"]}
+    monkeypatch.setattr(
+        startup_check,
+        "check_with_mcp_connection",
+        lambda database, **kwargs: check(fake, database, EMAIL, **kwargs),
+    )
+    monkeypatch.setenv(startup_check.FILTERING_ENV, "on")
+    monkeypatch.setenv(rollout.AUTH_ENFORCEMENT_ENV, "enforce")
+    monkeypatch.setenv(rollout.PUBLIC_DB_CHECK_ENV, "enforce")
+    rollout.initialize("on", local_dev=False)
+
+    with caplog.at_level(logging.CRITICAL):
+        server.enforce_study_policy_coverage(DB)
+
+    assert availability.reason() == "filtering_check_failed"
+    [record] = [record for record in caplog.records if record.levelno == logging.CRITICAL]
+    assert "other_pub: unfiltered study database is not declared public" in record.getMessage()
 
 
 @pytest.mark.parametrize("scope", ["d.*", "other_pub.*", "other_pub.zz"])
