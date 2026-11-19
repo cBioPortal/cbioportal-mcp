@@ -198,6 +198,8 @@ Otherwise list, comma-separated, the other readable databases that hold
 access and never overrides the unsafe-object checks. Never list a private
 source copy to clear degraded status.
 
+The startup audit now also recognizes `sample_id`, `sample_list`, `sample_unique_id`, `patient_unique_id`, and `genetic_profile_stable_id` in other readable databases, so operators may need to add affected databases that contain only public data to `CBIOPORTAL_MCP_STUDY_FILTERING_PUBLIC_DATABASES`.
+
 **Success** looks like these INFO lines, in this order:
 
 ```

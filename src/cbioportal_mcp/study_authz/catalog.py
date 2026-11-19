@@ -167,6 +167,32 @@ STUDY_AGNOSTIC_REFERENCE_TABLES: frozenset[str] = frozenset(
     }
 )
 
+# Detect study links even on renamed copies. Catalog paths provide the
+# primary link; these additional names cover other IDs used by study tables.
+STUDY_LINK_COLUMNS = frozenset(
+    {
+        "cancer_study_identifier",
+        "cancer_study_id",
+        "sample_id",
+        "sample_list",
+        "sample_unique_id",
+        "patient_unique_id",
+        "genetic_profile_stable_id",
+    }
+) | frozenset(
+    path.column.lower()
+    for path in STUDY_SCOPED_TABLE_PATHS.values()
+    if isinstance(path, (StudyId, StudyIdentifier, Via))
+)
+
+REFERENCE_COLUMN_EXCEPTIONS = frozenset(
+    {
+        ("gene_panel", "internal_id"),  # Identifies a gene panel.
+        ("gene_panel_list", "internal_id"),  # Links membership to gene_panel.internal_id.
+    }
+)
+
+
 USER_STUDY_TABLE = "user_study"
 USER_STUDY_MANUAL_TABLE = "user_study_manual"
 # Reserved for the future per-email JWT source (docs/study-authz.md); listed

@@ -1543,7 +1543,12 @@ def test_apply_refuses_previous_layout_and_migrate_replaces_it(server):
 
 
 @pytest.mark.asyncio
-async def test_misconfigured_runtime_starts_degraded_and_mcp_returns_no_rows(server, monkeypatch):
+@pytest.mark.parametrize(
+    "linked_reference", [False, True], ids=["direct-grant", "linked-reference"]
+)
+async def test_misconfigured_runtime_starts_degraded_and_mcp_returns_no_rows(
+    server, monkeypatch, caplog, request, linked_reference
+):
     """Real runtime permissions + P6 connection + MCP dispatch, no checker stubs."""
     from fastmcp import Client
     from mcp_clickhouse import mcp_env
@@ -1553,9 +1558,14 @@ async def test_misconfigured_runtime_starts_degraded_and_mcp_returns_no_rows(ser
     from cbioportal_mcp.authentication.permissions import ensure_db_permissions
     from cbioportal_mcp.study_authz import availability, startup_check
 
+    if linked_reference:
+        server.admin.command(f"CREATE TABLE {DB}.gene_alias (patient_id Int64) ENGINE=Memory")
+        request.addfinalizer(lambda: server.admin.command(f"DROP TABLE {DB}.gene_alias SYNC"))
+
     for key, value in {
         "CLICKHOUSE_HOST": "127.0.0.1", "CLICKHOUSE_PORT": str(server.port),
-        "CLICKHOUSE_USER": "mcp_direct", "CLICKHOUSE_PASSWORD": "pw",
+        "CLICKHOUSE_USER": "mcp_restricted" if linked_reference else "mcp_direct",
+        "CLICKHOUSE_PASSWORD": "pw",
         "CLICKHOUSE_SECURE": "false", "CLICKHOUSE_VERIFY": "false",
         "CLICKHOUSE_DATABASE": DB,
         "CBIOPORTAL_MCP_STUDY_FILTERING": "on",
@@ -1565,6 +1575,7 @@ async def test_misconfigured_runtime_starts_degraded_and_mcp_returns_no_rows(ser
         monkeypatch.setenv(key, value)
     monkeypatch.setattr(mcp_env, "_CONFIG_INSTANCE", None)
     monkeypatch.setattr(app, "ensure_db_permissions", ensure_db_permissions)
+    rollout._reset_for_tests()
     rollout.initialize("on", local_dev=False)
     token = identity._CURRENT.set(identity.Decision(
         identity.Identity("test", "tester@example.org", "bridge"), True, True
@@ -1579,8 +1590,17 @@ async def test_misconfigured_runtime_starts_degraded_and_mcp_returns_no_rows(ser
                 result = await client.call_tool(name, args, raise_on_error=False)
                 assert result.is_error
                 assert result.structured_content is None
-                assert "Study data unavailable" in result.content[0].text
+                message = result.content[0]
+                assert message.type == "text"
+                assert "Study data unavailable" in message.text
             assert (await app.study_data_health(None)).status_code == 200
+        if linked_reference:
+            needle = "gene_alias: reference object has study-linking column patient_id"
+            assert any(
+                record.levelname == "CRITICAL" and needle in record.getMessage()
+                for record in caplog.records
+            )
+            assert needle in fetch_and_evaluate(server.admin, DB, ROW_POLICY_ROLE).errors
     finally:
         identity._CURRENT.reset(token)
 

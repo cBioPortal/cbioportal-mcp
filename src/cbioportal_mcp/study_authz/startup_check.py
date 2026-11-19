@@ -53,10 +53,10 @@ from cbioportal_mcp.study_authz.coverage import (
     evaluate,
     fetch_objects,
     fetch_policy_rows,
+    fetch_study_columns,
     fetch_user_study_uuid,
 )
 from cbioportal_mcp.study_authz.grants import (
-    STUDY_LINK_COLUMNS,
     GrantParseError,
     audit_grants,
     audit_other_database,
@@ -258,6 +258,10 @@ def _check(
         f"system.tables uuid of {USER_STUDY_TABLE}",
         lambda: fetch_user_study_uuid(_SessionClient(s), database),
     )
+    study_columns = step(
+        f"system.columns for {database}",
+        lambda: fetch_study_columns(_SessionClient(s), database, include_internal_id=True),
+    )
     report = evaluate(
         objects,
         applicable,
@@ -265,6 +269,7 @@ def _check(
         refresh_error=None,
         conflicts=conflicts,
         user_study_uuid=user_study_uuid,
+        study_columns=study_columns,
     )
     reasons += report.errors
     reasons += [
@@ -292,15 +297,10 @@ def _check(
                 f"system.tables for {db}",
                 lambda db=db: fetch_objects(_SessionClient(s), db, dictionaries=False),
             )
-            study_column_tables = step(
+            other_study_columns = step(
                 f"system.columns for {db}",
-                lambda db=db: s.rows(
-                    "SELECT DISTINCT table FROM system.columns WHERE database = {db:String} "
-                    "AND lowerUTF8(name) IN {columns:Array(String)}",
-                    {
-                        "db": db,
-                        "columns": sorted({column.lower() for column in STUDY_LINK_COLUMNS}),
-                    },
+                lambda db=db: fetch_study_columns(
+                    _SessionClient(s), db, include_internal_id=False
                 ),
             )
             reasons += audit_other_database(
@@ -308,7 +308,7 @@ def _check(
                 [(name, engine, create) for name, (engine, create) in other_objects.items()],
                 other_policies[db],
                 principals,
-                {row[0] for row in study_column_tables},
+                {table for table, _ in other_study_columns},
                 public_databases,
             )
 

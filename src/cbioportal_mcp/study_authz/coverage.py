@@ -31,12 +31,15 @@ which needs ``SHOW ROW POLICIES ON <db>.*`` (granted by the policy template).
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 
 from cbioportal_mcp.study_authz.catalog import (
     DENIED_TABLES,
     IDENTITY_SCOPED_TABLES,
+    REFERENCE_COLUMN_EXCEPTIONS,
     STUDY_AGNOSTIC_REFERENCE_TABLES,
+    STUDY_LINK_COLUMNS,
     STUDY_SCOPED_TABLE_PATHS,
     STUDY_SCOPED_VIEWS,
     USER_STUDY_TABLE,
@@ -262,15 +265,24 @@ def evaluate(
     policies: list[Policy],
     database: str,
     refresh_error: str | None = None,
-    conflicts: list[str] = (),
+    conflicts: Iterable[str] = (),
     user_study_uuid: str = "",
+    *,
+    study_columns: Iterable[tuple[str, str]] = (),
 ) -> Report:
     """Pure check over fetched metadata: ``objects`` is name -> (engine, create query).
 
     ``conflicts`` is ``sqlgen.policy_conflicts`` for the database and target.
     ``user_study_uuid`` (``fetch_user_study_uuid``) names its inner tables.
+    ``study_columns`` contains the (object, column) matches from ``fetch_study_columns``.
     """
     report = Report()
+    for table, column in study_columns:
+        if (
+            table in STUDY_AGNOSTIC_REFERENCE_TABLES
+            and (table, column.lower()) not in REFERENCE_COLUMN_EXCEPTIONS
+        ):
+            report.errors.append(f"{table}: reference object has study-linking column {column}")
     for conflict in conflicts:
         report.errors.append(f"row policy the catch-all would widen: {conflict}")
     by_table: dict[str, list[Policy]] = {}
@@ -388,6 +400,21 @@ def fetch_objects(
     return objects
 
 
+def fetch_study_columns(
+    client, database: str, *, include_internal_id: bool
+) -> list[tuple[str, str]]:
+    """Return the live (object, column) pairs matching the study-link heuristic."""
+    columns = STUDY_LINK_COLUMNS
+    if not include_internal_id:
+        # A generic internal_id by itself cannot identify an entire database as study data.
+        columns = columns - {"internal_id"}
+    return client.query(
+        "SELECT table, name FROM system.columns WHERE database = {db:String} "
+        "AND lowerUTF8(name) IN {columns:Array(String)} ORDER BY table, name",
+        parameters={"db": database, "columns": sorted(columns)},
+    ).result_rows
+
+
 def fetch_policy_rows(client, database: str) -> list[PolicyRow]:
     """Every row policy on ``database``, whoever it applies to."""
     rows = client.query(
@@ -449,4 +476,5 @@ def fetch_and_evaluate(client, database: str, target: str) -> Report:
         refresh_error,
         policy_conflicts(client, database, target),
         user_study_uuid=fetch_user_study_uuid(client, database),
+        study_columns=fetch_study_columns(client, database, include_internal_id=True),
     )
