@@ -22,6 +22,8 @@ straight from the generated rows, independent of any SQL.
 import random
 from collections import defaultdict
 
+from cbioportal_mcp import domain_tools
+
 GENES = {
     "TP53": 7157,
     "KRAS": 3845,
@@ -414,7 +416,12 @@ def oracle_profiled_counts(tables) -> dict[tuple, tuple]:
                 groups[(study, k)][1].add(sample)
     out = {}
     for (study, k), (samples, wes) in groups.items():
-        out[(study, k)] = (len(samples), len({patient_of[s] for s in samples}), len(wes))
+        gene_based = k in domain_tools._GENE_BASED_PROFILE_TYPES
+        out[(study, k)] = (
+            len(samples),
+            len({patient_of[s] for s in samples}),
+            len(wes) if gene_based else 0,
+        )
     all_samples = defaultdict(set)
     for s, _, study in tables["sample_derived"]:
         all_samples[study].add(s)
