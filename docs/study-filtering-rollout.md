@@ -272,6 +272,61 @@ on semicolons, drops empty entries, and compares case-insensitively with
 whitespace preserved, as cBioPortal does. An absent or empty `authorities` table
 passes.
 
+P10 also fails if `system.row_policies` lists any row policy on the connected
+database, including database-wide `ON <db>.*` policies, whatever user or role
+it targets. A row policy can hide private rows from P10's own queries (for
+example `USING public = 1` hides `public = 0` studies), so a database served
+with filtering `off` must have no row policies. This rule runs first.
+
+The runtime user needs `GRANT SHOW ROW POLICIES ON <db>.*` for this rule, the
+same grant the filtering-on startup check uses. Without it, ClickHouse 25.8
+and 26.6 deny a user with only `SELECT ON <db>.*` any read of
+`system.row_policies` (`ACCESS_DENIED`), even for policies that target that
+user. The rule then fails as `row policies: could not verify`. With the grant,
+an unfiltered catalog shows every policy on the server, including policies on
+other databases and policies that target other users or roles. P10 counts
+only policies on the connected database.
+
+An empty catalog does not prove that no policies exist. A row policy on
+`system.row_policies` itself can hide every policy from the runtime user
+while the read still succeeds. P10 therefore also checks every table in the
+connected database. For each storage table it compares `count()` as the
+runtime user with `system.tables.total_rows`. Views, materialized views, live
+and window views, and dictionaries are skipped: they read storage tables,
+which are checked themselves, and a materialized view's inner table is
+checked like any other storage table. Row policies and
+`additional_table_filters` reduce `count()` but not `total_rows`, so any
+difference fails as `row policies: rows hidden from the check user (<table>)`.
+
+The table list comes from `system.tables` and is cross-checked against
+`system.columns`. A policy on `system.tables` can hide a table from the first
+listing but not from the second. These cases fail as `row policies: could not
+verify row counts`:
+- the two listings disagree;
+- a storage table has a NULL `total_rows` (for example, engines that read
+  external systems);
+- a query errors;
+- a query exceeds the per-query timeout (60 seconds, capped below
+  `CLICKHOUSE_SEND_RECEIVE_TIMEOUT`);
+- the pass exceeds its 300-second budget.
+
+The timeout is client-side because a `readonly = 1` user cannot set
+`max_execution_time`. Without row policies, `count()` on MergeTree tables is
+answered from part metadata. ReplacingMergeTree duplicates that have not been
+merged count the same on both sides. Rows removed by a lightweight `DELETE`
+still count in `total_rows`, so that table fails until you run
+`OPTIMIZE TABLE ... FINAL` on it.
+
+Remaining limits:
+- If the catalog is filtered, P10 cannot see a policy that targets only
+  **other** users or roles. Such a policy does not change what the runtime
+  user reads, so it does not change what the MCP serves.
+- A policy that hides rows from the runtime user on any table in the
+  database is caught by the row counts.
+- P10 cannot tell that `system.row_policies` itself is filtered.
+- A table hidden from the runtime user by policies on **both**
+  `system.tables` and `system.columns` is not counted.
+
 Derive the public portal allowlist from individual group entries on a verified
 public copy. Run this query against that copy and review the entries before
 setting the allowlist.

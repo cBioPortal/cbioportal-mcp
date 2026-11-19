@@ -442,8 +442,10 @@ Inspect the boolean or startup log, rather than process uptime or status code
 alone. Fix grants/configuration and restart to recover. During rollback to
 filtering `off`, verify `reason: filtering_off`; retain the grant revocation
 and policy removal order in the rollout guide. Filtering `off` bypasses the gate.
-`PUBLIC_DB_CHECK=enforce` still has no effect until P10 exists; requiring its
-value for filtering `on` does not implement that check.
+`CBIOPORTAL_MCP_PUBLIC_DB_CHECK=enforce` runs the public-database check (P10)
+only with filtering `off` (study-filtering-rollout.md, "Public-database check
+(P10)"). With filtering `on` the switch must still be `enforce`, but P10 does
+not run.
 
 With `CBIOPORTAL_MCP_STUDY_FILTERING=on` the server stays running but blocks
 all study data until its own ClickHouse user is proven covered. A failed
