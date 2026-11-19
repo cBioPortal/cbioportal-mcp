@@ -737,7 +737,8 @@ def _error_cases():
              ERROR_TEXT),  # fmt: skip
         Case("errors-uuid-cast", "SELECT CAST(sample_unique_id AS UUID) FROM sample_derived "
              "ORDER BY sample_unique_id DESC", ERROR_TEXT),  # fmt: skip
-        Case("errors-date-cast", "SELECT toDate(assumeNotNull(cancer_study_identifier)) FROM cancer_study "
+        Case("errors-date-cast", "SELECT toDate(assumeNotNull(cancer_study_identifier)) "
+             "FROM cancer_study "
              "ORDER BY cancer_study_identifier DESC", ERROR_TEXT),  # fmt: skip
         Case("errors-enum-cast", "SELECT CAST(row_tag, 'Enum8(\\'x\\' = 1)') FROM patient "
              "ORDER BY row_tag DESC", ERROR_TEXT),  # fmt: skip
