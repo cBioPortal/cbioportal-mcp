@@ -1,0 +1,208 @@
+{
+  "clickhouse_list_table_columns": {
+    "inputSchema": {
+      "properties": {
+        "table": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "table"
+      ],
+      "type": "object"
+    }
+  },
+  "clickhouse_list_tables": {
+    "inputSchema": {
+      "properties": {},
+      "type": "object"
+    }
+  },
+  "clickhouse_run_select_query": {
+    "inputSchema": {
+      "properties": {
+        "max_rows": {
+          "default": 100,
+          "type": "integer"
+        },
+        "query": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "type": "object"
+    }
+  },
+  "get_alteration_frequency": {
+    "inputSchema": {
+      "properties": {
+        "alteration_type": {
+          "default": "any",
+          "type": "string"
+        },
+        "gene": {
+          "type": "string"
+        },
+        "study_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "gene",
+        "study_id"
+      ],
+      "type": "object"
+    }
+  },
+  "get_gene_frequency_by_cancer_type": {
+    "inputSchema": {
+      "properties": {
+        "alteration_type": {
+          "default": "mutation",
+          "type": "string"
+        },
+        "gene": {
+          "type": "string"
+        },
+        "preference": {
+          "default": "pan_cancer_tcga",
+          "type": "string"
+        },
+        "top_n": {
+          "default": 10,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "gene"
+      ],
+      "type": "object"
+    }
+  },
+  "get_general_guide": {
+    "inputSchema": {
+      "properties": {
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    }
+  },
+  "get_profiled_counts": {
+    "inputSchema": {
+      "properties": {
+        "study_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "study_id"
+      ],
+      "type": "object"
+    }
+  },
+  "get_study_guide": {
+    "inputSchema": {
+      "properties": {
+        "study_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "study_id"
+      ],
+      "type": "object"
+    }
+  },
+  "get_top_altered_genes": {
+    "inputSchema": {
+      "properties": {
+        "alteration_type": {
+          "default": "mutation",
+          "type": "string"
+        },
+        "study_id": {
+          "type": "string"
+        },
+        "top_n": {
+          "default": 10,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "study_id"
+      ],
+      "type": "object"
+    }
+  },
+  "list_guides": {
+    "inputSchema": {
+      "properties": {},
+      "type": "object"
+    }
+  },
+  "list_studies": {
+    "inputSchema": {
+      "properties": {
+        "limit": {
+          "default": 20,
+          "type": "integer"
+        },
+        "search": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "verbose": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    }
+  },
+  "list_study_guides": {
+    "inputSchema": {
+      "properties": {},
+      "type": "object"
+    }
+  },
+  "read_guide": {
+    "inputSchema": {
+      "properties": {
+        "uri": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "uri"
+      ],
+      "type": "object"
+    }
+  },
+  "search_oncotree": {
+    "inputSchema": {
+      "properties": {
+        "search_term": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "search_term"
+      ],
+      "type": "object"
+    }
+  }
+}

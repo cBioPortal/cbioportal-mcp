@@ -1,0 +1,85 @@
+# Hermetic MCP contract tier (docs/contract-tests.md). Builds the image from
+# docker/Dockerfile, runs it against a throwaway ClickHouse seeded with the
+# fixture schema/data and sql/ applied, with prod's chat env (http at /db/mcp),
+# and checks what LibreChat depends on. Uses no secrets, so it runs on fork
+# PRs too. docker_ci.yml calls it and refuses to publish unless it passes.
+name: MCP contract
+
+on:
+  pull_request:
+    branches:
+      - beta
+      - main
+  push:
+    branches:
+      - beta
+      - main
+  workflow_call:
+    inputs:
+      ref:
+        description: "Commit, branch or tag to test (default: the triggering SHA)"
+        type: string
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  # github.workflow is the caller's name under workflow_call, so the copy
+  # docker_ci.yml runs never cancels (or is cancelled by) the standalone run.
+  # inputs.ref is the SHA docker_ci.yml resolved: runs gating different commits
+  # (e.g. two concurrent dispatches) never cancel each other.
+  group: mcp-contract-${{ github.workflow }}-${{ github.event_name }}-${{ inputs.ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+
+      # 3.10, not the Dockerfile's 3.11 base: .python-version pins 3.10, so
+      # `uv sync` in the image installs and runs 3.10. Test what ships.
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.10"
+          enable-cache: true
+
+      - name: Install locked dependencies
+        run: uv sync --frozen --extra dev
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image under test
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          load: true
+          push: false
+          tags: cbioportal-mcp:contract
+          cache-from: type=gha,scope=mcp-contract
+          cache-to: type=gha,scope=mcp-contract,mode=max
+
+      - name: Run contract tier
+        env:
+          CONTRACT_SKIP_BUILD: "1"
+          CONTRACT_IMAGE: cbioportal-mcp:contract
+          CONTRACT_LOG_DIR: ${{ runner.temp }}/contract-logs
+        run: scripts/contract/run.sh
+
+      - name: Upload container logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mcp-contract-logs
+          path: ${{ runner.temp }}/contract-logs
+          if-no-files-found: ignore
+          retention-days: 7
