@@ -281,11 +281,30 @@ same grant the filtering-on startup check uses. Without it, ClickHouse 25.8
 and 26.6 deny a user with only `SELECT ON <db>.*` any read of
 `system.row_policies` (`ACCESS_DENIED`), even for policies that target that
 user. The rule then fails as `row policies: could not verify`. With the grant,
-the user sees every policy on the server, including policies that target other
-users or roles and policies on other databases. P10 counts only those for the
-connected database. A policy that targets another user does not change what
-the runtime user reads, but P10 still fails on it.
+an unfiltered catalog shows every policy on the server, including policies on
+other databases and policies that target other users or roles. P10 counts
+only policies on the connected database.
 
+An empty catalog does not prove that no policies exist. A row policy on
+`system.row_policies` itself can hide every policy from the runtime user
+while the read still succeeds. P10 therefore also compares `count()` as the
+runtime user with `system.tables.total_rows` for each table it reads
+(`cancer_study`, and `authorities` when present). Row policies and
+`additional_table_filters` reduce `count()` but not `total_rows`. Any
+difference fails as `row policies: rows hidden from the check user`. A missing
+`system.tables` row (for example, one hidden by a policy on `system.tables`),
+a NULL `total_rows` (views and other engines without a row count) or a query
+error fails as `row policies: could not verify row counts`. ReplacingMergeTree
+duplicates that have not been merged count the same on both sides. Rows
+removed by a lightweight `DELETE` still count in `total_rows`, so this check
+also fails. Run `OPTIMIZE TABLE ... FINAL` on that table before restarting.
+
+Remaining limit: if the catalog is filtered, P10 cannot see a policy that
+targets only **other** users or roles. Such a policy does not change what the
+runtime user reads, so it does not change what the MCP serves. The row-count
+comparison catches any policy that hides rows from the runtime user in the
+tables P10 reads. P10 cannot tell that `system.row_policies` itself is
+filtered.
 Derive the public portal allowlist from individual group entries on a verified
 public copy. Run this query against that copy and review the entries before
 setting the allowlist.

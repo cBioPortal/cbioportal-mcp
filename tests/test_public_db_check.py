@@ -31,18 +31,30 @@ def test_allowlist_is_strict(enforced, monkeypatch, value):
         server.ConfiguredFastMCP(name="p10-config")
 
 
+ERR = RuntimeError("sensitive connection details")
+# total_rows from system.tables, then count() as the check user.
+SAME = [[(2,)], 2]
+
+
 @pytest.mark.parametrize(
     "responses, rule",
     [
-        ([0, 0, 0, 0], None),
-        ([0, 0, 0, 1, 0], None),
-        ([1], "row policies"),
-        ([RuntimeError("sensitive connection details")], "row policies"),
-        ([0, 1], "cancer_study.public"),
-        ([0, 0, 1], "cancer_study.groups"),
-        ([0, 0, 0, 1, 1], "authorities"),
-        ([0, 0, RuntimeError("sensitive connection details")], "cancer_study.groups"),
-        ([0, 0, 0, RuntimeError("sensitive connection details")], "authorities"),
+        ([0, *SAME, 0, 0, 0], None),
+        ([0, *SAME, 0, 0, 1, *SAME, 0], None),
+        ([1], "row policies exist"),
+        ([ERR], "row policies: could not verify"),
+        # Policies hidden from a filtered system.row_policies still hide rows.
+        ([0, [(2,)], 1], "rows hidden from the check user"),
+        ([0, [(None,)], 2], "could not verify row counts"),
+        ([0, [], 2], "could not verify row counts"),
+        ([0, ERR], "could not verify row counts"),
+        ([0, [(2,)], ERR], "could not verify row counts"),
+        ([0, *SAME, 1], "cancer_study.public"),
+        ([0, *SAME, 0, 1], "cancer_study.groups"),
+        ([0, *SAME, 0, 0, 1, [(1,)], 0], "rows hidden from the check user"),
+        ([0, *SAME, 0, 0, 1, *SAME, 1], "authorities contains rows"),
+        ([0, *SAME, 0, ERR], "cancer_study.groups"),
+        ([0, *SAME, 0, 0, ERR], "authorities"),
         (None, "connection"),
     ],
 )
@@ -58,7 +70,9 @@ async def test_startup_check(enforced, monkeypatch, caplog, responses, rule):
         connect.side_effect = RuntimeError("sensitive connection details")
     else:
         db.query.side_effect = [
-            value if isinstance(value, Exception) else SimpleNamespace(result_rows=[(value,)])
+            value
+            if isinstance(value, Exception)
+            else SimpleNamespace(result_rows=value if isinstance(value, list) else [(value,)])
             for value in responses
         ]
     server.validate_startup()

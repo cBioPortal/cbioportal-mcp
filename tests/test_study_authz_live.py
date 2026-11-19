@@ -1585,6 +1585,11 @@ async def test_misconfigured_runtime_starts_degraded_and_mcp_returns_no_rows(ser
         identity._CURRENT.reset(token)
 
 
+HIDE_PRIVATE = "ON {db}.cancer_study USING public = 1 TO {user}"
+HIDE_CATALOG = "ON system.row_policies USING 0 TO {user}"
+HIDE_TABLES = "ON system.tables USING name != 'cancer_study' TO {user}"
+
+
 @pytest.mark.parametrize(
     "public, groups, allowed, authorities, policy, failed_rule",
     [
@@ -1596,13 +1601,23 @@ async def test_misconfigured_runtime_starts_degraded_and_mcp_returns_no_rows(ser
         (0, "Example", "Example", None, None, "cancer_study.public"),
         (1, "", "", True, None, "authorities"),
         # The reviewer's case: the policy hides the public = 0 row from the
-        # runtime user, so only the row-policy rule can catch it.
-        (0, "", "", None, "ON {db}.cancer_study USING public = 1 TO {user}", "row policies"),
-        (1, "", "", None, "ON {db}.cancer_study USING public = 1 TO p10_other", "row policies"),
-        (1, "", "", None, "ON {db}.* USING 1 TO p10_other", "row policies"),
+        # runtime user, so only the row-policy rules can catch it.
+        (0, "", "", None, (HIDE_PRIVATE,), "row policies exist"),
+        (1, "", "", None, ("ON {db}.cancer_study USING public = 1 TO p10_other",), "row policies"),
+        (1, "", "", None, ("ON {db}.* USING 1 TO p10_other",), "row policies exist"),
+        # Codex's case: a policy on system.row_policies empties the catalog for
+        # the runtime user, so only the count()/total_rows comparison sees it.
+        (0, "", "", None, (HIDE_PRIVATE, HIDE_CATALOG), "rows hidden from the check user"),
+        (0, "", "", None, (HIDE_PRIVATE, HIDE_CATALOG, HIDE_TABLES), "could not verify row"),
+        # Documented limit: a hidden policy for another user does not change
+        # what the runtime user reads, and P10 cannot see it.
+        (0, "", "", None, ("ON {db}.cancer_study USING 0 TO p10_other", HIDE_CATALOG), "public"),
+        (1, "", "", None, ("ON {db}.cancer_study USING 1 TO p10_other", HIDE_CATALOG), None),
+        # Lightweight-deleted rows still count in total_rows: fails closed.
+        (1, "", "", None, "lightweight delete", "rows hidden from the check user"),
         # Without SHOW ROW POLICIES the runtime user cannot read
         # system.row_policies at all, so the check fails closed.
-        (1, "", "", None, "no grant", "row policies"),
+        (1, "", "", None, "no grant", "row policies: could not verify"),
     ],
 )
 @pytest.mark.asyncio
@@ -1621,6 +1636,7 @@ async def test_public_db_check_on_readonly_connection(
     db = "public_db_check"
     user = "p10_readonly"
     admin = server.admin
+    policies: list[str] = []
     admin.command(f"CREATE DATABASE {db}")
     try:
         admin.command(f"CREATE USER {user} IDENTIFIED BY 'pw' SETTINGS readonly = 1")
@@ -1633,10 +1649,16 @@ async def test_public_db_check_on_readonly_connection(
             "ENGINE = MergeTree ORDER BY tuple()"
         )
         admin.insert(f"{db}.cancer_study", [(public, groups)])
-        if policy and policy != "no grant":
+        if policy == "lightweight delete":
+            admin.insert(f"{db}.cancer_study", [(0, "")])
+            admin.command(f"DELETE FROM {db}.cancer_study WHERE public = 0")
+        elif policy and policy != "no grant":
             # Keep a visible public row so the hidden one is the only signal.
             admin.insert(f"{db}.cancer_study", [(1, "")])
-            admin.command(f"CREATE ROW POLICY p10_policy {policy.format(db=db, user=user)}")
+            for i, clause in enumerate(policy):
+                clause = clause.format(db=db, user=user)
+                admin.command(f"CREATE ROW POLICY p10_policy_{i} {clause}")
+                policies.append(f"p10_policy_{i} {clause.split(' USING')[0]}")
         if authorities is not None:
             admin.command(
                 f"CREATE TABLE {db}.authorities (id UInt8) ENGINE = MergeTree ORDER BY id"
@@ -1699,8 +1721,7 @@ async def test_public_db_check_on_readonly_connection(
         if failed_rule:
             assert failed_rule in caplog.text
     finally:
-        admin.command(
-            f"DROP ROW POLICY IF EXISTS p10_policy ON {db}.*, p10_policy ON {db}.cancer_study"
-        )
+        for name in policies:
+            admin.command(f"DROP ROW POLICY IF EXISTS {name}")
         admin.command(f"DROP USER IF EXISTS {user}, p10_other")
         admin.command(f"DROP DATABASE {db} SYNC")
