@@ -1608,6 +1608,8 @@ async def test_misconfigured_runtime_starts_degraded_and_mcp_returns_no_rows(
 HIDE_PRIVATE = "ON {db}.cancer_study USING public = 1 TO {user}"
 HIDE_CATALOG = "ON system.row_policies USING 0 TO {user}"
 HIDE_TABLES = "ON system.tables USING name != 'cancer_study' TO {user}"
+HIDE_SAMPLE = "ON {db}.sample USING id = 1 TO {user}"
+HIDE_MUTATION = "ON {db}.mutation USING id = 1 TO {user}"
 
 
 @pytest.mark.parametrize(
@@ -1633,6 +1635,11 @@ HIDE_TABLES = "ON system.tables USING name != 'cancer_study' TO {user}"
         # what the runtime user reads, and P10 cannot see it.
         (0, "", "", None, ("ON {db}.cancer_study USING 0 TO p10_other", HIDE_CATALOG), "public"),
         (1, "", "", None, ("ON {db}.cancer_study USING 1 TO p10_other", HIDE_CATALOG), None),
+        # Hidden catalog plus a policy on any other table read by the MCP.
+        (1, "", "", None, (HIDE_SAMPLE, HIDE_CATALOG), "rows hidden from the check user (sample)"),
+        (1, "", "", None, (HIDE_MUTATION, HIDE_CATALOG), "check user (mutation)"),
+        # additional_table_filters on the runtime user's settings profile.
+        (1, "", "", None, "table filter", "rows hidden from the check user (sample)"),
         # Lightweight-deleted rows still count in total_rows: fails closed.
         (1, "", "", None, "lightweight delete", "rows hidden from the check user"),
         # Without SHOW ROW POLICIES the runtime user cannot read
@@ -1669,10 +1676,26 @@ async def test_public_db_check_on_readonly_connection(
             "ENGINE = MergeTree ORDER BY tuple()"
         )
         admin.insert(f"{db}.cancer_study", [(public, groups)])
-        if policy == "lightweight delete":
+        # Other storage tables, a view (skipped) and a materialized view whose
+        # inner table is checked like any storage table.
+        for table in ("sample", "mutation"):
+            admin.command(f"CREATE TABLE {db}.{table} (id UInt8) ENGINE = MergeTree ORDER BY id")
+        admin.command(
+            f"CREATE MATERIALIZED VIEW {db}.sample_ids ENGINE = MergeTree ORDER BY id "
+            f"AS SELECT id FROM {db}.sample"
+        )
+        admin.command(f"CREATE VIEW {db}.study_count AS SELECT count() FROM {db}.cancer_study")
+        for table in ("sample", "mutation"):
+            admin.insert(f"{db}.{table}", [(1,), (2,)])
+        if policy == "table filter":
+            admin.command(
+                "CREATE SETTINGS PROFILE p10_filter SETTINGS "
+                f"additional_table_filters = '{{''sample'':''id = 1''}}' TO {user}"
+            )
+        elif policy == "lightweight delete":
             admin.insert(f"{db}.cancer_study", [(0, "")])
             admin.command(f"DELETE FROM {db}.cancer_study WHERE public = 0")
-        elif policy and policy != "no grant":
+        elif policy and policy not in ("no grant", "table filter"):
             # Keep a visible public row so the hidden one is the only signal.
             admin.insert(f"{db}.cancer_study", [(1, "")])
             for i, clause in enumerate(policy):
@@ -1743,5 +1766,6 @@ async def test_public_db_check_on_readonly_connection(
     finally:
         for name in policies:
             admin.command(f"DROP ROW POLICY IF EXISTS {name}")
+        admin.command("DROP SETTINGS PROFILE IF EXISTS p10_filter")
         admin.command(f"DROP USER IF EXISTS {user}, p10_other")
         admin.command(f"DROP DATABASE {db} SYNC")
