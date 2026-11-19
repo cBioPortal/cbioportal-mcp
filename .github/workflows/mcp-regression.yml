@@ -1,16 +1,122 @@
-# Compares this PR's server against the released image on a fixed set of tool calls.
-# Tests and workflow: https://github.com/cBioPortal/cbioportal-mcp-qa (mcp_tests/calls/mcp.yaml).
-# Label a PR `mcp-behavior-change` when the difference is intended; diffs are then report-only.
+# Baseline diffs may be waived; candidate health and golden checks always gate.
 name: MCP regression
 
 on:
   pull_request:
     types: [opened, synchronize, reopened, labeled, unlabeled]
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   mcp-regression:
-    uses: cBioPortal/cbioportal-mcp-qa/.github/workflows/mcp-regression.yml@v1
+    # TODO: switch uses and qa-ref to @v2 after the linked QA PR merges and v2 is tagged.
+    uses: cBioPortal/cbioportal-mcp-qa/.github/workflows/mcp-regression.yml@1782c5e2d8dfc94620173326ed2b6fd73fe3ff3c
     with:
       server: mcp
-      qa-ref: v1
+      qa-ref: 1782c5e2d8dfc94620173326ed2b6fd73fe3ff3c
+      http_path: /db/mcp
+      librechat_headers: true
+      fail_on_missing_secrets: ${{ github.event_name == 'workflow_dispatch' || github.base_ref != 'beta' }}
     secrets: inherit
+
+  domain-equivalence:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check ClickHouse credentials
+        id: credentials
+        shell: bash
+        env:
+          CLICKHOUSE_HOST: ${{ secrets.CLICKHOUSE_HOST }}
+          CLICKHOUSE_USER: ${{ secrets.CLICKHOUSE_USER }}
+          CLICKHOUSE_PASSWORD: ${{ secrets.CLICKHOUSE_PASSWORD }}
+          CLICKHOUSE_DATABASE: ${{ secrets.CLICKHOUSE_DATABASE }}
+          MUST_GATE: ${{ github.event_name == 'workflow_dispatch' || github.base_ref != 'beta' }}
+        run: |
+          set -euo pipefail
+          if [ -z "$CLICKHOUSE_HOST" ] || [ -z "$CLICKHOUSE_USER" ] || [ -z "$CLICKHOUSE_PASSWORD" ] || [ -z "$CLICKHOUSE_DATABASE" ]; then
+            if [ "$MUST_GATE" = "true" ]; then
+              echo "::error::Missing CLICKHOUSE_HOST/USER/PASSWORD/DATABASE secrets. Fork PRs cannot access secrets. A maintainer must push the reviewed branch to upstream and run its PR checks, or run workflow_dispatch on that upstream branch."
+              exit 1
+            fi
+            echo "::notice::No ClickHouse credentials available to this beta PR; skipping domain equivalence."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: astral-sh/setup-uv@v6
+        if: steps.credentials.outputs.skip != 'true'
+      - name: Run live ClickHouse domain equivalence
+        if: steps.credentials.outputs.skip != 'true'
+        shell: bash
+        env:
+          CLICKHOUSE_HOST: ${{ secrets.CLICKHOUSE_HOST }}
+          CLICKHOUSE_PORT: ${{ secrets.CLICKHOUSE_PORT }}
+          CLICKHOUSE_USER: ${{ secrets.CLICKHOUSE_USER }}
+          CLICKHOUSE_PASSWORD: ${{ secrets.CLICKHOUSE_PASSWORD }}
+          CLICKHOUSE_DATABASE: ${{ secrets.CLICKHOUSE_DATABASE }}
+        run: |
+          set -euo pipefail
+          # URL-encode credentials without writing the DSN to logs or GITHUB_ENV.
+          # The suite uses isolated mcp_aggtest_* scratch databases, requiring CREATE/DROP.
+          uv sync --frozen --extra dev
+          uv run --frozen python - <<'PYTHON'
+          import os
+          import subprocess
+          from urllib.parse import quote
+
+          user = quote(os.environ["CLICKHOUSE_USER"], safe="")
+          password = quote(os.environ["CLICKHOUSE_PASSWORD"], safe="")
+          host = os.environ["CLICKHOUSE_HOST"]
+          port = os.environ.get("CLICKHOUSE_PORT") or "8443"
+          database = quote(os.environ["CLICKHOUSE_DATABASE"], safe="")
+          os.environ["CBIOPORTAL_MCP_TEST_CLICKHOUSE_URL"] = (
+              f"https://{user}:{password}@{host}:{port}/{database}"
+          )
+          subprocess.run(
+              ["uv", "run", "--frozen", "pytest", "-q", "tests/test_domain_tools_equivalence.py",
+               "-k", "not real_apply_order"],
+              check=True,
+          )
+          PYTHON
+
+      # The apply-order test needs a native, non-TLS admin connection. Run that
+      # case on an isolated fixture server rather than infer a production native port.
+      - name: Run native apply-order equivalence on isolated ClickHouse
+        if: steps.credentials.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run -d --name equivalence-ch -p 127.0.0.1:28123:8123 \
+            -e CLICKHOUSE_USER=admin -e CLICKHOUSE_PASSWORD=fixture-only \
+            clickhouse/clickhouse-server:25.8
+          for _ in $(seq 60); do
+            curl --fail --silent http://localhost:28123/ping && break
+            sleep 1
+          done
+          curl --fail --silent http://localhost:28123/ping
+          mkdir -p "$RUNNER_TEMP/native-client"
+          cat > "$RUNNER_TEMP/native-client/clickhouse-client" <<'PYTHON'
+          #!/usr/bin/env python3
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          args = sys.argv[1:]
+          i = args.index("--queries-file")
+          sql = Path(args[i + 1]).read_bytes()
+          del args[i:i + 2]
+          raise SystemExit(subprocess.run(
+              ["docker", "exec", "-i", "equivalence-ch", "clickhouse-client", *args],
+              input=sql,
+          ).returncode)
+          PYTHON
+          chmod +x "$RUNNER_TEMP/native-client/clickhouse-client"
+          export PATH="$RUNNER_TEMP/native-client:$PATH"
+          export CBIOPORTAL_MCP_TEST_CLICKHOUSE_URL=http://admin:fixture-only@localhost:28123
+          export CBIOPORTAL_MCP_TEST_CLICKHOUSE_NATIVE_PORT=9000
+          uv run --frozen pytest -q tests/test_domain_tools_equivalence.py -k real_apply_order
+      - name: Clean up fixture ClickHouse
+        if: always() && steps.credentials.outputs.skip != 'true'
+        run: docker rm -f equivalence-ch || true
