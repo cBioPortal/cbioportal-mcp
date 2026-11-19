@@ -94,3 +94,16 @@ def test_common_pitfalls_cover_crc_sidedness_not_colon_vs_rectum():
     assert "not the same as colon vs rectum" in pitfalls
     assert "I should not substitute colon-vs-rectum" in pitfalls
     assert "subsite-level" in pitfalls
+
+
+def test_source_file_questions_point_to_datahub_not_the_database():
+    pitfall = server.read_guide.fn.__wrapped__("cbioportal://common-pitfalls#17e")
+
+    assert "data_clinical_outcomes.txt" in pitfall
+    assert "https://github.com/cBioPortal/datahub/tree/master/public/<study_id>" in pitfall
+    assert "https://docs.cbioportal.org/file-formats/" in pitfall
+    assert "`<PREFIX>_STATUS` / `<PREFIX>_MONTHS`" in pitfall
+
+    assert "cbioportal://common-pitfalls#17e" in server._faq_guide_text()
+    guides = {g["uri"]: g["description"] for g in server.list_guides.fn.__wrapped__()}
+    assert "study files" in guides["cbioportal://faq-guide"]
