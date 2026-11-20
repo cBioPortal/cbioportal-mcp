@@ -324,6 +324,7 @@ def main():
     # (see query_concurrency); report the pool's actual size, not the env.
     try:
         query_concurrency.verify_query_pool(MAX_CONCURRENT_QUERIES)
+        query_concurrency.verify_query_runner()
     except RuntimeError as e:
         logger.critical("❌ %s", e)
         sys.exit(2)
@@ -633,8 +634,8 @@ def clickhouse_list_tables() -> dict[str, Any]:
         cached = _cache_get(_schema_cache, ("tables",))
         if cached is not None:
             return _format_tables_response(cached)
-        from mcp_clickhouse.mcp_server import run_query
-        raw = json.loads(run_query("SHOW TABLES"))
+        with traced_db_query("schema.list_tables"):
+            raw = json.loads(query_concurrency.run_query("SHOW TABLES"))
         rows = raw.get("rows", [])
         result = [{"name": row[0]} for row in rows if row]
         logger.debug("clickhouse_list_tables result: %s", result)
@@ -668,8 +669,8 @@ def clickhouse_list_table_columns(table: str) -> dict[str, Any]:
         cached = _cache_get(_schema_cache, ("columns", table))
         if cached is not None:
             return _format_columns_response(cached)
-        from mcp_clickhouse.mcp_server import run_query
-        raw = json.loads(run_query(f"DESCRIBE TABLE {table}"))
+        with traced_db_query("schema.describe_table"):
+            raw = json.loads(query_concurrency.run_query(f"DESCRIBE TABLE {table}"))
         columns_list = raw.get("columns", [])
         rows = raw.get("rows", [])
         # DESCRIBE TABLE returns: name, type, default_type, default_expression, comment, ...
@@ -737,15 +738,15 @@ def run_select_query(query: str, *, query_label: str, max_rows: int | None = Non
     Returns:
         list: A list of rows, where each row is a dictionary with column names as keys and corresponding values.
     """
-    from mcp_clickhouse.mcp_server import run_query
-
     # DB-level read-only permissions (enforced on startup) prevent non-SELECT queries,
     # so we don't need application-level query filtering. This allows CTEs (WITH ... AS).
     if max_rows is not None:
         query = _with_row_cap(query, max_rows)
-    logger.debug("run_select_query: delegate the query to run_query tool of ClickHouse MCP")
+    logger.debug("run_select_query: run the query on mcp-clickhouse's pool")
+    # query_concurrency.run_query is mcp-clickhouse's run_query plus the
+    # query_id / queue-wait / ClickHouse-summary telemetry traced_db_query reports.
     with traced_db_query(query_label):
-        ch_query_result = json.loads(run_query(query))
+        ch_query_result = json.loads(query_concurrency.run_query(query))
         result = zip_select_query_result(ch_query_result)
     return result
 

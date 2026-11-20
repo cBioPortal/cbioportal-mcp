@@ -6,16 +6,15 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import Mock
 
-import mcp_clickhouse.mcp_server
 import pytest
 
-from cbioportal_mcp import metadata_cache, server
+from cbioportal_mcp import metadata_cache, query_concurrency, server
 
 
 def _patch_run_query(monkeypatch, payload):
-    """Stub mcp-clickhouse's run_query (returns JSON text) and count calls."""
+    """Stub the ClickHouse run_query (returns JSON text) and count calls."""
     query = Mock(side_effect=lambda _sql: json.dumps(payload))
-    monkeypatch.setattr(mcp_clickhouse.mcp_server, "run_query", query)
+    monkeypatch.setattr(query_concurrency, "run_query", query)
     return query
 
 
@@ -65,7 +64,7 @@ def test_columns_keyed_by_table(monkeypatch):
         return json.dumps({"columns": ["name", "type"], "rows": [[f"{table}_id", "String"]]})
 
     query = Mock(side_effect=describe)
-    monkeypatch.setattr(mcp_clickhouse.mcp_server, "run_query", query)
+    monkeypatch.setattr(query_concurrency, "run_query", query)
     list_columns = server.clickhouse_list_table_columns.fn.__wrapped__
     results = [list_columns(t) for t in ["sample", "patient", "sample"]]
     assert query.call_count == 2

@@ -60,7 +60,7 @@ OFFLOADED_TOOLS = [
 
 
 class SlowClickHouse:
-    """Stand-in for mcp-clickhouse's run_query: sleeps, then returns one row.
+    """Stand-in for query_concurrency.run_query: sleeps, then returns one row.
 
     Records the peak number of queries in flight at once, and the FastMCP
     request id each query ran under.
@@ -92,7 +92,7 @@ class SlowClickHouse:
 @pytest.fixture
 def slow_clickhouse(monkeypatch):
     stub = SlowClickHouse()
-    monkeypatch.setattr(mcp_clickhouse.mcp_server, "run_query", stub)
+    monkeypatch.setattr(query_concurrency, "run_query", stub)
     server._clear_schema_cache()
     yield stub
     server._clear_schema_cache()
