@@ -290,9 +290,13 @@ WHERE attribute_name = 'AGE' AND attribute_value > '50';  -- String comparison!
 
 #### ✅ Correct: Cast to appropriate type
 ```sql
--- CORRECT - Numeric comparison
-SELECT * FROM clinical_data_derived
-WHERE attribute_name = 'AGE' AND CAST(attribute_value AS Float64) > 50;
+-- CORRECT - Numeric comparison (scoped to a study, only the needed columns)
+SELECT patient_unique_id, attribute_value
+FROM clinical_data_derived
+WHERE cancer_study_identifier = 'ACTUAL_STUDY_ID'
+  AND attribute_name = 'AGE'
+  AND toFloat64OrNull(attribute_value) > 50
+LIMIT 100;
 ```
 
 ### 7. 🚨 NULL VALUE HANDLING
@@ -472,11 +476,13 @@ WHERE cna_alteration = 'AMP';
 
 #### ✅ Correct: Use numeric values
 ```sql
--- CORRECT - Use numeric codes
-SELECT * FROM genomic_event_derived
-WHERE cna_alteration = 2;   -- 2 = Amplification
--- OR
-WHERE cna_alteration = -2;  -- -2 = Homozygous Deletion
+-- CORRECT - Use numeric codes (scoped to a study, only the needed columns)
+SELECT sample_unique_id, hugo_gene_symbol, cna_alteration
+FROM genomic_event_derived
+WHERE cancer_study_identifier = 'ACTUAL_STUDY_ID'
+  AND variant_type = 'cna'
+  AND cna_alteration = 2     -- 2 = Amplification; -2 = Homozygous Deletion
+LIMIT 100;
 ```
 
 `genomic_event_derived` stores only 2 and -2. For shallow deletion (-1), gain (1) or diploid (0), query `genetic_alteration_derived WHERE profile_type = 'gistic'` — see the CNA section of `cbioportal://mutation-frequency-guide`. Zero rows for `cna_alteration = -1` does not mean no shallow deletions.
