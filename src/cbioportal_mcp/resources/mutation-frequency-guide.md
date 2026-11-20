@@ -304,12 +304,16 @@ altered AS (
     GROUP BY sct.cancer_type
 ),
 profiled_samples_for_gene AS (
+    -- Filter each branch to the cohort BEFORE the UNION so ClickHouse
+    -- doesn't read coverage rows for every study in the database.
     SELECT sample_unique_id, cancer_study_identifier
     FROM mutation_panel_gene_coverage
     WHERE hugo_gene_symbol = 'TP53'  -- same gene as above
+      AND cancer_study_identifier IN (SELECT cancer_study_identifier FROM cohort)
     UNION ALL
     SELECT sample_unique_id, cancer_study_identifier
     FROM mutation_wes_coverage
+    WHERE cancer_study_identifier IN (SELECT cancer_study_identifier FROM cohort)
 ),
 profiled AS (
     SELECT sct.cancer_type,
@@ -378,7 +382,7 @@ For accurate gene mutation frequency calculations, you must use gene-specific pr
 1. **Step 1**: Use `genomic_event_derived` table ONLY for getting altered counts per gene
 2. **Step 2**: Use `sample_to_gene_panel_derived` tables for gene-specific profiling denominators
 3. **Step 3**: Calculate gene-specific frequencies using gene-specific denominators
-4. **Step 4**: For EACH gene in results, run separate profiling queries
+4. **Prefer the views**: `top_mutated_genes_in_study` / `top_mutated_genes_in_cohort` already do steps 1-3 in one call. Only write the manual form for variations the views don't cover, and then compute all genes' denominators in ONE grouped query (Step 2), never one query per gene.
 
 ### Key Rules:
 - **DO NOT use genomic_event_derived for total sample counts** - this gives study-wide counts, not gene-specific
@@ -402,26 +406,36 @@ FROM genomic_event_derived
 WHERE
     variant_type = 'mutation'
     AND mutation_status != 'UNCALLED'
-    -- [Additional filters for specific studies/genes as needed]
+    AND cancer_study_identifier = 'ACTUAL_STUDY_ID'  -- REQUIRED: never aggregate every study
 GROUP BY entrez_gene_id, hugo_gene_symbol
-ORDER BY numberOfAlteredSamplesOnPanel DESC;
+ORDER BY numberOfAlteredSamplesOnPanel DESC
+LIMIT 20;
 ```
 
 ## CRITICAL: Gene-Specific Profiling Denominators
 
-### Step 2: Calculate Gene-Specific Profiled Samples (REQUIRED FOR EACH GENE)
-**WORKFLOW REQUIREMENT:** For EACH gene in your results, run separate profiling queries:
+### Step 2: Calculate Gene-Specific Profiled Samples (one query for all genes)
+Each gene needs its own denominator, but compute them all in ONE grouped query over the genes from Step 1. Do not run a separate query per gene. Include WES samples: they are profiled for every gene but have no `gene_panel_list` rows, so a denominator built only through `gene_panel` / `gene_panel_list` drops them.
 
 ```sql
--- REQUIRED: Gene-specific profiled samples (DO THIS FOR EACH GENE)
-SELECT COUNT(DISTINCT stgp.sample_unique_id) AS numberOfProfiledSamples
-FROM sample_to_gene_panel_derived stgp
-JOIN gene_panel gp ON stgp.gene_panel_id = gp.stable_id
-JOIN gene_panel_list gpl ON gp.internal_id = gpl.internal_id
-JOIN gene g ON gpl.gene_id = g.entrez_gene_id
-WHERE stgp.alteration_type = 'MUTATION_EXTENDED'
-  AND g.hugo_gene_symbol = 'TP53'  -- Replace with actual gene symbol for each gene
-  AND stgp.cancer_study_identifier = 'ACTUAL_STUDY_ID';  -- Replace with correct study identifier
+WITH genes AS (
+    SELECT arrayJoin(['TP53', 'PIK3CA', 'CDH1']) AS hugo_gene_symbol  -- genes from Step 1
+),
+profiled AS (
+    SELECT hugo_gene_symbol, sample_unique_id
+    FROM mutation_panel_gene_coverage
+    WHERE cancer_study_identifier = 'ACTUAL_STUDY_ID'
+      AND hugo_gene_symbol IN (SELECT hugo_gene_symbol FROM genes)
+    UNION ALL
+    SELECT g.hugo_gene_symbol, w.sample_unique_id
+    FROM mutation_wes_coverage w
+    CROSS JOIN genes g
+    WHERE w.cancer_study_identifier = 'ACTUAL_STUDY_ID'
+)
+SELECT hugo_gene_symbol,
+       COUNT(DISTINCT sample_unique_id) AS numberOfProfiledSamples
+FROM profiled
+GROUP BY hugo_gene_symbol;
 ```
 
 ### WES (Whole Exome Sequencing) Studies
@@ -544,10 +558,10 @@ These are raw counts; common genes pair often by chance. Co-occurrence/exclusivi
 ### Critical Requirements for Accurate Analysis:
 1. **Exclude UNCALLED mutations**: `mutation_status != 'UNCALLED'`
 2. **Use numberOfAlteredSamplesOnPanel**: Filter `off_panel = 0` for accurate sample frequency calculations
-3. **For EACH gene in results**: Run separate profiling queries using `sample_to_gene_panel_derived`
+3. **Gene-specific denominators in one query**: Use the views, or the grouped WES-aware query in Step 2, not one profiling query per gene
 4. **DO NOT use study-wide counts**: from genomic_event_derived for denominators
 5. **Include denominator columns**: showing gene-specific profiled samples per row
-6. **Replace gene symbols**: Replace 'TP53' in profiling queries with actual gene symbol for each gene
+6. **Scope and limit**: Filter every large-table read to the study or cohort, and `LIMIT` ranked results
 
 ### Expected Results Format:
 - **Example for MSK-CHORD TP53 (illustrative only)**: sample % = (# Samples / Profiled Samples) × 100. For example, if a gene has 13,105 altered samples out of 25,040 profiled, the sample frequency is (13,105 / 25,040) × 100 ≈ 52.4%. Actual counts will depend on the specific dataset version and filters used.
@@ -564,10 +578,10 @@ FROM top_mutated_genes_in_study(study = 'your_study_id', top_n = 20);
 -- os_target_gdc (WES): TP53 32/143 = 22.4%, MUC16 16/143, TTN 16/143
 ```
 
-### Method 2: Manual Per-Gene Queries (More Reliable)
-**Step 1**: Get top mutated genes
-**Step 2**: For each gene, run individual profiling query
-**Step 3**: Combine results manually with proper denominators
+### Method 2: Manual Query (only when the views don't fit)
+**Step 1**: Get top mutated genes (study-scoped, with `LIMIT`)
+**Step 2**: Get all of those genes' denominators in one grouped, WES-aware query (see Step 2 above)
+**Step 3**: Join the two results by gene
 
 ## Important Notes
 
