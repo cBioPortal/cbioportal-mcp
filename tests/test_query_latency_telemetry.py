@@ -41,12 +41,14 @@ class FakeClient:
 
     server_settings = {}
 
-    def __init__(self, *, delay=0.0, hang=False, error=None, summary=SUMMARY):
+    def __init__(self, *, delay=0.0, hang=False, error=None, summary=SUMMARY, kill_blocks=False):
         self.delay = delay
         self.hang = hang
         self.error = error
         self.summary = summary
+        self.kill_blocks = kill_blocks
         self.release = threading.Event()
+        self.entered = threading.Event()  # set once the first query reaches ClickHouse
         self.calls = []
         self.kills = []
         self.lock = threading.Lock()
@@ -54,6 +56,7 @@ class FakeClient:
     def query(self, query, settings=None):
         with self.lock:
             self.calls.append((query, dict(settings or {})))
+        self.entered.set()
         if self.hang:
             self.release.wait(10)
         elif self.delay:
@@ -62,12 +65,16 @@ class FakeClient:
             raise self.error
         res = SimpleNamespace(column_names=["n", "big"], result_rows=[[1, 2**60], [2, None]])
         if self.summary is not None:
-            res.summary = dict(self.summary)
+            res.summary = dict(self.summary) if type(self.summary) is dict else self.summary
         return res
 
     def command(self, sql):
         with self.lock:
             self.kills.append(sql)
+        if self.kill_blocks:
+            # KILL QUERY hangs (e.g. ClickHouse unresponsive): run_query must
+            # still return after its bounded 1s cancellation wait.
+            self.release.wait(10)
 
 
 @pytest.fixture
@@ -182,27 +189,98 @@ def test_running_query_timeout_kills_it_with_the_recorded_query_id(ch):
     assert len(client.kills) == 2
 
 
+def _run_with_pool_blocked(client, run, query):
+    """Run ``run(query)`` while the 1-worker pool is busy with a hung query."""
+    blocker = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    try:
+        blocker.submit(_outcome, query_concurrency.run_query, "SELECT blocker")
+        assert client.entered.wait(5), "blocker never reached the fake ClickHouse"
+        return run(query)
+    finally:
+        client.release.set()
+        blocker.shutdown(wait=True)
+
+
 def test_query_still_queued_at_timeout_is_cancelled_without_kill(ch):
     """Queue wait counts against the 30s (here 1s) timeout, as in mcp-clickhouse."""
     client = ch(FakeClient(hang=True), workers=1)
-    blocker = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-    blocker.submit(_outcome, query_concurrency.run_query, "SELECT blocker")
-    while not client.calls:
-        time.sleep(0.01)
     stats = query_concurrency.QueryStats()
 
-    with query_concurrency.recording_query_stats(stats):
-        queued = _outcome(query_concurrency.run_query, "SELECT queued")
+    def run(query):
+        with query_concurrency.recording_query_stats(stats):
+            return _outcome(query_concurrency.run_query, query)
+
+    queued = _run_with_pool_blocked(client, run, "SELECT queued")
+    finished_at = time.perf_counter()
 
     assert queued == (ToolError, "Query timed out after 1 seconds")
     assert stats.timed_out and stats.started_at is None and stats.queue_wait_ms is None
-    # Only the blocker ever reached ClickHouse; the queued one was cancelled, not killed.
+    assert stats.cancelled_in_queue_at is not None
+    # Only the blocker ever reached ClickHouse; the queued one was cancelled, not
+    # killed (the blocker itself times out too, so it may have a KILL of its own).
     assert [q for q, _ in client.calls] == ["SELECT blocker"]
-    _, attrs = telemetry._db_query_breakdown(stats, time.perf_counter())
+    assert not any(stats.query_id in kill for kill in client.kills)
+    metrics, attrs = telemetry._db_query_breakdown(stats, finished_at + 60)
     assert attrs["db.query.never_started"] is True
-    assert attrs["db.query.queue_wait_ms"] >= 950
-    client.release.set()
-    blocker.shutdown(wait=True)
+    # Ends when the future was cancelled, not when the span finished (+60s here).
+    wait_ms = (stats.cancelled_in_queue_at - stats.submitted_at) * 1000
+    assert metrics["queue_wait_ms"] == attrs["db.query.queue_wait_ms"] == wait_ms
+    assert 950 <= wait_ms < 5000
+
+
+def test_queued_cancellation_matches_mcp_clickhouse(ch):
+    our_client = ch(FakeClient(hang=True), workers=1)
+    ours = _run_with_pool_blocked(
+        our_client, lambda q: _outcome(query_concurrency.run_query, q), "SELECT ours"
+    )
+    their_client = ch(FakeClient(hang=True), workers=1)
+    theirs = _run_with_pool_blocked(
+        their_client, lambda q: _outcome(mc.run_query, q), "SELECT theirs"
+    )
+
+    assert ours == theirs == (ToolError, "Query timed out after 1 seconds")
+    # In both, the queued query was cancelled before reaching ClickHouse.
+    for client in (our_client, their_client):
+        assert [q for q, _ in client.calls] == ["SELECT blocker"]
+    assert not mc._active_queries
+
+
+def test_blocked_kill_is_bounded_like_mcp_clickhouse(ch):
+    """A hung KILL QUERY delays the timeout error by at most the 1s bounded wait."""
+    client = ch(FakeClient(hang=True, kill_blocks=True))
+    results = []
+    try:
+        for run in (query_concurrency.run_query, mc.run_query):
+            started = time.perf_counter()
+            outcome = _outcome(run, "SELECT sleep(10)")
+            results.append((outcome, time.perf_counter() - started))
+    finally:
+        client.release.set()
+
+    (ours, our_s), (theirs, their_s) = results
+    assert ours == theirs == (ToolError, "Query timed out after 1 seconds")
+    # 1s query timeout + 1s bounded cancellation wait, never the 10s KILL hang.
+    assert 1.9 <= our_s < 3.5 and 1.9 <= their_s < 3.5
+    assert len(client.kills) == 2
+
+
+def test_rejected_submission_reports_no_queue_wait(ch, monkeypatch, spans, metrics):
+    ch(FakeClient())
+    broken = Mock()
+    broken.submit.side_effect = RuntimeError("cannot schedule new futures after shutdown")
+    monkeypatch.setattr(mc, "QUERY_EXECUTOR", broken)
+
+    result = server.clickhouse_run_select_query.fn.__wrapped__("SELECT 1")
+
+    assert result == {
+        "error_message": (
+            "Unexpected error during query execution: " "cannot schedule new futures after shutdown"
+        )
+    }
+    (span,) = spans.get_finished_spans()
+    assert "db.query.queue_wait_ms" not in span.attributes
+    assert "db.query.never_started" not in span.attributes
+    assert set(_distributions(metrics)) == {"db_query.duration_ms"}
 
 
 # --- recorded facts ----------------------------------------------------------------
@@ -228,6 +306,42 @@ def test_stats_record_query_id_summary_and_timings(ch):
     assert stats.queue_wait_ms >= 0 and stats.client_acquire_ms >= 0
     assert stats.rows_returned == 2 and stats.payload_chars == len(payload)
     assert stats.returned_at is not None and not stats.timed_out
+
+
+class _ExplodingSummary(dict):
+    def get(self, key, default=None):
+        if key == "read_bytes":
+            raise RuntimeError("bad header")
+        return super().get(key, default)
+
+
+@pytest.mark.parametrize(
+    "summary, expected",
+    [
+        (
+            {
+                "elapsed_ns": float("inf"),  # int() -> OverflowError
+                "read_rows": float("nan"),  # int() -> ValueError
+                "result_rows": object(),  # int() -> TypeError
+                "result_bytes": True,  # not a count
+                "read_bytes": "12",
+            },
+            {"read_bytes": 12},
+        ),
+        (_ExplodingSummary(read_rows="3"), {"read_rows": 3}),
+        ("not a mapping", {}),
+    ],
+)
+def test_malformed_summary_never_changes_the_result(ch, summary, expected):
+    ch(FakeClient(summary=summary))
+    stats = query_concurrency.QueryStats()
+
+    with query_concurrency.recording_query_stats(stats):
+        ours = _outcome(query_concurrency.run_query, "SELECT 1")
+    theirs = _outcome(mc.run_query, "SELECT 1")
+
+    assert ours[0] == "ok" and ours == theirs
+    assert stats.server == expected
 
 
 def test_missing_or_partial_summary_is_tolerated(ch):
@@ -262,6 +376,14 @@ def test_queue_wait_is_measured_when_the_pool_is_saturated(ch):
     assert waits[0] < 100  # first query got the worker immediately
     assert waits[1] >= 250  # second waited for the first to finish (~300ms)
     assert all(s.execute_ms >= 250 for s in stats)  # execution excludes the wait
+
+
+def test_verify_query_runner_requires_the_vendored_mcp_clickhouse_version(monkeypatch):
+    assert query_concurrency._installed_mcp_clickhouse_version() == "0.5.0"
+    query_concurrency.verify_query_runner()
+    monkeypatch.setattr(query_concurrency, "_installed_mcp_clickhouse_version", lambda: "0.6.0")
+    with pytest.raises(RuntimeError, match="0.6.0.*vendored.*query_concurrency.py.*Re-diff"):
+        query_concurrency.verify_query_runner()
 
 
 def test_verify_query_runner(monkeypatch):
@@ -419,8 +541,80 @@ def test_tool_metrics_include_result_size_and_total_duration(spans, metrics, mon
 
     dists = _distributions(metrics)
     assert dists["tool.result_chars"][0] == 123
-    assert dists["tool.total_duration_ms"][1] == dists["tool.duration_ms"][1]
+    assert dists["tool.result_chars"][1] == dists["tool.total_duration_ms"][1]
     # tool.duration_ms keeps its meaning; the total includes the post-processing.
     assert dists["tool.total_duration_ms"][0] >= dists["tool.duration_ms"][0] + 45
     (span,) = spans.get_finished_spans()
     assert span.attributes["mcp.tool.result_chars"] == 123
+
+
+def _caller(client_name):
+    return telemetry._CallerContext(
+        user_id=None,
+        user_email=None,
+        client_kind="direct",
+        client_name=client_name,
+        client_version="9.9",
+        session_id=None,
+    )
+
+
+def test_new_tool_metrics_omit_the_unbounded_client_name(spans, metrics, monkeypatch):
+    import mcp.types as mt
+
+    arbitrary = "my-homegrown-agent-7f3a9c2e/build-123"
+    monkeypatch.setattr(telemetry, "_llmobs_tool_span", lambda *args: None)
+    monkeypatch.setattr(telemetry, "_resolve_caller_context", lambda _ctx: _caller(arbitrary))
+    result = SimpleNamespace(content=[mt.TextContent(type="text", text="ok")])
+
+    async def call_next(_):
+        return result
+
+    context = SimpleNamespace(message=SimpleNamespace(name="ping", arguments={}))
+    asyncio.run(telemetry.TelemetryMiddleware().on_call_tool(context, call_next))
+
+    dists = _distributions(metrics)
+    bounded = {"tool": "ping", "success": "true", "client_kind": "direct"}
+    assert dists["tool.result_chars"][1] == bounded
+    assert dists["tool.total_duration_ms"][1] == bounded
+    # Existing metrics keep their tags unchanged, client_name included.
+    assert dists["tool.duration_ms"][1] == {**bounded, "client_name": arbitrary}
+    assert metrics.increment.call_args_list[0].args[1]["client_name"] == arbitrary
+
+
+def test_cancelled_tool_call_emits_total_duration_and_reraises(spans, metrics, monkeypatch):
+    monkeypatch.setattr(telemetry, "_llmobs_tool_span", lambda *args: None)
+    finished = []
+    monkeypatch.setattr(telemetry, "_llmobs_finish", lambda *a, **kw: finished.append(kw))
+    monkeypatch.setattr(telemetry, "_resolve_caller_context", lambda _ctx: _caller("x"))
+    entered = asyncio.Event()
+
+    async def call_next(_):
+        entered.set()
+        await asyncio.sleep(30)
+
+    async def scenario():
+        context = SimpleNamespace(message=SimpleNamespace(name="slow_tool", arguments={}))
+        task = asyncio.create_task(telemetry.TelemetryMiddleware().on_call_tool(context, call_next))
+        await asyncio.wait_for(entered.wait(), 5)
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario())
+
+    # LLMObs cleanup ran with the cancellation as the error, before the total.
+    assert isinstance(finished[0]["error"], asyncio.CancelledError)
+    dists = _distributions(metrics)
+    # tool.duration_ms / tool.calls behaviour is unchanged: nothing for a cancel.
+    assert "tool.duration_ms" not in dists
+    assert metrics.increment.call_args_list == []
+    total_ms, tags = dists["tool.total_duration_ms"]
+    assert tags == {
+        "tool": "slow_tool",
+        "success": "false",
+        "client_kind": "direct",
+        "error_kind": "cancelled",
+    }
+    assert total_ms >= 45

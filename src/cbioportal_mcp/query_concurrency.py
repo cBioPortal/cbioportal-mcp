@@ -28,6 +28,7 @@ timeout fires (by default the query timeout + 5s).
 """
 
 import concurrent.futures
+import importlib.metadata
 import importlib.util
 import logging
 import os
@@ -37,7 +38,7 @@ import uuid
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from typing import Iterator
+from typing import Iterator, Mapping
 
 from dotenv.main import DotEnv
 
@@ -167,6 +168,9 @@ def configure_mcp_clickhouse_workers() -> int:
 # same query text, same settings (readonly + query_id), same timeout, same
 # errors. verify_query_runner() refuses startup if those internals move.
 
+# The mcp-clickhouse release whose run_query()/execute_query() run_query() copies.
+MCP_CLICKHOUSE_RUNNER_VERSION = "0.5.0"
+
 _RUNNER_INTERNALS = (
     "QUERY_EXECUTOR",
     "_max_workers",
@@ -217,6 +221,9 @@ class QueryStats:
     execute_ms: float | None = None  # client.query(): network + ClickHouse + decode
     serialize_ms: float | None = None  # mcp-clickhouse's JSON serialization
     returned_at: float | None = None  # the caller got the serialized result back
+    # A timed-out query was still queued and future.cancel() removed it; the
+    # time of that cancel ends its queue wait.
+    cancelled_in_queue_at: float | None = None
     rows_returned: int | None = None
     payload_chars: int | None = None
     timed_out: bool = False
@@ -245,19 +252,63 @@ def recording_query_stats(stats: QueryStats) -> Iterator[QueryStats]:
 
 
 def _summary_stats(summary) -> dict:
+    """The SUMMARY_FIELDS of a QueryResult.summary that convert to int.
+
+    Never raises: a value that is missing or won't convert (None, "abc",
+    float("inf") -> OverflowError, an object whose lookup raises) is skipped,
+    so telemetry can't turn a successful query into an error.
+    """
     out = {}
-    if not isinstance(summary, dict):
-        return out
-    for name in SUMMARY_FIELDS:
-        try:
-            out[name] = int(summary[name])
-        except (KeyError, TypeError, ValueError):
-            continue
+    try:
+        if not isinstance(summary, Mapping):
+            return out
+        for name in SUMMARY_FIELDS:
+            try:
+                value = summary.get(name)
+                if value is None or isinstance(value, bool):
+                    continue
+                out[name] = int(value)
+            except Exception:
+                continue
+    except Exception as exc:
+        logger.debug("Ignoring unreadable ClickHouse query summary: %s", exc)
     return out
 
 
+def _record_summary(stats: "QueryStats", res) -> None:
+    """Copy res.summary into stats; never raises (kept apart from result handling)."""
+    try:
+        stats.server = _summary_stats(getattr(res, "summary", None))
+    except Exception as exc:
+        logger.debug("Ignoring unreadable ClickHouse query summary: %s", exc)
+
+
+def _installed_mcp_clickhouse_version() -> str | None:
+    try:
+        return importlib.metadata.version("mcp-clickhouse")
+    except importlib.metadata.PackageNotFoundError:
+        return None
+
+
 def verify_query_runner() -> None:
-    """Raise unless mcp-clickhouse exposes what run_query() is built on."""
+    """Raise unless the installed mcp-clickhouse is the one run_query() copies.
+
+    run_query()/_execute_query() are a vendored copy of mcp-clickhouse
+    MCP_CLICKHOUSE_RUNNER_VERSION's run_query()/execute_query(). Any other
+    version may have changed them (timeouts, cancellation, errors), so refuse
+    to start until the copy has been re-diffed against it.
+    """
+    installed = _installed_mcp_clickhouse_version()
+    if installed != MCP_CLICKHOUSE_RUNNER_VERSION:
+        raise RuntimeError(
+            f"mcp-clickhouse {installed} is installed, but the query runner vendored in "
+            f"cbioportal_mcp/query_concurrency.py (run_query/_execute_query) is a copy of "
+            f"mcp-clickhouse {MCP_CLICKHOUSE_RUNNER_VERSION}'s run_query/execute_query. "
+            f"Re-diff that runner against mcp-clickhouse {installed}'s mcp_server.py and "
+            f"update MCP_CLICKHOUSE_RUNNER_VERSION, or pin "
+            f"mcp-clickhouse=={MCP_CLICKHOUSE_RUNNER_VERSION}."
+        )
+
     import mcp_clickhouse.mcp_server as mcp_server
 
     missing = [name for name in _RUNNER_INTERNALS if not hasattr(mcp_server, name)]
@@ -300,7 +351,7 @@ def _execute_query(query: str, query_id: str, client_config, stats: QueryStats) 
         execute_started = time.perf_counter()
         res = client.query(query, settings=query_settings)
         stats.execute_ms = (time.perf_counter() - execute_started) * 1000
-        stats.server = _summary_stats(getattr(res, "summary", None))
+        _record_summary(stats, res)
         stats.rows_returned = len(res.result_rows)
         mc.logger.info(f"Query {query_id} returned {len(res.result_rows)} rows")
         serialize_started = time.perf_counter()
@@ -371,6 +422,7 @@ def run_query(query: str) -> str:
                 "Query %s timed out after %s seconds: %s", query_id, timeout_secs, query
             )
             if future.cancel():
+                stats.cancelled_in_queue_at = time.perf_counter()
                 mc._remove_active_query(query_id, state)
             else:
                 mc._mark_active_query_cancelled(query_id)

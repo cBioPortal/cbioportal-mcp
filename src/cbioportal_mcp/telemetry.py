@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import atexit
 import json
 import logging
@@ -163,11 +164,21 @@ def _emit_tool_metrics(
         client.increment("tool.calls", tags)
         client.distribution("tool.duration_ms", round(duration_ms, 3), tags)
         if result_chars is not None:
-            client.distribution("tool.result_chars", result_chars, tags)
+            client.distribution("tool.result_chars", result_chars, _bounded_tool_tags(tags))
         if not success:
             client.increment("tool.errors", tags)
     except Exception as exc:
         logger.debug("DogStatsD metric emit failed: %s", exc)
+
+
+def _bounded_tool_tags(tags: dict[str, object]) -> dict[str, object]:
+    """Tool metric tags without client_name.
+
+    client_name is the caller's self-reported clientInfo.name, so its values
+    are unbounded. The existing tool.* metrics keep it; metrics added since
+    (tool.result_chars, tool.total_duration_ms) carry only bounded tags.
+    """
+    return {key: value for key, value in tags.items() if key != "client_name"}
 
 
 def _emit_tool_total_metric(
@@ -176,12 +187,12 @@ def _emit_tool_total_metric(
     total_ms: float,
     success: bool,
     client_kind: str,
-    client_name: str | None,
     error_kind: str | None = None,
 ) -> None:
     """Emit tool.total_duration_ms: tool.duration_ms plus the telemetry work
-    after it (LLMObs output annotation and span finish). Same tags as
-    tool.duration_ms, so the two can be compared on one dashboard."""
+    after it (LLMObs output annotation and span finish). Bounded tags only:
+    tool, success, client_kind and error_kind ("result" | "exception" |
+    "cancelled"); no client_name (see _bounded_tool_tags)."""
     client = _get_dogstatsd_client()
     if client is None:
         return
@@ -189,7 +200,6 @@ def _emit_tool_total_metric(
         "tool": tool_name,
         "success": str(success).lower(),
         "client_kind": client_kind,
-        "client_name": client_name,
     }
     if error_kind is not None:
         tags["error_kind"] = error_kind
@@ -265,9 +275,15 @@ def _db_query_breakdown(stats, finished_at: float) -> tuple[dict[str, float], di
     attrs["db.clickhouse.query_id"] = stats.query_id
     attrs["db.query.timed_out"] = stats.timed_out
     queue_wait_ms = stats.queue_wait_ms
-    if queue_wait_ms is None and stats.submitted_at is not None:
-        # No worker picked it up before we gave up: it waited the whole time.
-        queue_wait_ms = (finished_at - stats.submitted_at) * 1000
+    if (
+        queue_wait_ms is None
+        and stats.submitted_at is not None
+        and stats.cancelled_in_queue_at is not None
+    ):
+        # Timed out while still queued: it waited from submit until the
+        # future was cancelled. A rejected submit() is never cancelled, so it
+        # reports no queue wait at all.
+        queue_wait_ms = (stats.cancelled_in_queue_at - stats.submitted_at) * 1000
         attrs["db.query.never_started"] = True
     if queue_wait_ms is not None:
         metrics["queue_wait_ms"] = queue_wait_ms
@@ -1034,6 +1050,10 @@ class TelemetryMiddleware(Middleware):
                     raise
         except BaseException as exc:
             error = exc
+            if outcome is None and isinstance(exc, asyncio.CancelledError):
+                # tool.duration_ms is still not emitted for a cancelled call;
+                # tool.total_duration_ms is, so cancellations are visible.
+                outcome = (False, "cancelled")
             raise
         finally:
             # Always finish the LLMObs span (it is the active ddtrace span for this
@@ -1045,7 +1065,6 @@ class TelemetryMiddleware(Middleware):
                     total_ms=(time.perf_counter() - started) * 1000,
                     success=outcome[0],
                     client_kind=caller.client_kind,
-                    client_name=caller.client_name,
                     error_kind=outcome[1],
                 )
 

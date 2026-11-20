@@ -121,10 +121,11 @@ async def test_tool_outcome_spans_metrics_and_return(monkeypatch, caplog, outcom
         assert "connection failed" not in str(tags)
     distributions = {c.args[0]: c.args for c in metrics.distribution.call_args_list}
     assert distributions["tool.duration_ms"][2] == tags
-    # The end-to-end total (incl. LLMObs post-processing) shares the same tags
-    # and is emitted last, after tool.duration_ms.
+    # The end-to-end total (incl. LLMObs post-processing) is emitted last, with
+    # the same tags minus the unbounded client_name.
     assert metrics.distribution.call_args.args[0] == "tool.total_duration_ms"
-    assert distributions["tool.total_duration_ms"][2] == tags
+    bounded = {k: v for k, v in tags.items() if k != "client_name"}
+    assert distributions["tool.total_duration_ms"][2] == bounded
     assert distributions["tool.total_duration_ms"][1] >= distributions["tool.duration_ms"][1]
     provider.shutdown()
 
