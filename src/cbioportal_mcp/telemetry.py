@@ -599,6 +599,34 @@ def _log_llmobs_failure(stage: str, exc: BaseException) -> None:
     )
 
 
+def _llmobs_preview_limit() -> int:
+    """Read the per-field character cap for LLMObs input and output previews."""
+    try:
+        limit = int(os.getenv("CBIOPORTAL_MCP_LLMOBS_PREVIEW_CHARS", "4096"))
+    except ValueError:
+        return 4096
+    return limit if limit > 0 else 4096
+
+
+def _llmobs_json_preview(value: dict | list, limit: int) -> tuple[str, dict]:
+    """Stop encoding once the preview is full. Size is the number of top-level items."""
+    parts = []
+    remaining = limit
+    json_chars = 0
+    for chunk in json.JSONEncoder(default=str).iterencode(value):
+        json_chars += len(chunk)
+        parts.append(chunk[:remaining])
+        if len(chunk) > remaining:
+            break
+        remaining -= len(chunk)
+    return "".join(parts), {
+        "original_length": len(value),
+        "length_unit": "items",
+        "truncated": json_chars > limit,
+        "json_chars_at_least": json_chars,
+    }
+
+
 def _llmobs_tool_span(
     tool_name: str,
     arguments: dict,
@@ -659,10 +687,11 @@ def _llmobs_tool_span(
         if session_id:
             metadata["mcp_session_id"] = session_id
 
+        preview, metadata["input_size"] = _llmobs_json_preview(arguments, _llmobs_preview_limit())
         LLMObs.annotate(
             span=span,
-            input_data=json.dumps(arguments, default=str),
-            metadata=metadata if metadata else None,
+            input_data=preview,
+            metadata=metadata,
             tags=llmobs_tags,
         )
         return span
@@ -715,17 +744,36 @@ def _tool_result_error(result: object) -> str | None:
     return None
 
 
-def _llmobs_output(result) -> str:
-    """Serialize the MCP result content to a compact string for the output field."""
-    try:
-        if hasattr(result, "content"):
-            return json.dumps(
-                [c.model_dump() if hasattr(c, "model_dump") else str(c) for c in result.content],
-                default=str,
-            )
-        return str(result)
-    except Exception:
-        return str(result)
+def _llmobs_output(result: object, limit: int) -> tuple[str, dict]:
+    """Preview existing MCP text directly, without copying or encoding the tool result."""
+    if isinstance(result, (dict, list)):
+        return _llmobs_json_preview(result, limit)
+    if isinstance(result, (ToolResult, mt.CallToolResult)):
+        parts = []
+        remaining = limit
+        length = 0
+        omitted_blocks = 0
+        for block in result.content:
+            if not isinstance(block, mt.TextContent):
+                omitted_blocks += 1
+                continue
+            length += len(block.text)
+            if remaining:
+                part = block.text[:remaining]
+                parts.append(part)
+                remaining -= len(part)
+        return "".join(parts), {
+            "original_length": length,
+            "length_unit": "chars",
+            "truncated": length > limit or omitted_blocks > 0,
+            "omitted_non_text_blocks": omitted_blocks,
+        }
+    text = str(result)
+    return text[:limit], {
+        "original_length": len(text),
+        "length_unit": "chars",
+        "truncated": len(text) > limit,
+    }
 
 
 def _llmobs_finish(
@@ -744,14 +792,13 @@ def _llmobs_finish(
 
         if error is not None:
             span.set_exc_info(type(error), error, error.__traceback__)
-            output = "error"
-        else:
-            if result_error is not None:
-                span.error = 1
-                span.set_tag("error.type", "tool_error_result")
-                span.set_tag("error.message", result_error)
-            output = _llmobs_output(result)
-        LLMObs.annotate(span=span, output_data=output)
+            result = "error"
+        elif result_error is not None:
+            span.error = 1
+            span.set_tag("error.type", "tool_error_result")
+            span.set_tag("error.message", result_error)
+        output, size = _llmobs_output(result, _llmobs_preview_limit())
+        LLMObs.annotate(span=span, output_data=output, metadata={"output_size": size})
     except Exception as exc:
         _log_llmobs_failure("annotation", exc)
     finally:

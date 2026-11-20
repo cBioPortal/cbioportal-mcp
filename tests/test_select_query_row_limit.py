@@ -1,6 +1,7 @@
 import json
 
 import mcp_clickhouse.mcp_server as ch_mcp_server
+import pydantic_core
 import pytest
 
 from cbioportal_mcp import result_format, server
@@ -12,7 +13,7 @@ def _rows(n):
 
 def _patch_rows(monkeypatch, n):
     monkeypatch.setattr(
-        server, "run_select_query", lambda query, query_label=None, max_rows=None: _rows(n)
+        server, "run_select_query", lambda query, **kwargs: _rows(n)
     )
 
 @pytest.fixture
@@ -92,7 +93,7 @@ def test_select_query_cuts_long_cells(monkeypatch):
 def test_select_query_passes_max_rows_through_to_run_select_query(monkeypatch):
     captured = {}
 
-    def fake_run_select_query(query, query_label=None, max_rows=None):
+    def fake_run_select_query(query, *, max_rows=None, **kwargs):
         captured["max_rows"] = max_rows
         return _rows(5)
 
@@ -243,3 +244,58 @@ def test_run_select_query_without_max_rows_runs_query_unchanged(monkeypatch):
     assert calls == ["SELECT 1"]
     assert result == [{"i": 0}, {"i": 1}]
     assert result.columns == ["i"] and result.raw_rows == [[0], [1]]
+
+
+@pytest.mark.parametrize("mode", [result_format.COMPACT, result_format.LEGACY])
+@pytest.mark.parametrize("max_rows", [1, 2])
+def test_select_serialization_matches_previous_result(monkeypatch, mode, max_rows):
+    columns = ["nullable", "empty", "count", "fraction", "date", "label"]
+    rows = [
+        [None, "", 0, 1.25, "2026-11-19", "é" * 30],
+        ["present", None, 2, -0.5, "2026-11-20", "short"],
+    ]
+    monkeypatch.setenv(result_format.RESULT_FORMAT_ENV, mode)
+    monkeypatch.setenv(result_format.MAX_CELL_CHARS_ENV, "12")
+    monkeypatch.setattr(
+        ch_mcp_server, "run_query", lambda _: json.dumps({"columns": columns, "rows": rows})
+    )
+
+    # Previously the query always built SelectRows before the tool formatted the result.
+    previous_records = server.SelectRows(
+        [{k: v for k, v in zip(columns, row, strict=True) if v not in ("", None)} for row in rows],
+        columns,
+        rows,
+    )
+    if mode == result_format.COMPACT:
+        expected = result_format.select_result(
+            previous_records.columns,
+            previous_records.raw_rows,
+            max_rows=max_rows,
+            hard_max_rows=server.MAX_SELECT_MAX_ROWS,
+        )
+    else:
+        expected = {"rows": previous_records[:max_rows]}
+        if max_rows < len(rows):
+            expected.update(
+                truncated=True,
+                returned_rows=max_rows,
+                note=(
+                    f"Result truncated to {max_rows} rows; more rows matched but the "
+                    "exact total is unknown because the query was capped during execution "
+                    "for efficiency. Narrow the query (add a LIMIT, aggregate, or filter) or "
+                    f"pass a larger max_rows (up to {server.MAX_SELECT_MAX_ROWS}) to see more."
+                ),
+            )
+    actual = server.clickhouse_run_select_query.fn.__wrapped__("SELECT 1", max_rows=max_rows)
+    assert pydantic_core.to_json(actual) == pydantic_core.to_json(expected)
+
+
+def test_compact_select_does_not_construct_records(monkeypatch):
+    monkeypatch.setenv(result_format.RESULT_FORMAT_ENV, result_format.COMPACT)
+    monkeypatch.setattr(ch_mcp_server, "run_query", lambda _: '{"columns":["a"],"rows":[[1]]}')
+
+    def fail(*args):
+        pytest.fail("compact SELECT attempted to build SelectRows")
+
+    monkeypatch.setattr(server.SelectRows, "__init__", fail)
+    assert server.clickhouse_run_select_query.fn.__wrapped__("SELECT 1")["rows"] == [[1]]
