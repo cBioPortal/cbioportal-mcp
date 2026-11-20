@@ -263,6 +263,7 @@ def test_noop_when_llmobs_not_enabled(caplog):
     assert not LLMObs.enabled
     with (
         patch.object(LLMObs, "tool", wraps=LLMObs.tool) as tool_spy,
+        patch.object(telemetry, "_llmobs_preview_limit") as preview_limit_spy,
         caplog.at_level(logging.WARNING),
         TestClient(_make_app()) as client,
     ):
@@ -270,6 +271,7 @@ def test_noop_when_llmobs_not_enabled(caplog):
 
     assert "hello" in resp.text
     tool_spy.assert_not_called()
+    preview_limit_spy.assert_not_called()
     assert not [r for r in caplog.records if r.name.startswith(("cbioportal_mcp", "ddtrace"))]
 
 
@@ -411,3 +413,54 @@ def test_cancelled_call_finishes_span_with_error(llmobs_events):
     assert event["name"] == "mcp.tool.slow"
     assert event["status"] == "error"
     assert event["meta"]["error"]["type"].endswith("CancelledError")
+
+
+def test_llmobs_caps_input_and_output_previews(llmobs_events, monkeypatch):
+    monkeypatch.setenv("CBIOPORTAL_MCP_LLMOBS_PREVIEW_CHARS", "32")
+    word = "é" * 10000
+
+    with TestClient(_make_app()) as client:
+        _, response = _call_tool(client, "ping", {"word": word})
+
+    assert word in response.text
+    (event,) = _tool_events(llmobs_events)
+    meta = event["meta"]
+    assert meta["input"]["value"] == json.dumps({"word": word})[:32]
+    assert meta["output"]["value"] == word[:32]
+    assert meta["metadata"]["input_size"] == {
+        "original_length": 1,
+        "length_unit": "items",
+        "truncated": True,
+        "json_chars_at_least": len(json.dumps({"word": word})) - 1,
+    }
+    assert meta["metadata"]["output_size"] == {
+        "original_length": len(word),
+        "length_unit": "chars",
+        "truncated": True,
+        "omitted_non_text_blocks": 0,
+    }
+
+
+def test_llmobs_json_preview_stops_before_unneeded_values():
+    class Unvisited:
+        def __str__(self):
+            pytest.fail("encoded a value beyond the preview")
+
+    preview, size = telemetry._llmobs_json_preview({"first": "x" * 32, "later": Unvisited()}, 16)
+    assert preview == '{"first": "xxxxx'
+    assert size["truncated"]
+
+
+def test_llmobs_output_preview_does_not_dump_content_models(monkeypatch):
+    def fail(*args, **kwargs):
+        pytest.fail("serialized the MCP content again")
+
+    monkeypatch.setattr(mt.TextContent, "model_dump", fail)
+    result = mt.CallToolResult(
+        content=[mt.TextContent(type="text", text="abc"), mt.TextContent(type="text", text="def")]
+    )
+    preview, size = telemetry._llmobs_output(result, 4)
+    assert preview == "abcd"
+    assert size["original_length"] == 6
+    assert size["truncated"]
+    assert telemetry._llmobs_output(result, 6)[1]["truncated"] is False

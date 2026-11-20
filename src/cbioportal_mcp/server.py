@@ -31,7 +31,7 @@ from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 from importlib import resources as importlib_resources
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Literal, overload
 from fastmcp import FastMCP
 
 
@@ -585,11 +585,15 @@ def clickhouse_run_select_query(
         safe_max_rows = max(1, min(int(max_rows), MAX_SELECT_MAX_ROWS))
         # run_select_query returns at most safe_max_rows + 1 rows (capped in
         # ClickHouse), so one extra row signals that the result was truncated.
+        compact = result_format.is_compact()
         result = run_select_query(
-            query, query_label="clickhouse_run_select_query", max_rows=safe_max_rows
+            query,
+            query_label="clickhouse_run_select_query",
+            max_rows=safe_max_rows,
+            positional=compact,
         )
         logger.debug("clickhouse_run_select_query returns %s", result)
-        if result_format.is_compact():
+        if compact:
             columns, rows = _select_table(result)
             return result_format.select_result(
                 columns, rows, max_rows=safe_max_rows, hard_max_rows=MAX_SELECT_MAX_ROWS
@@ -716,7 +720,21 @@ def _format_columns_response(response: dict) -> dict:
     }
 
 
-def run_select_query(query: str, *, query_label: str, max_rows: int | None = None) -> list[dict]:
+@overload
+def run_select_query(
+    query: str, *, query_label: str, max_rows: int | None = None, positional: Literal[False] = False
+) -> list[dict]: ...
+
+
+@overload
+def run_select_query(
+    query: str, *, query_label: str, max_rows: int | None = None, positional: bool
+) -> list[dict] | tuple[list[str], list]: ...
+
+
+def run_select_query(
+    query: str, *, query_label: str, max_rows: int | None = None, positional: bool = False
+) -> list[dict] | tuple[list[str], list]:
     """
     Execute arbitrary ClickHouse SQL SELECT query.
 
@@ -734,8 +752,10 @@ def run_select_query(query: str, *, query_label: str, max_rows: int | None = Non
             _with_row_cap), so callers can detect truncation without fetching
             the full result.
 
+        positional: Return columns and raw rows for the compact SELECT tool.
+
     Returns:
-        list: A list of rows, where each row is a dictionary with column names as keys and corresponding values.
+        A list of records keyed by column name, or columns and raw rows when positional.
     """
     from mcp_clickhouse.mcp_server import run_query
 
@@ -746,7 +766,7 @@ def run_select_query(query: str, *, query_label: str, max_rows: int | None = Non
     logger.debug("run_select_query: delegate the query to run_query tool of ClickHouse MCP")
     with traced_db_query(query_label):
         ch_query_result = json.loads(run_query(query))
-        result = zip_select_query_result(ch_query_result)
+        result = zip_select_query_result(ch_query_result, positional=positional)
     return result
 
 
@@ -778,20 +798,22 @@ class SelectRows(list):
         self.raw_rows = raw_rows
 
 
-def zip_select_query_result(ch_query_result) -> SelectRows:
-    """
-    Join columns and corresponding row values into dictionaries skipping dictionary entries if value is emtpy or None
-    """
+def zip_select_query_result(ch_query_result, *, positional: bool = False):
+    """Keep positional rows or build records that omit empty strings and NULLs."""
     columns = ch_query_result["columns"]
     rows = ch_query_result["rows"]
+    if positional:
+        return columns, rows
     result = []
     for row in rows:
-        result.append({k: v for k, v in zip(columns, row) if v not in ("", None)})
+        result.append({k: v for k, v in zip(columns, row, strict=False) if v not in ("", None)})
     return SelectRows(result, columns, rows)
 
 
-def _select_table(result: list[dict]) -> tuple[list[str], list]:
+def _select_table(result: list[dict] | tuple[list[str], list]) -> tuple[list[str], list]:
     """(columns, positional rows) for a run_select_query result."""
+    if isinstance(result, tuple):
+        return result
     if isinstance(result, SelectRows):
         return result.columns, result.raw_rows
     # A plain list of dicts (e.g. a test double): best-effort column order.
