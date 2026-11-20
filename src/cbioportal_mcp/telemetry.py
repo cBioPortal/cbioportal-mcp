@@ -25,6 +25,8 @@ from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.trace import Status, StatusCode
 
+from cbioportal_mcp import query_concurrency
+
 logger = logging.getLogger(__name__)
 
 _tracer_provider: TracerProvider | None = None
@@ -138,8 +140,13 @@ def _emit_tool_metrics(
     client_kind: str,
     client_name: str | None,
     error_kind: str | None = None,
+    result_chars: int | None = None,
 ) -> None:
-    """Emit aggregate Datadog metrics for MCP tool call frequency and latency."""
+    """Emit aggregate Datadog metrics for MCP tool call frequency and latency.
+
+    tool.duration_ms ends when the tool's result is back in this middleware;
+    tool.total_duration_ms (see _emit_tool_total_metric) also covers the
+    LLMObs work after it. tool.result_chars is the size of the returned text."""
     client = _get_dogstatsd_client()
     if client is None:
         return
@@ -155,10 +162,49 @@ def _emit_tool_metrics(
     try:
         client.increment("tool.calls", tags)
         client.distribution("tool.duration_ms", round(duration_ms, 3), tags)
+        if result_chars is not None:
+            client.distribution("tool.result_chars", result_chars, tags)
         if not success:
             client.increment("tool.errors", tags)
     except Exception as exc:
         logger.debug("DogStatsD metric emit failed: %s", exc)
+
+
+def _emit_tool_total_metric(
+    *,
+    tool_name: str,
+    total_ms: float,
+    success: bool,
+    client_kind: str,
+    client_name: str | None,
+    error_kind: str | None = None,
+) -> None:
+    """Emit tool.total_duration_ms: tool.duration_ms plus the telemetry work
+    after it (LLMObs output annotation and span finish). Same tags as
+    tool.duration_ms, so the two can be compared on one dashboard."""
+    client = _get_dogstatsd_client()
+    if client is None:
+        return
+    tags = {
+        "tool": tool_name,
+        "success": str(success).lower(),
+        "client_kind": client_kind,
+        "client_name": client_name,
+    }
+    if error_kind is not None:
+        tags["error_kind"] = error_kind
+    try:
+        client.distribution("tool.total_duration_ms", round(total_ms, 3), tags)
+    except Exception as exc:
+        logger.debug("DogStatsD tool total metric emit failed: %s", exc)
+
+
+def _tool_result_chars(result) -> int | None:
+    """Characters of text content in a tool result: the size of what we send back."""
+    content = getattr(result, "content", None)
+    if not isinstance(content, list):
+        return None
+    return sum(len(block.text) for block in content if isinstance(block, mt.TextContent))
 
 
 def _emit_db_query_metrics(
@@ -166,12 +212,16 @@ def _emit_db_query_metrics(
     query_label: str,
     duration_ms: float,
     success: bool,
+    breakdown: dict[str, float] | None = None,
 ) -> None:
     """Emit aggregate Datadog metrics for one ClickHouse SELECT, tagged by call
     site. run_select_query() is a single funnel for every SELECT the server
     runs; without a per-call-site tag its latency metric averages together a
     cheap primary-key lookup and an expensive multi-table aggregate, hiding
-    which one actually needs attention."""
+    which one actually needs attention.
+
+    ``breakdown`` adds one ``db_query.<name>`` distribution per entry (see
+    _db_query_breakdown), with the same low-cardinality tags."""
     client = _get_dogstatsd_client()
     if client is None:
         return
@@ -182,8 +232,83 @@ def _emit_db_query_metrics(
         client.distribution("db_query.duration_ms", round(duration_ms, 3), tags)
         if not success:
             client.increment("db_query.errors", tags)
+        for name, value in (breakdown or {}).items():
+            client.distribution(f"db_query.{name}", round(value, 3), tags)
     except Exception as exc:
         logger.debug("DogStatsD db_query metric emit failed: %s", exc)
+
+
+# ClickHouse summary field -> (metric/span suffix, scale). elapsed is reported
+# in ns; we publish ms like every other duration here.
+_CLICKHOUSE_SUMMARY_METRICS = {
+    "elapsed_ns": ("ch_elapsed_ms", 1e-6),
+    "read_rows": ("ch_read_rows", 1),
+    "read_bytes": ("ch_read_bytes", 1),
+    "result_rows": ("ch_result_rows", 1),
+    "result_bytes": ("ch_result_bytes", 1),
+}
+
+
+def _db_query_breakdown(stats, finished_at: float) -> tuple[dict[str, float], dict[str, Any]]:
+    """Split one query's db_query.duration_ms into its parts.
+
+    Returns (metrics, span_attributes). Metrics are numeric breakdowns safe to
+    tag by query_label only; span attributes add the ClickHouse query_id (to
+    join system.query_log) and flags. ``stats`` is a query_concurrency.QueryStats
+    that run_query() filled in; fields it never reached stay out.
+    """
+    metrics: dict[str, float] = {}
+    attrs: dict[str, Any] = {}
+    if stats is None or stats.query_id is None:
+        return metrics, attrs
+
+    attrs["db.clickhouse.query_id"] = stats.query_id
+    attrs["db.query.timed_out"] = stats.timed_out
+    queue_wait_ms = stats.queue_wait_ms
+    if queue_wait_ms is None and stats.submitted_at is not None:
+        # No worker picked it up before we gave up: it waited the whole time.
+        queue_wait_ms = (finished_at - stats.submitted_at) * 1000
+        attrs["db.query.never_started"] = True
+    if queue_wait_ms is not None:
+        metrics["queue_wait_ms"] = queue_wait_ms
+    if stats.execute_ms is not None:
+        metrics["execute_ms"] = stats.execute_ms
+    if stats.payload_chars is not None:
+        metrics["payload_chars"] = stats.payload_chars
+    for field_name, (name, scale) in _CLICKHOUSE_SUMMARY_METRICS.items():
+        if field_name in stats.server:
+            metrics[name] = stats.server[field_name] * scale
+
+    for name, value in metrics.items():
+        prefix = "db.clickhouse." if name.startswith("ch_") else "db.query."
+        attrs[prefix + name.removeprefix("ch_")] = value
+    if "total_rows_to_read" in stats.server:
+        attrs["db.clickhouse.total_rows_to_read"] = stats.server["total_rows_to_read"]
+    for name in ("client_acquire_ms", "serialize_ms", "rows_returned"):
+        value = getattr(stats, name)
+        if value is not None:
+            attrs[f"db.query.{name}"] = value
+    if stats.returned_at is not None:
+        # json.loads + zipping rows into dicts, after the pool handed the result back.
+        attrs["db.query.postprocess_ms"] = (finished_at - stats.returned_at) * 1000
+    return metrics, attrs
+
+
+def _finish_db_query(span, query_label: str, started: float, stats, success: bool) -> None:
+    finished_at = time.perf_counter()
+    duration_ms = (finished_at - started) * 1000
+    span.set_attribute("db.query.duration_ms", duration_ms)
+    span.set_attribute("db.query.success", success)
+    try:
+        metrics, attrs = _db_query_breakdown(stats, finished_at)
+        for key, value in attrs.items():
+            span.set_attribute(key, value)
+    except Exception as exc:  # telemetry must never fail the query
+        logger.debug("db_query breakdown failed for %s: %s", query_label, exc)
+        metrics = {}
+    _emit_db_query_metrics(
+        query_label=query_label, duration_ms=duration_ms, success=success, breakdown=metrics
+    )
 
 
 @contextmanager
@@ -193,25 +318,27 @@ def traced_db_query(query_label: str):
     be broken down by call site in Datadog instead of averaged into one
     run_select_query number. Re-raises on failure after recording it as a
     failed call; does not suppress or alter the underlying exception.
+
+    A query run through query_concurrency.run_query() inside the block also
+    records where its time went: pool queue wait, client.query() time,
+    ClickHouse's own summary (elapsed, rows/bytes read and returned), and the
+    ClickHouse query_id (span only: it is unbounded, so never a metric tag).
+    Yields that QueryStats.
     """
     tracer = trace.get_tracer(__name__)
     started = time.perf_counter()
+    stats = query_concurrency.QueryStats()
     with tracer.start_as_current_span(f"db.query/{query_label}") as span:
         span.set_attribute("db.query.label", query_label)
         try:
-            yield
+            with query_concurrency.recording_query_stats(stats):
+                yield stats
         except Exception as exc:
-            duration_ms = (time.perf_counter() - started) * 1000
-            span.set_attribute("db.query.duration_ms", duration_ms)
-            span.set_attribute("db.query.success", False)
             span.set_attribute("error.type", type(exc).__name__)
-            _emit_db_query_metrics(query_label=query_label, duration_ms=duration_ms, success=False)
+            _finish_db_query(span, query_label, started, stats, success=False)
             raise
         else:
-            duration_ms = (time.perf_counter() - started) * 1000
-            span.set_attribute("db.query.duration_ms", duration_ms)
-            span.set_attribute("db.query.success", True)
-            _emit_db_query_metrics(query_label=query_label, duration_ms=duration_ms, success=True)
+            _finish_db_query(span, query_label, started, stats, success=True)
 
 
 def configure_telemetry() -> TracerProvider | None:
@@ -845,6 +972,9 @@ class TelemetryMiddleware(Middleware):
         result: mt.CallToolResult | None = None
         error: BaseException | None = None
         result_error: str | None = None
+        # (success, error_kind) once tool.duration_ms is emitted, so
+        # tool.total_duration_ms is emitted for exactly the same calls.
+        outcome: tuple[bool, str | None] | None = None
 
         try:
             with self._tracer.start_as_current_span(f"mcp.tool/{tool_name}") as span:
@@ -865,13 +995,25 @@ class TelemetryMiddleware(Middleware):
                         span.set_attribute("error.type", "tool_error_result")
                         span.set_attribute("error.message", result_error)
                         span.set_status(Status(StatusCode.ERROR, result_error))
+                    try:
+                        result_chars = _tool_result_chars(result)
+                    except Exception as exc:
+                        logger.debug("Tool result size failed for %s: %s", tool_name, exc)
+                        result_chars = None
+                    if result_chars is not None:
+                        span.set_attribute("mcp.tool.result_chars", result_chars)
+                    outcome = (
+                        result_error is None,
+                        "result" if result_error is not None else None,
+                    )
                     _emit_tool_metrics(
                         tool_name=tool_name,
                         duration_ms=duration_ms,
-                        success=result_error is None,
+                        success=outcome[0],
                         client_kind=caller.client_kind,
                         client_name=caller.client_name,
-                        error_kind="result" if result_error is not None else None,
+                        error_kind=outcome[1],
+                        result_chars=result_chars,
                     )
                     return result
                 except Exception as exc:
@@ -880,6 +1022,7 @@ class TelemetryMiddleware(Middleware):
                     span.set_attribute("mcp.tool.success", False)
                     span.set_attribute("error.type", type(exc).__name__)
                     span.record_exception(exc)
+                    outcome = (False, "exception")
                     _emit_tool_metrics(
                         tool_name=tool_name,
                         duration_ms=duration_ms,
@@ -896,6 +1039,15 @@ class TelemetryMiddleware(Middleware):
             # Always finish the LLMObs span (it is the active ddtrace span for this
             # task until then), on success, error, or cancellation.
             _llmobs_finish(llmobs_span, result, error=error, result_error=result_error)
+            if outcome is not None:
+                _emit_tool_total_metric(
+                    tool_name=tool_name,
+                    total_ms=(time.perf_counter() - started) * 1000,
+                    success=outcome[0],
+                    client_kind=caller.client_kind,
+                    client_name=caller.client_name,
+                    error_kind=outcome[1],
+                )
 
     async def _trace_discovery(
         self,

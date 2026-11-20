@@ -1,9 +1,8 @@
 import json
 
-import mcp_clickhouse.mcp_server as ch_mcp_server
 import pytest
 
-from cbioportal_mcp import result_format, server
+from cbioportal_mcp import query_concurrency, result_format, server
 
 
 def _rows(n):
@@ -48,7 +47,7 @@ def test_select_query_over_default_limit_is_truncated(monkeypatch):
 def test_select_query_uses_real_column_order_and_keeps_empty_values(monkeypatch):
     """The compact rows come from ClickHouse's positional result, not the lossy dicts."""
     monkeypatch.setattr(
-        ch_mcp_server,
+        query_concurrency,
         "run_query",
         lambda q: json.dumps({"columns": ["a", "b", "c"], "rows": [[1, None, ""], [2, "x", "y"]]}),
     )
@@ -64,7 +63,7 @@ def test_select_query_uses_real_column_order_and_keeps_empty_values(monkeypatch)
 
 def test_select_query_all_empty_column_is_still_listed(monkeypatch):
     monkeypatch.setattr(
-        ch_mcp_server,
+        query_concurrency,
         "run_query",
         lambda q: json.dumps({"columns": ["a", "b"], "rows": [[1, None], [2, None]]}),
     )
@@ -77,7 +76,7 @@ def test_select_query_all_empty_column_is_still_listed(monkeypatch):
 def test_select_query_cuts_long_cells(monkeypatch):
     monkeypatch.setenv(result_format.MAX_CELL_CHARS_ENV, "10")
     monkeypatch.setattr(
-        ch_mcp_server,
+        query_concurrency,
         "run_query",
         lambda q: json.dumps({"columns": ["t"], "rows": [["x" * 25], ["short"]]}),
     )
@@ -176,7 +175,7 @@ def test_legacy_select_query_max_rows_is_clamped_to_hard_cap(monkeypatch, legacy
 def test_legacy_schema_tools_keep_list_of_dicts(monkeypatch, legacy_format):
     server._clear_schema_cache()
     monkeypatch.setattr(
-        ch_mcp_server,
+        query_concurrency,
         "run_query",
         lambda q: json.dumps(
             {"columns": ["name", "type", "default_type", "default_expression", "comment"],
@@ -205,7 +204,7 @@ def _fake_run_query(calls, rows):
 
 def test_run_select_query_with_max_rows_limits_rows_in_clickhouse(monkeypatch):
     calls = []
-    monkeypatch.setattr(ch_mcp_server, "run_query", _fake_run_query(calls, rows=3))
+    monkeypatch.setattr(query_concurrency, "run_query", _fake_run_query(calls, rows=3))
 
     result = server.run_select_query("SELECT 1;", query_label="test", max_rows=50)
 
@@ -223,7 +222,7 @@ def test_run_select_query_with_max_rows_limits_rows_in_clickhouse(monkeypatch):
 )
 def test_run_select_query_with_max_rows_survives_a_trailing_line_comment(monkeypatch, query):
     calls = []
-    monkeypatch.setattr(ch_mcp_server, "run_query", _fake_run_query(calls, rows=1))
+    monkeypatch.setattr(query_concurrency, "run_query", _fake_run_query(calls, rows=1))
 
     server.run_select_query(query, query_label="test", max_rows=50)
 
@@ -236,7 +235,7 @@ def test_run_select_query_with_max_rows_survives_a_trailing_line_comment(monkeyp
 
 def test_run_select_query_without_max_rows_runs_query_unchanged(monkeypatch):
     calls = []
-    monkeypatch.setattr(ch_mcp_server, "run_query", _fake_run_query(calls, rows=2))
+    monkeypatch.setattr(query_concurrency, "run_query", _fake_run_query(calls, rows=2))
 
     result = server.run_select_query("SELECT 1", query_label="test")
 
