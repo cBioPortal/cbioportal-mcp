@@ -359,7 +359,7 @@ LEFT JOIN (SELECT DISTINCT patient_unique_id FROM genomic_event_derived
         AND variant_type = 'mutation' AND mutation_status != 'UNCALLED') t
   ON k.patient_unique_id = t.patient_unique_id
 GROUP BY grp;
--- Returns 'TP53 + KRAS' = 272, no 'KRAS only' row. Wrong.
+-- Returns only a 'TP53 + KRAS' row and no 'KRAS only' row. Wrong.
 ```
 
 #### ✅ Correct: test membership with IN / NOT IN (or countIf)
@@ -379,7 +379,7 @@ FROM (SELECT DISTINCT patient_unique_id FROM genomic_event_derived
       WHERE cancer_study_identifier = 'pancan_pcawg_2020' AND hugo_gene_symbol = 'KRAS'
         AND variant_type = 'mutation' AND mutation_status != 'UNCALLED')
 GROUP BY grp;
--- KRAS only = 85 (3 with OS), TP53 + KRAS = 187 (1 with OS)
+-- Returns both 'KRAS only' and 'TP53 + KRAS' rows, each with its with_os count
 ```
 
 If you must LEFT JOIN, test the default value instead: `WHERE t.patient_unique_id = ''` (String) or `= 0` (numeric).
@@ -417,7 +417,7 @@ table to look up which study identifiers match a pattern — resolve against
 
 #### ❌ Wrong: subquery on a fact table just to find study identifiers
 ```sql
--- INCORRECT - scans the whole 10.29B-row fact table to resolve study IDs
+-- INCORRECT - scans the whole (billions of rows) fact table to resolve study IDs
 SELECT hugo_gene_symbol, alteration_value
 FROM genetic_alteration_derived
 WHERE cancer_study_identifier IN (
@@ -430,7 +430,7 @@ AND profile_type = 'mrna';
 
 #### ✅ Correct: resolve against the small dimension table, then pass a literal list
 ```sql
--- Step 1: resolve against cancer_study (539 rows)
+-- Step 1: resolve against cancer_study (one row per study)
 SELECT cancer_study_identifier FROM cancer_study
 WHERE cancer_study_identifier LIKE '%brca%';
 

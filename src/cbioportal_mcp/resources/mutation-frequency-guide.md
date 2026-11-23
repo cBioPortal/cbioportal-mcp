@@ -503,8 +503,8 @@ This is correct for WES studies. For targeted-panel studies, restrict to samples
 
 ```sql
 SELECT * FROM co_altered_genes_in_study(study = 'luad_tcga_pan_can_atlas_2018', gene = 'KRAS', top_n = 20);
--- 168 KRAS-mutant / 398 WT: TP53 36.9 vs 58.5, EGFR 0.6 vs 17.3, STK11 22.6 vs 9.3,
--- KEAP1 20.8 vs 16.8 (not in top 20), TTN 48.8 vs 47.7 (not in top 20)
+-- Returns each co-altered gene's frequency in KRAS-mutant vs KRAS-WT samples. A gene
+-- outside top_n (e.g. KEAP1) is not listed; query it explicitly if asked.
 ```
 
 Columns: `hugo_gene_symbol`, `mutant_altered` / `mutant_profiled` / `mutant_pct`, `wildtype_altered` / `wildtype_profiled` / `wildtype_pct`, `pct_difference` (mutant − WT, percentage points). Both groups are samples profiled for `gene`; each other gene's denominator counts only group samples profiled for it (panel-aware). Genes mutated in fewer than 10 samples in total are dropped. Mutation-only (no CNA/SV). In multi-cancer studies (msk_chord_2024) differences also reflect cancer-type composition (KRAS-mutant vs APC: colorectal enrichment) — say so, or use a single-cancer study.
