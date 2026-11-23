@@ -34,40 +34,23 @@ GROUP BY hugo_gene_symbol;
 -- Missing: WHERE ARE THE DENOMINATORS FOR EACH GENE?
 ```
 
-#### ❌ WRONG: Skipping individual gene profiling queries
-**Problem**: Failing to run separate profiling queries for EACH gene in results.
-**Each gene has different coverage**: TP53 might be profiled in 25,040 samples, MUC16 in 23,000, etc.
+#### ❌ WRONG: One profiling query per gene, or a panel-only denominator
+**Problem**: Running a separate profiling query for each gene wastes calls, and a denominator built only through `gene_panel` / `gene_panel_list` drops WES samples (they are profiled for every gene but have no `gene_panel_list` rows).
+**Each gene has different coverage**, so each row still needs its own denominator.
 
-#### ✅ CORRECT: Complete gene-specific workflow
+#### ✅ CORRECT: Use the views; fall back to one grouped, WES-aware query
 ```sql
--- STEP 1: Get altered counts per gene
-SELECT
-    hugo_gene_symbol,
-    entrez_gene_id,
-    COUNT(DISTINCT CASE WHEN off_panel = 0 THEN sample_unique_id END) AS numberOfAlteredSamplesOnPanel,
-    COUNT(*) AS totalMutationEvents
-FROM genomic_event_derived
-WHERE variant_type = 'mutation' AND mutation_status != 'UNCALLED'
-GROUP BY entrez_gene_id, hugo_gene_symbol
-ORDER BY numberOfAlteredSamplesOnPanel DESC;
-
--- STEP 2: FOR EACH GENE, run this profiling query:
-SELECT COUNT(DISTINCT stgp.sample_unique_id) AS numberOfProfiledSamples
-FROM sample_to_gene_panel_derived stgp
-JOIN gene_panel gp ON stgp.gene_panel_id = gp.stable_id
-JOIN gene_panel_list gpl ON gp.internal_id = gpl.internal_id
-JOIN gene g ON gpl.gene_id = g.entrez_gene_id
-WHERE stgp.alteration_type = 'MUTATION_EXTENDED'
-  AND g.hugo_gene_symbol = 'TP53'  -- Replace with each gene from Step 1
-  AND stgp.cancer_study_identifier = 'your_study_id';
-
--- STEP 3: Calculate frequency = numberOfAlteredSamplesOnPanel / numberOfProfiledSamples * 100
+-- PREFERRED: the view computes altered counts and WES-aware per-gene denominators
+SELECT hugo_gene_symbol, total_mutation_events, altered_samples, profiled_samples, frequency_pct
+FROM top_mutated_genes_in_study(study = 'your_study_id', top_n = 20);
 ```
+Only for variations the views don't cover, follow the manual fallback in `cbioportal://mutation-frequency-guide` ("Recommended Query Pattern"): one study-scoped, `LIMIT`ed altered-count query, then ONE grouped denominator query for all of those genes that includes WES samples and returns 0 for unprofiled genes.
 
 #### 🚨 WORKFLOW REQUIREMENTS VIOLATIONS:
 - **Missing denominator columns**: Must show gene-specific profiled samples per row
 - **Wrong table format**: Should be | Gene | # Mutations | # Samples | Profiled Samples | Sample % |
-- **Not replacing gene symbols**: Must replace 'TP53' with actual gene for each query
+- **One query per gene**: Compute all genes' denominators in one grouped query (or use the views)
+- **Panel-only denominator**: Must include WES samples
 - **Using study totals**: Never use genomic_event_derived for total sample counts
 
 ### 2. 🚨 OFF-PANEL MUTATION INCLUSION
@@ -183,7 +166,7 @@ WHERE p.cancer_study_id = 791
 SELECT COUNT(DISTINCT sample_unique_id) as primary_samples
 FROM clinical_data_derived
 WHERE cancer_study_identifier = 'msk_chord_2024';
--- Returns 25,040 (total samples), not 15,928 (primary samples)
+-- Returns the total sample count, not the primary-sample count
 ```
 **Problem**: Studies often have multiple sample types (Primary, Metastasis, Recurrence, etc.). Never assume all samples are primary!
 
@@ -195,7 +178,7 @@ FROM clinical_data_derived
 WHERE cancer_study_identifier = 'msk_chord_2024'
   AND attribute_name = 'SAMPLE_TYPE'
   AND attribute_value = 'Primary';
--- Returns 15,928 (actual primary samples)
+-- Returns the primary-sample count
 ```
 
 #### ✅ CORRECT: First check sample type distribution
@@ -263,7 +246,7 @@ WHERE cancer_study_identifier = 'msk_impact_2017'
 
 `driver_filter` values and the full oncogenic-only workflow: mutation-frequency-guide, "Driver / Oncogenic Mutations Only".
 
-If the driver query returns no rows (e.g. `driver_filter` is '' in all 78,142 msk_impact_2017 mutation rows), still return the full per-variant table, labelled "not filtered for OncoKB status", together with the OQL `MUT_DRIVER` link suggestion.
+If the driver query returns no rows (e.g. `driver_filter` is '' for every mutation row in msk_impact_2017), still return the full per-variant table, labelled "not filtered for OncoKB status", together with the OQL `MUT_DRIVER` link suggestion.
 
 **OQL DRIVER syntax (for reference — used in cBioPortal web UI, not SQL):**
 - `TP53: DRIVER` — all OncoKB-annotated driver alterations (mutations, fusions, CNAs)
@@ -290,9 +273,13 @@ WHERE attribute_name = 'AGE' AND attribute_value > '50';  -- String comparison!
 
 #### ✅ Correct: Cast to appropriate type
 ```sql
--- CORRECT - Numeric comparison
-SELECT * FROM clinical_data_derived
-WHERE attribute_name = 'AGE' AND CAST(attribute_value AS Float64) > 50;
+-- CORRECT - Numeric comparison (scoped to a study, only the needed columns)
+SELECT patient_unique_id, attribute_value
+FROM clinical_data_derived
+WHERE cancer_study_identifier = 'ACTUAL_STUDY_ID'
+  AND attribute_name = 'AGE'
+  AND toFloat64OrNull(attribute_value) > 50
+LIMIT 100;
 ```
 
 ### 7. 🚨 NULL VALUE HANDLING
@@ -372,7 +359,7 @@ LEFT JOIN (SELECT DISTINCT patient_unique_id FROM genomic_event_derived
         AND variant_type = 'mutation' AND mutation_status != 'UNCALLED') t
   ON k.patient_unique_id = t.patient_unique_id
 GROUP BY grp;
--- Returns 'TP53 + KRAS' = 272, no 'KRAS only' row. Wrong.
+-- Returns only a 'TP53 + KRAS' row and no 'KRAS only' row. Wrong.
 ```
 
 #### ✅ Correct: test membership with IN / NOT IN (or countIf)
@@ -392,7 +379,7 @@ FROM (SELECT DISTINCT patient_unique_id FROM genomic_event_derived
       WHERE cancer_study_identifier = 'pancan_pcawg_2020' AND hugo_gene_symbol = 'KRAS'
         AND variant_type = 'mutation' AND mutation_status != 'UNCALLED')
 GROUP BY grp;
--- KRAS only = 85 (3 with OS), TP53 + KRAS = 187 (1 with OS)
+-- Returns both 'KRAS only' and 'TP53 + KRAS' rows, each with its with_os count
 ```
 
 If you must LEFT JOIN, test the default value instead: `WHERE t.patient_unique_id = ''` (String) or `= 0` (numeric).
@@ -422,15 +409,15 @@ GROUP BY hugo_gene_symbol;
 
 ### 10b. 🚨 RESOLVING STUDY IDENTIFIERS VIA A SUBQUERY ON A FACT TABLE
 
-`cancer_study` is a 539-row dimension table with every `cancer_study_identifier`
+`cancer_study` is a small dimension table (one row per study) with every `cancer_study_identifier`
 in the deployment. `genetic_alteration_derived`, `genomic_event_derived`, and
-`clinical_data_derived` are multi-billion-row fact tables. Never use a fact
+`clinical_data_derived` are very large fact tables. Never use a fact
 table to look up which study identifiers match a pattern — resolve against
 `cancer_study` (or `list_studies()` / `search_oncotree()`) first.
 
 #### ❌ Wrong: subquery on a fact table just to find study identifiers
 ```sql
--- INCORRECT - scans the whole 10.29B-row fact table to resolve study IDs
+-- INCORRECT - scans a whole large fact table to resolve study IDs
 SELECT hugo_gene_symbol, alteration_value
 FROM genetic_alteration_derived
 WHERE cancer_study_identifier IN (
@@ -443,7 +430,7 @@ AND profile_type = 'mrna';
 
 #### ✅ Correct: resolve against the small dimension table, then pass a literal list
 ```sql
--- Step 1: resolve against cancer_study (539 rows)
+-- Step 1: resolve against cancer_study (one row per study)
 SELECT cancer_study_identifier FROM cancer_study
 WHERE cancer_study_identifier LIKE '%brca%';
 
@@ -472,11 +459,13 @@ WHERE cna_alteration = 'AMP';
 
 #### ✅ Correct: Use numeric values
 ```sql
--- CORRECT - Use numeric codes
-SELECT * FROM genomic_event_derived
-WHERE cna_alteration = 2;   -- 2 = Amplification
--- OR
-WHERE cna_alteration = -2;  -- -2 = Homozygous Deletion
+-- CORRECT - Use numeric codes (scoped to a study, only the needed columns)
+SELECT sample_unique_id, hugo_gene_symbol, cna_alteration
+FROM genomic_event_derived
+WHERE cancer_study_identifier = 'ACTUAL_STUDY_ID'
+  AND variant_type = 'cna'
+  AND cna_alteration = 2     -- 2 = Amplification; -2 = Homozygous Deletion
+LIMIT 100;
 ```
 
 `genomic_event_derived` stores only 2 and -2. For shallow deletion (-1), gain (1) or diploid (0), query `genetic_alteration_derived WHERE profile_type = 'gistic'` — see the CNA section of `cbioportal://mutation-frequency-guide`. Zero rows for `cna_alteration = -1` does not mean no shallow deletions.
