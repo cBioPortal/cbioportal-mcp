@@ -224,7 +224,6 @@ FROM top_mutated_genes_in_study(
     study = 'brca_tcga_pan_can_atlas_2018',
     top_n = 5
 );
--- PIK3CA 347/1066, TP53 347/1066, TTN 187, CDH1 130, GATA3 127
 ```
 
 ### Single-study views matching the portal's study-view charts
@@ -235,7 +234,6 @@ Each returns the portal's numbers with the correct profiled denominator — use 
 
 ```sql
 SELECT * FROM gene_mutation_variants_in_study(study = 'luad_tcga_pan_can_atlas_2018', gene = 'KRAS');
--- G12C 70/566 = 12.4%, G12V 40 (7.1%), G12D 20 (3.5%), G12A 17
 ```
 
 Columns: `mutation_variant` (protein change), `mutation_type`, `altered_samples`, `profiled_samples` (samples profiled for the gene, same on every row), `frequency_pct`, `total_mutation_events`.
@@ -244,7 +242,6 @@ Columns: `mutation_variant` (protein change), `mutation_type`, `altered_samples`
 
 ```sql
 SELECT * FROM top_cna_genes_in_study(study = 'gbm_tcga_pan_can_atlas_2018', top_n = 20);
--- CDKN2A HOMDEL 322/575 = 56.0%, CDKN2B HOMDEL 317, EGFR AMP 255/575 = 44.3%, MTAP HOMDEL 244
 ```
 
 Columns: `hugo_gene_symbol`, `cytoband`, `cna_type` (`AMP` / `HOMDEL`; a gene can appear once per type), `altered_samples`, `profiled_samples` (samples profiled for discrete CNA in that gene, panel-aware), `frequency_pct`. Neighbouring genes in one amplicon/deletion (CDKN2A, CDKN2B, MTAP; EGFR, EGFR-AS1) appear as separate rows.
@@ -262,7 +259,6 @@ Columns: `profile_type` (the discrete CNA profile, `gistic` or `cna`), `cna_valu
 
 ```sql
 SELECT * FROM top_sv_genes_in_study(study = 'prad_tcga_pan_can_atlas_2018', top_n = 10);
--- TMPRSS2 204/494 = 41.3%, ERG 203 (41.1%), SLC45A3 26, ACP3 14, ETV4 12
 ```
 
 Columns: `hugo_gene_symbol`, `altered_samples`, `profiled_samples` (samples profiled for SVs in that gene), `frequency_pct`, `total_sv_events`.
@@ -342,10 +338,10 @@ ORDER BY frequency_pct DESC;
 - **Top-N most-mutated genes per cancer type**: drop the `hugo_gene_symbol = '…'` filter and group by `(cancer_type, hugo_gene_symbol)`. Same CTEs.
 - **Comparing two specific cancer types**: filter `sct.cancer_type IN ('Cancer A', 'Cancer B')` after resolving via `search_oncotree`.
 - **Treatment-related cross-cancer questions**: switch to `preference_name = 'treatment_outcomes'` and pull treatment context from `clinical_event_derived` (see `treatment-guide`).
-- **Requested OncoTree subtype is absent from TCGA** (chondrosarcoma, intrahepatic cholangiocarcinoma, IDH-mutant astrocytoma, …): do **not** substitute the parent `CANCER_TYPE` (e.g. TCGA "Sarcoma" for chondrosarcoma). Switch to `preference_name = 'large_genomic_cohort'` and use `attribute_name = 'CANCER_TYPE_DETAILED'` in the CTE form above, filtering all requested subtypes in one query (e.g. IDH1 in msk_impact_50k_2026: Astrocytoma, IDH-Mutant 412/420; Oligodendroglioma, IDH-mutant, and 1p/19q-Codeleted 186/210; Chondrosarcoma 20/67 = 29.9%; Intrahepatic Cholangiocarcinoma 129/525 = 24.6%). Lower the `>= 50` threshold if a requested subtype is smaller.
+- **Requested OncoTree subtype is absent from TCGA** (chondrosarcoma, intrahepatic cholangiocarcinoma, IDH-mutant astrocytoma, …): do **not** substitute the parent `CANCER_TYPE` (e.g. TCGA "Sarcoma" for chondrosarcoma). Switch to `preference_name = 'large_genomic_cohort'` and use `attribute_name = 'CANCER_TYPE_DETAILED'` in the CTE form above, filtering all requested subtypes in one query. Lower the `>= 50` threshold if a requested subtype is smaller.
 
 ### Reading the result
-- **TCGA PanCan `CANCER_TYPE` merges histologies.** LUAD and LUSC both map to "Non-Small Cell Lung Cancer" (TP53: 699/1050 = 66.6% pooled vs LUAD 295/566 = 52.1%, LUSC 404/484 = 83.5%). For a single-organ question ("TP53 in lung cancer"), break down by `CANCER_TYPE_DETAILED` or run `gene_mutation_frequency_in_study` per study, and report the range.
+- **TCGA PanCan `CANCER_TYPE` merges histologies.** LUAD and LUSC both map to "Non-Small Cell Lung Cancer" (a pooled frequency can sit between very different LUAD and LUSC frequencies). For a single-organ question ("TP53 in lung cancer"), break down by `CANCER_TYPE_DETAILED` or run `gene_mutation_frequency_in_study` per study, and report the range.
 - **Hypermutated types inflate large genes.** Frequencies of large / passenger-prone genes (ATM, BRCA2, TTN, …) are high in hypermutated types (UCEC POLE/MSI, MSI colorectal, melanoma, bladder, stomach). Say so when those types top the list; "enriched" or "significant" claims need a statistical test.
 
 ### What NOT to do
@@ -379,10 +375,12 @@ For accurate gene mutation frequency calculations, you must use gene-specific pr
 ### CRITICAL: Mutation Frequency Calculation Workflow
 **For identifying most frequently mutated genes:**
 
-1. **Step 1**: Use `genomic_event_derived` table ONLY for getting altered counts per gene
-2. **Step 2**: Use `sample_to_gene_panel_derived` tables for gene-specific profiling denominators
+**Use the views first**: `top_mutated_genes_in_study` / `top_mutated_genes_in_cohort` return altered counts, WES-aware per-gene denominators and frequencies in one call.
+
+**Manual fallback** (only for variations the views don't cover):
+1. **Step 1**: Use `genomic_event_derived` table ONLY for getting altered counts per gene (study-scoped, with `LIMIT`)
+2. **Step 2**: Compute all of those genes' profiling denominators in ONE grouped, WES-aware query — never one query per gene
 3. **Step 3**: Calculate gene-specific frequencies using gene-specific denominators
-4. **Prefer the views**: `top_mutated_genes_in_study` / `top_mutated_genes_in_cohort` already do steps 1-3 in one call. Only write the manual form for variations the views don't cover, and then compute all genes' denominators in ONE grouped query (Step 2), never one query per gene.
 
 ### Key Rules:
 - **DO NOT use genomic_event_derived for total sample counts** - this gives study-wide counts, not gene-specific
@@ -390,9 +388,9 @@ For accurate gene mutation frequency calculations, you must use gene-specific pr
 - **Each gene has different profiling coverage** - denominators vary by gene
 - Sample frequency: numberOfAlteredSamplesOnPanel / gene_specific_profiled_samples
 - Patient frequency: altered patients with at least one profiled altered sample / patients with at least one sample profiled for the gene
-- **CRITICAL: Each gene will have different profiling coverage** (e.g., TP53 might be profiled in 25,040 samples, MUC16 in 23,000)
+- **CRITICAL: Each gene will have different profiling coverage** on panel studies, so never reuse one gene's denominator for another
 
-## Recommended Query Pattern
+## Recommended Query Pattern (manual fallback)
 
 ### Step 1: Get Altered Sample Counts per Gene
 ```sql
@@ -415,7 +413,7 @@ LIMIT 20;
 ## CRITICAL: Gene-Specific Profiling Denominators
 
 ### Step 2: Calculate Gene-Specific Profiled Samples (one query for all genes)
-Each gene needs its own denominator, but compute them all in ONE grouped query over the genes from Step 1. Do not run a separate query per gene. Include WES samples: they are profiled for every gene but have no `gene_panel_list` rows, so a denominator built only through `gene_panel` / `gene_panel_list` drops them.
+Each gene needs its own denominator, but compute them all in ONE grouped query over the genes from Step 1. Do not run a separate query per gene. Include WES samples: they are profiled for every gene but have no `gene_panel_list` rows, so a denominator built only through `gene_panel` / `gene_panel_list` drops them. Keep every requested gene in the output: a gene with no coverage (e.g. one that only had off-panel calls in Step 1) must come back as `0`, not disappear.
 
 ```sql
 WITH genes AS (
@@ -431,12 +429,20 @@ profiled AS (
     FROM mutation_wes_coverage w
     CROSS JOIN genes g
     WHERE w.cancer_study_identifier = 'ACTUAL_STUDY_ID'
+),
+counts AS (
+    SELECT hugo_gene_symbol,
+           COUNT(DISTINCT sample_unique_id) AS n
+    FROM profiled
+    GROUP BY hugo_gene_symbol
 )
-SELECT hugo_gene_symbol,
-       COUNT(DISTINCT sample_unique_id) AS numberOfProfiledSamples
-FROM profiled
-GROUP BY hugo_gene_symbol;
+SELECT g.hugo_gene_symbol,
+       coalesce(c.n, 0) AS numberOfProfiledSamples
+FROM genes g
+LEFT JOIN counts c ON c.hugo_gene_symbol = g.hugo_gene_symbol;
 ```
+
+When computing the frequency, guard the division so an unprofiled gene doesn't divide by zero: `numberOfAlteredSamplesOnPanel / NULLIF(numberOfProfiledSamples, 0) * 100` (an unprofiled gene then has no frequency, not 0%).
 
 ### WES (Whole Exome Sequencing) Studies
 For studies using WES (gene_panel_id = 'WES'), ALL genes are profiled in ALL samples. You can use a simpler approach:
@@ -528,7 +534,7 @@ WHERE cancer_study_identifier = 'gbm_tcga_pan_can_atlas_2018'
   AND ((variant_type = 'mutation' AND mutation_status != 'UNCALLED')
        OR (variant_type = 'cna' AND cna_alteration IN (2, -2)))
   AND sample_unique_id IN (SELECT sid FROM cs);
--- 304 / 378 = 80.4% (CDKN2A 217, CDK4 60, RB1 47). The `_all` list (592) as denominator would give 435/592 = 73.5%.
+-- Denominator = samples in the _cnaseq case list; the larger `_all` list would understate the frequency.
 ```
 
 A navigator link for this should use `case_set_id=<study>_cnaseq`. An "any-profiled" denominator is also defensible — state which one you used.
@@ -548,7 +554,6 @@ sg AS (SELECT DISTINCT sample_unique_id, hugo_gene_symbol FROM genomic_event_der
 SELECT a.hugo_gene_symbol AS g1, b.hugo_gene_symbol AS g2, count() AS both_mutated
 FROM sg a JOIN sg b ON a.sample_unique_id = b.sample_unique_id AND a.hugo_gene_symbol < b.hugo_gene_symbol
 GROUP BY g1, g2 ORDER BY both_mutated DESC LIMIT 10;
--- 5,368 samples: PIK3CA+TP53 597, CDH1+PIK3CA 346, MAP3K1+PIK3CA 256, GATA3+PIK3CA 230, KMT2C+PIK3CA 218
 ```
 
 These are raw counts; common genes pair often by chance. Co-occurrence/exclusivity significance → cBioPortal's Mutual Exclusivity tab (see `statistical-tests-guide`).
@@ -564,7 +569,7 @@ These are raw counts; common genes pair often by chance. Co-occurrence/exclusivi
 6. **Scope and limit**: Filter every large-table read to the study or cohort, and `LIMIT` ranked results
 
 ### Expected Results Format:
-- **Example for MSK-CHORD TP53 (illustrative only)**: sample % = (# Samples / Profiled Samples) × 100. For example, if a gene has 13,105 altered samples out of 25,040 profiled, the sample frequency is (13,105 / 25,040) × 100 ≈ 52.4%. Actual counts will depend on the specific dataset version and filters used.
+- **Sample %** = (# Samples / Profiled Samples) × 100, using that gene's own profiled count as the denominator. Always query the counts; never quote numbers from memory.
 - **Each gene varies**: TP53, MUC16, TTN, etc. will have different profiling coverage
 
 ## Complete Analysis Example
@@ -575,13 +580,12 @@ Use the `top_mutated_genes_in_study` view. It adds WES samples (`gene_panel_id =
 ```sql
 SELECT hugo_gene_symbol, total_mutation_events AS mutations, altered_samples, profiled_samples, frequency_pct
 FROM top_mutated_genes_in_study(study = 'your_study_id', top_n = 20);
--- os_target_gdc (WES): TP53 32/143 = 22.4%, MUC16 16/143, TTN 16/143
 ```
 
 ### Method 2: Manual Query (only when the views don't fit)
 **Step 1**: Get top mutated genes (study-scoped, with `LIMIT`)
 **Step 2**: Get all of those genes' denominators in one grouped, WES-aware query (see Step 2 above)
-**Step 3**: Join the two results by gene
+**Step 3**: Join the two results by gene, keeping every gene from Step 1 (a missing denominator is `0`) and dividing with `NULLIF(profiled, 0)`
 
 ## Important Notes
 

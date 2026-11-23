@@ -34,40 +34,23 @@ GROUP BY hugo_gene_symbol;
 -- Missing: WHERE ARE THE DENOMINATORS FOR EACH GENE?
 ```
 
-#### ❌ WRONG: Skipping individual gene profiling queries
-**Problem**: Failing to run separate profiling queries for EACH gene in results.
-**Each gene has different coverage**: TP53 might be profiled in 25,040 samples, MUC16 in 23,000, etc.
+#### ❌ WRONG: One profiling query per gene, or a panel-only denominator
+**Problem**: Running a separate profiling query for each gene wastes calls, and a denominator built only through `gene_panel` / `gene_panel_list` drops WES samples (they are profiled for every gene but have no `gene_panel_list` rows).
+**Each gene has different coverage**, so each row still needs its own denominator.
 
-#### ✅ CORRECT: Complete gene-specific workflow
+#### ✅ CORRECT: Use the views; fall back to one grouped, WES-aware query
 ```sql
--- STEP 1: Get altered counts per gene
-SELECT
-    hugo_gene_symbol,
-    entrez_gene_id,
-    COUNT(DISTINCT CASE WHEN off_panel = 0 THEN sample_unique_id END) AS numberOfAlteredSamplesOnPanel,
-    COUNT(*) AS totalMutationEvents
-FROM genomic_event_derived
-WHERE variant_type = 'mutation' AND mutation_status != 'UNCALLED'
-GROUP BY entrez_gene_id, hugo_gene_symbol
-ORDER BY numberOfAlteredSamplesOnPanel DESC;
-
--- STEP 2: FOR EACH GENE, run this profiling query:
-SELECT COUNT(DISTINCT stgp.sample_unique_id) AS numberOfProfiledSamples
-FROM sample_to_gene_panel_derived stgp
-JOIN gene_panel gp ON stgp.gene_panel_id = gp.stable_id
-JOIN gene_panel_list gpl ON gp.internal_id = gpl.internal_id
-JOIN gene g ON gpl.gene_id = g.entrez_gene_id
-WHERE stgp.alteration_type = 'MUTATION_EXTENDED'
-  AND g.hugo_gene_symbol = 'TP53'  -- Replace with each gene from Step 1
-  AND stgp.cancer_study_identifier = 'your_study_id';
-
--- STEP 3: Calculate frequency = numberOfAlteredSamplesOnPanel / numberOfProfiledSamples * 100
+-- PREFERRED: the view computes altered counts and WES-aware per-gene denominators
+SELECT hugo_gene_symbol, total_mutation_events, altered_samples, profiled_samples, frequency_pct
+FROM top_mutated_genes_in_study(study = 'your_study_id', top_n = 20);
 ```
+Only for variations the views don't cover, follow the manual fallback in `cbioportal://mutation-frequency-guide` ("Recommended Query Pattern"): one study-scoped, `LIMIT`ed altered-count query, then ONE grouped denominator query for all of those genes that includes WES samples and returns 0 for unprofiled genes.
 
 #### 🚨 WORKFLOW REQUIREMENTS VIOLATIONS:
 - **Missing denominator columns**: Must show gene-specific profiled samples per row
 - **Wrong table format**: Should be | Gene | # Mutations | # Samples | Profiled Samples | Sample % |
-- **Not replacing gene symbols**: Must replace 'TP53' with actual gene for each query
+- **One query per gene**: Compute all genes' denominators in one grouped query (or use the views)
+- **Panel-only denominator**: Must include WES samples
 - **Using study totals**: Never use genomic_event_derived for total sample counts
 
 ### 2. 🚨 OFF-PANEL MUTATION INCLUSION
@@ -183,7 +166,7 @@ WHERE p.cancer_study_id = 791
 SELECT COUNT(DISTINCT sample_unique_id) as primary_samples
 FROM clinical_data_derived
 WHERE cancer_study_identifier = 'msk_chord_2024';
--- Returns 25,040 (total samples), not 15,928 (primary samples)
+-- Returns the total sample count, not the primary-sample count
 ```
 **Problem**: Studies often have multiple sample types (Primary, Metastasis, Recurrence, etc.). Never assume all samples are primary!
 
@@ -195,7 +178,7 @@ FROM clinical_data_derived
 WHERE cancer_study_identifier = 'msk_chord_2024'
   AND attribute_name = 'SAMPLE_TYPE'
   AND attribute_value = 'Primary';
--- Returns 15,928 (actual primary samples)
+-- Returns the primary-sample count
 ```
 
 #### ✅ CORRECT: First check sample type distribution
@@ -263,7 +246,7 @@ WHERE cancer_study_identifier = 'msk_impact_2017'
 
 `driver_filter` values and the full oncogenic-only workflow: mutation-frequency-guide, "Driver / Oncogenic Mutations Only".
 
-If the driver query returns no rows (e.g. `driver_filter` is '' in all 78,142 msk_impact_2017 mutation rows), still return the full per-variant table, labelled "not filtered for OncoKB status", together with the OQL `MUT_DRIVER` link suggestion.
+If the driver query returns no rows (e.g. `driver_filter` is '' for every mutation row in msk_impact_2017), still return the full per-variant table, labelled "not filtered for OncoKB status", together with the OQL `MUT_DRIVER` link suggestion.
 
 **OQL DRIVER syntax (for reference — used in cBioPortal web UI, not SQL):**
 - `TP53: DRIVER` — all OncoKB-annotated driver alterations (mutations, fusions, CNAs)
