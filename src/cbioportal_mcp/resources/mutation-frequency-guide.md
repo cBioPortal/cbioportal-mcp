@@ -250,7 +250,6 @@ Columns: `hugo_gene_symbol`, `cytoband`, `cna_type` (`AMP` / `HOMDEL`; a gene ca
 
 ```sql
 SELECT * FROM gene_cna_distribution_in_study(study = 'gbm_tcga_pan_can_atlas_2018', gene = 'CDKN2A');
--- Gained 20, Diploid 119, Heterozygously deleted 114, Homozygously deleted 322 (575 profiled), NA 17
 ```
 
 Columns: `profile_type` (the discrete CNA profile, `gistic` or `cna`), `cna_value` (`2`..`-2`, `NA`), `cna_label`, `samples`, `profiled_samples` (samples with a value), `pct_of_profiled` (NULL on the `NA` row = study samples without a value).
@@ -496,7 +495,6 @@ FROM sample_to_gene_panel_derived s
 JOIN (SELECT DISTINCT sample_unique_id, patient_unique_id FROM clinical_data_derived
       WHERE cancer_study_identifier = 'gbm_tcga_pan_can_atlas_2018') c USING sample_unique_id
 WHERE s.cancer_study_identifier = 'gbm_tcga_pan_can_atlas_2018' AND s.alteration_type = 'MUTATION_EXTENDED';
--- 390 profiled; IDH1 R132H 22, R132G 1, R132C 1 → R132H 22 vs WT 366
 ```
 
 This is correct for WES studies. For targeted-panel studies, restrict to samples whose panel covers the gene (the `gene_panel` join in Step 2, or `mutation_panel_gene_coverage`).
@@ -623,7 +621,6 @@ FROM genetic_alteration_derived
 WHERE cancer_study_identifier = 'gbm_tcga_pan_can_atlas_2018' AND hugo_gene_symbol = 'CDKN2A'
   AND profile_type = 'gistic' AND alteration_value NOT IN ('', 'NA')
 GROUP BY alteration_value;
--- -2: 322, -1: 114, 0: 119, 1: 20  (575 profiled)
 ```
 
 ## Key Column Names in genomic_event_derived
