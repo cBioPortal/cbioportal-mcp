@@ -535,13 +535,14 @@ def test_tool_metrics_include_result_size_and_total_duration(spans, metrics, mon
 
     context = SimpleNamespace(
         message=SimpleNamespace(name="clickhouse_run_select_query", arguments={}),
-        fastmcp_context=None,
+        fastmcp_context=_server_context("clickhouse_run_select_query"),
     )
     asyncio.run(telemetry.TelemetryMiddleware().on_call_tool(context, call_next))
 
     dists = _distributions(metrics)
     assert dists["tool.result_chars"][0] == 123
     assert dists["tool.result_chars"][1] == dists["tool.total_duration_ms"][1]
+    assert dists["tool.total_duration_ms"][1]["tool"] == "clickhouse_run_select_query"
     # tool.duration_ms keeps its meaning; the total includes the post-processing.
     assert dists["tool.total_duration_ms"][0] >= dists["tool.duration_ms"][0] + 45
     (span,) = spans.get_finished_spans()
@@ -559,6 +560,17 @@ def _caller(client_name):
     )
 
 
+def _server_context(*tool_names, calls=None):
+    """A FastMCP Context stand-in whose server has ``tool_names`` registered."""
+
+    async def get_tools():
+        if calls is not None:
+            calls.append(1)
+        return {name: object() for name in tool_names}
+
+    return SimpleNamespace(fastmcp=SimpleNamespace(get_tools=get_tools))
+
+
 def test_new_tool_metrics_omit_the_unbounded_client_name(spans, metrics, monkeypatch):
     import mcp.types as mt
 
@@ -570,7 +582,9 @@ def test_new_tool_metrics_omit_the_unbounded_client_name(spans, metrics, monkeyp
     async def call_next(_):
         return result
 
-    context = SimpleNamespace(message=SimpleNamespace(name="ping", arguments={}))
+    context = SimpleNamespace(
+        message=SimpleNamespace(name="ping", arguments={}), fastmcp_context=_server_context("ping")
+    )
     asyncio.run(telemetry.TelemetryMiddleware().on_call_tool(context, call_next))
 
     dists = _distributions(metrics)
@@ -594,7 +608,10 @@ def test_cancelled_tool_call_emits_total_duration_and_reraises(spans, metrics, m
         await asyncio.sleep(30)
 
     async def scenario():
-        context = SimpleNamespace(message=SimpleNamespace(name="slow_tool", arguments={}))
+        context = SimpleNamespace(
+            message=SimpleNamespace(name="slow_tool", arguments={}),
+            fastmcp_context=_server_context("slow_tool"),
+        )
         task = asyncio.create_task(telemetry.TelemetryMiddleware().on_call_tool(context, call_next))
         await asyncio.wait_for(entered.wait(), 5)
         await asyncio.sleep(0.05)
@@ -618,3 +635,160 @@ def test_cancelled_tool_call_emits_total_duration_and_reraises(spans, metrics, m
         "error_kind": "cancelled",
     }
     assert total_ms >= 45
+
+
+# --- bounded `tool` tag on the new metrics -------------------------------------
+
+
+def _run_tool_call(middleware, name, fastmcp_context, outcome="ok"):
+    import mcp.types as mt
+
+    async def call_next(_):
+        if outcome == "raise":
+            raise ToolError(f"Unknown tool: {name}")
+        return SimpleNamespace(content=[mt.TextContent(type="text", text="ok")])
+
+    context = SimpleNamespace(
+        message=SimpleNamespace(name=name, arguments={}), fastmcp_context=fastmcp_context
+    )
+    try:
+        asyncio.run(middleware.on_call_tool(context, call_next))
+    except ToolError:
+        pass
+
+
+NEW_TOOL_METRICS = ("tool.total_duration_ms", "tool.result_chars")
+
+
+def _new_metric_tags(metrics):
+    return [c.args[2] for c in metrics.distribution.call_args_list if c.args[0] in NEW_TOOL_METRICS]
+
+
+@pytest.fixture
+def quiet_caller(monkeypatch):
+    monkeypatch.setattr(telemetry, "_llmobs_tool_span", lambda *args: None)
+    monkeypatch.setattr(telemetry, "_resolve_caller_context", lambda _ctx: _caller("x"))
+
+
+def test_unknown_tool_request_is_tagged_unknown_on_new_metrics(spans, metrics, quiet_caller):
+    middleware = telemetry.TelemetryMiddleware()
+    calls = []
+    ctx = _server_context("clickhouse_run_select_query", calls=calls)
+
+    for i in range(50):
+        _run_tool_call(middleware, f"attacker-chosen-{i}", ctx, outcome="raise")
+
+    tags = _new_metric_tags(metrics)
+    assert len(tags) == 50
+    assert all(
+        t
+        == {
+            "tool": "unknown",
+            "success": "false",
+            "client_kind": "direct",
+            "error_kind": "exception",
+        }
+        for t in tags
+    )
+    assert not any("attacker-chosen" in str(t) for t in tags)
+    # Pre-existing metrics keep the raw requested name (documented follow-up).
+    assert metrics.increment.call_args_list[0].args[1]["tool"] == "attacker-chosen-0"
+    # A flood of unknown names re-reads the registered set at most once per window.
+    assert len(calls) == 1
+
+
+def test_registered_tool_keeps_its_real_name(spans, metrics, quiet_caller):
+    middleware = telemetry.TelemetryMiddleware()
+    calls = []
+    ctx = _server_context("clickhouse_run_select_query", "list_studies", calls=calls)
+
+    _run_tool_call(middleware, "list_studies", ctx)
+    _run_tool_call(middleware, "clickhouse_run_select_query", ctx)
+
+    assert [t["tool"] for t in _new_metric_tags(metrics)] == [
+        "list_studies",
+        "list_studies",
+        "clickhouse_run_select_query",
+        "clickhouse_run_select_query",
+    ]
+    assert len(calls) == 1  # cached after the first lookup
+
+
+def test_tool_registered_later_resolves_after_the_refresh_window(
+    spans, metrics, quiet_caller, monkeypatch
+):
+    middleware = telemetry.TelemetryMiddleware()
+    names = ["a"]
+
+    async def get_tools():
+        return {n: object() for n in names}
+
+    ctx = SimpleNamespace(fastmcp=SimpleNamespace(get_tools=get_tools))
+    clock = [1000.0]
+    monkeypatch.setattr(telemetry.time, "monotonic", lambda: clock[0])
+
+    _run_tool_call(middleware, "a", ctx)
+    names.append("b")
+    _run_tool_call(middleware, "b", ctx)  # inside the window: not re-read yet
+    clock[0] += telemetry._TOOL_NAMES_REFRESH_SECONDS
+    _run_tool_call(middleware, "b", ctx)
+
+    totals = [
+        c.args[2]["tool"]
+        for c in metrics.distribution.call_args_list
+        if c.args[0] == "tool.total_duration_ms"
+    ]
+    assert totals == ["a", "unknown", "b"]
+
+
+@pytest.mark.parametrize("broken", ["no_context", "server_gone", "get_tools_raises"])
+def test_tool_lookup_failure_falls_back_to_unknown_without_failing_the_call(
+    spans, metrics, quiet_caller, broken
+):
+    if broken == "no_context":
+        ctx = None
+    elif broken == "server_gone":
+
+        class Gone:
+            @property
+            def fastmcp(self):
+                raise RuntimeError("FastMCP instance is no longer available")
+
+        ctx = Gone()
+    else:
+
+        async def get_tools():
+            raise RuntimeError("boom")
+
+        ctx = SimpleNamespace(fastmcp=SimpleNamespace(get_tools=get_tools))
+
+    _run_tool_call(telemetry.TelemetryMiddleware(), "list_studies", ctx)
+
+    assert [t["tool"] for t in _new_metric_tags(metrics)] == ["unknown", "unknown"]
+    assert _distributions(metrics)["tool.duration_ms"][1]["tool"] == "list_studies"
+
+
+def test_unknown_tool_through_a_real_fastmcp_server(metrics, monkeypatch):
+    """FastMCP runs middleware before tool lookup; the new metrics still stay bounded."""
+    from fastmcp import Client, FastMCP
+
+    monkeypatch.setattr(telemetry, "_llmobs_tool_span", lambda *args: None)
+    mcp = FastMCP("bounded-tags", middleware=[telemetry.TelemetryMiddleware()])
+
+    @mcp.tool()
+    def ping() -> str:
+        return "pong"
+
+    async def scenario():
+        async with Client(mcp) as client:
+            await client.call_tool("ping", {})
+            await client.call_tool("no-such-tool-1f2e", {}, raise_on_error=False)
+
+    asyncio.run(scenario())
+
+    totals = [
+        c.args[2]["tool"]
+        for c in metrics.distribution.call_args_list
+        if c.args[0] == "tool.total_duration_ms"
+    ]
+    assert totals == ["ping", "unknown"]

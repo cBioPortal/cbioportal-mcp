@@ -133,6 +133,15 @@ def _get_dogstatsd_client() -> _DogStatsDClient | None:
     return _dogstatsd_client
 
 
+# Tag value for a requested tool name that is not a registered tool. FastMCP
+# runs middleware before tool lookup, so the requested name is caller-chosen.
+UNKNOWN_TOOL_TAG = "unknown"
+# A name missing from the cached registered set triggers at most one re-read
+# of the server's tools per this many seconds (tools registered after the
+# first call still resolve; a flood of bogus names costs one lookup per window).
+_TOOL_NAMES_REFRESH_SECONDS = 30.0
+
+
 def _emit_tool_metrics(
     *,
     tool_name: str,
@@ -142,12 +151,17 @@ def _emit_tool_metrics(
     client_name: str | None,
     error_kind: str | None = None,
     result_chars: int | None = None,
+    metric_tool: str = UNKNOWN_TOOL_TAG,
 ) -> None:
     """Emit aggregate Datadog metrics for MCP tool call frequency and latency.
 
     tool.duration_ms ends when the tool's result is back in this middleware;
     tool.total_duration_ms (see _emit_tool_total_metric) also covers the
-    LLMObs work after it. tool.result_chars is the size of the returned text."""
+    LLMObs work after it. tool.result_chars is the size of the returned text.
+
+    ``metric_tool`` is the registered tool name (or UNKNOWN_TOOL_TAG) used as
+    the ``tool`` tag on tool.result_chars; the pre-existing metrics keep the
+    raw requested name."""
     client = _get_dogstatsd_client()
     if client is None:
         return
@@ -164,7 +178,9 @@ def _emit_tool_metrics(
         client.increment("tool.calls", tags)
         client.distribution("tool.duration_ms", round(duration_ms, 3), tags)
         if result_chars is not None:
-            client.distribution("tool.result_chars", result_chars, _bounded_tool_tags(tags))
+            client.distribution(
+                "tool.result_chars", result_chars, {**_bounded_tool_tags(tags), "tool": metric_tool}
+            )
         if not success:
             client.increment("tool.errors", tags)
     except Exception as exc:
@@ -191,8 +207,9 @@ def _emit_tool_total_metric(
 ) -> None:
     """Emit tool.total_duration_ms: tool.duration_ms plus the telemetry work
     after it (LLMObs output annotation and span finish). Bounded tags only:
-    tool, success, client_kind and error_kind ("result" | "exception" |
-    "cancelled"); no client_name (see _bounded_tool_tags)."""
+    tool (a registered tool name or UNKNOWN_TOOL_TAG), success, client_kind
+    and error_kind ("result" | "exception" | "cancelled"); no client_name
+    (see _bounded_tool_tags)."""
     client = _get_dogstatsd_client()
     if client is None:
         return
@@ -964,6 +981,33 @@ class TelemetryMiddleware(Middleware):
 
     def __init__(self) -> None:
         self._tracer = trace.get_tracer(__name__)
+        # id(server) -> (registered tool names, monotonic time they were read)
+        self._tool_names: dict[int, tuple[frozenset[str], float]] = {}
+
+    async def _metric_tool_name(self, context: MiddlewareContext[Any], tool_name: str) -> str:
+        """``tool_name`` if it is a tool registered on this server, else UNKNOWN_TOOL_TAG.
+
+        Bounds the ``tool`` tag of the metrics this middleware added
+        (tool.total_duration_ms, tool.result_chars). Never raises: if the
+        server or its tools can't be read, the tag is UNKNOWN_TOOL_TAG.
+        """
+        try:
+            fastmcp_context = getattr(context, "fastmcp_context", None)
+            if fastmcp_context is None:
+                return UNKNOWN_TOOL_TAG
+            server = fastmcp_context.fastmcp
+            cached = self._tool_names.get(id(server))
+            if cached is not None and tool_name in cached[0]:
+                return tool_name
+            now = time.monotonic()
+            if cached is None or now - cached[1] >= _TOOL_NAMES_REFRESH_SECONDS:
+                names = frozenset((await server.get_tools()).keys())
+                self._tool_names[id(server)] = (names, now)
+                if tool_name in names:
+                    return tool_name
+        except Exception as exc:
+            logger.debug("Registered tool lookup failed: %s", exc)
+        return UNKNOWN_TOOL_TAG
 
     async def on_call_tool(
         self,
@@ -973,6 +1017,9 @@ class TelemetryMiddleware(Middleware):
         tool_name = getattr(context.message, "name", None) or "unknown"
         arguments = getattr(context.message, "arguments", {}) or {}
         caller = _resolve_caller_context(context)
+        # Resolved before anything starts, so the cancellation path below
+        # never has to await. Usually a cache hit with no await at all.
+        metric_tool = await self._metric_tool_name(context, tool_name)
 
         llmobs_span = _llmobs_tool_span(
             tool_name,
@@ -1030,6 +1077,7 @@ class TelemetryMiddleware(Middleware):
                         client_name=caller.client_name,
                         error_kind=outcome[1],
                         result_chars=result_chars,
+                        metric_tool=metric_tool,
                     )
                     return result
                 except Exception as exc:
@@ -1061,7 +1109,7 @@ class TelemetryMiddleware(Middleware):
             _llmobs_finish(llmobs_span, result, error=error, result_error=result_error)
             if outcome is not None:
                 _emit_tool_total_metric(
-                    tool_name=tool_name,
+                    tool_name=metric_tool,
                     total_ms=(time.perf_counter() - started) * 1000,
                     success=outcome[0],
                     client_kind=caller.client_kind,

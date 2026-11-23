@@ -124,8 +124,10 @@ async def test_tool_outcome_spans_metrics_and_return(monkeypatch, caplog, outcom
     # The end-to-end total (incl. LLMObs post-processing) is emitted last, with
     # the same tags minus the unbounded client_name.
     assert metrics.distribution.call_args.args[0] == "tool.total_duration_ms"
+    # No FastMCP server in this context, so the bounded `tool` tag falls back
+    # to "unknown" (see TelemetryMiddleware._metric_tool_name).
     bounded = {k: v for k, v in tags.items() if k != "client_name"}
-    assert distributions["tool.total_duration_ms"][2] == bounded
+    assert distributions["tool.total_duration_ms"][2] == {**bounded, "tool": "unknown"}
     assert distributions["tool.total_duration_ms"][1] >= distributions["tool.duration_ms"][1]
     provider.shutdown()
 
