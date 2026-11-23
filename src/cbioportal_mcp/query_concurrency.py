@@ -27,10 +27,18 @@ than hanging. A hung query frees its worker when the client's send/receive
 timeout fires (by default the query timeout + 5s).
 """
 
+import concurrent.futures
+import importlib.metadata
 import importlib.util
 import logging
 import os
 import sys
+import time
+import uuid
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass, field
+from typing import Iterator, Mapping
 
 from dotenv.main import DotEnv
 
@@ -146,3 +154,282 @@ def configure_mcp_clickhouse_workers() -> int:
         logger.warning("%s=%s is overridden by %s=%s", _WORKERS_ENV, existing, _CAP_ENV, cap)
     os.environ[_WORKERS_ENV] = str(cap)
     return cap
+
+
+# --- Observed query execution ---------------------------------------------------
+#
+# mcp-clickhouse's run_query() generates the ClickHouse query_id itself and
+# throws away QueryResult.summary, and its pool queue wait is indistinguishable
+# from execution time. run_query() below is mcp-clickhouse 0.5.0's run_query()
+# + execute_query(), statement for statement, on mcp-clickhouse's own pool,
+# client cache, active-query registry and KILL QUERY cancellation. The only
+# additions are timestamps and copying facts the library already has (query_id,
+# summary) into a QueryStats. Nothing about what is sent to ClickHouse changes:
+# same query text, same settings (readonly + query_id), same timeout, same
+# errors. verify_query_runner() refuses startup if those internals move.
+
+# The mcp-clickhouse release whose run_query()/execute_query() run_query() copies.
+MCP_CLICKHOUSE_RUNNER_VERSION = "0.5.0"
+
+_RUNNER_INTERNALS = (
+    "QUERY_EXECUTOR",
+    "_max_workers",
+    "_active_queries",
+    "_active_queries_lock",
+    "_ActiveQueryState",
+    "_resolve_client_config",
+    "_register_active_query",
+    "_remove_active_query",
+    "_mark_active_query_cancelled",
+    "_cancel_query_with_bounded_wait",
+    "_acquire_clickhouse_client",
+    "_release_client_entry",
+    "_evict_cached_client",
+    "_is_connection_error",
+    "_validate_query_for_destructive_ops",
+    "_serialize_tool_result",
+    "build_query_settings",
+    "get_mcp_config",
+    "ToolError",
+    "logger",
+)
+
+# Integer fields of ClickHouse's X-ClickHouse-Summary header that we record.
+SUMMARY_FIELDS = (
+    "elapsed_ns",
+    "read_rows",
+    "read_bytes",
+    "result_rows",
+    "result_bytes",
+    "total_rows_to_read",
+)
+
+
+@dataclass
+class QueryStats:
+    """Facts about one query, filled in by run_query() for telemetry.
+
+    Times are time.perf_counter() values. The worker thread writes the
+    started_at/execute fields; the caller reads them only after the future
+    resolves, except on a timeout, where they show how far the query got.
+    """
+
+    query_id: str | None = None
+    submitted_at: float | None = None
+    started_at: float | None = None  # a pool worker picked the query up
+    client_acquire_ms: float | None = None
+    execute_ms: float | None = None  # client.query(): network + ClickHouse + decode
+    serialize_ms: float | None = None  # mcp-clickhouse's JSON serialization
+    returned_at: float | None = None  # the caller got the serialized result back
+    # A timed-out query was still queued and future.cancel() removed it; the
+    # time of that cancel ends its queue wait.
+    cancelled_in_queue_at: float | None = None
+    rows_returned: int | None = None
+    payload_chars: int | None = None
+    timed_out: bool = False
+    server: dict = field(default_factory=dict)  # SUMMARY_FIELDS ClickHouse reported
+
+    @property
+    def queue_wait_ms(self) -> float | None:
+        if self.submitted_at is None or self.started_at is None:
+            return None
+        return (self.started_at - self.submitted_at) * 1000
+
+
+_current_stats: ContextVar[QueryStats | None] = ContextVar(
+    "cbioportal_mcp_query_stats", default=None
+)
+
+
+@contextmanager
+def recording_query_stats(stats: QueryStats) -> Iterator[QueryStats]:
+    """Have run_query() calls in this context record into ``stats``."""
+    token = _current_stats.set(stats)
+    try:
+        yield stats
+    finally:
+        _current_stats.reset(token)
+
+
+def _summary_stats(summary) -> dict:
+    """The SUMMARY_FIELDS of a QueryResult.summary that convert to int.
+
+    Never raises: a value that is missing or won't convert (None, "abc",
+    float("inf") -> OverflowError, an object whose lookup raises) is skipped,
+    so telemetry can't turn a successful query into an error.
+    """
+    out = {}
+    try:
+        if not isinstance(summary, Mapping):
+            return out
+        for name in SUMMARY_FIELDS:
+            try:
+                value = summary.get(name)
+                if value is None or isinstance(value, bool):
+                    continue
+                out[name] = int(value)
+            except Exception:
+                continue
+    except Exception as exc:
+        logger.debug("Ignoring unreadable ClickHouse query summary: %s", exc)
+    return out
+
+
+def _record_summary(stats: "QueryStats", res) -> None:
+    """Copy res.summary into stats; never raises (kept apart from result handling)."""
+    try:
+        stats.server = _summary_stats(getattr(res, "summary", None))
+    except Exception as exc:
+        logger.debug("Ignoring unreadable ClickHouse query summary: %s", exc)
+
+
+def _installed_mcp_clickhouse_version() -> str | None:
+    try:
+        return importlib.metadata.version("mcp-clickhouse")
+    except importlib.metadata.PackageNotFoundError:
+        return None
+
+
+def verify_query_runner() -> None:
+    """Raise unless the installed mcp-clickhouse is the one run_query() copies.
+
+    run_query()/_execute_query() are a vendored copy of mcp-clickhouse
+    MCP_CLICKHOUSE_RUNNER_VERSION's run_query()/execute_query(). Any other
+    version may have changed them (timeouts, cancellation, errors), so refuse
+    to start until the copy has been re-diffed against it.
+    """
+    installed = _installed_mcp_clickhouse_version()
+    if installed != MCP_CLICKHOUSE_RUNNER_VERSION:
+        raise RuntimeError(
+            f"mcp-clickhouse {installed} is installed, but the query runner vendored in "
+            f"cbioportal_mcp/query_concurrency.py (run_query/_execute_query) is a copy of "
+            f"mcp-clickhouse {MCP_CLICKHOUSE_RUNNER_VERSION}'s run_query/execute_query. "
+            f"Re-diff that runner against mcp-clickhouse {installed}'s mcp_server.py and "
+            f"update MCP_CLICKHOUSE_RUNNER_VERSION, or pin "
+            f"mcp-clickhouse=={MCP_CLICKHOUSE_RUNNER_VERSION}."
+        )
+
+    import mcp_clickhouse.mcp_server as mcp_server
+
+    missing = [name for name in _RUNNER_INTERNALS if not hasattr(mcp_server, name)]
+    if missing:
+        raise RuntimeError(
+            "cbioportal_mcp.query_concurrency.run_query mirrors mcp-clickhouse 0.5.0's "
+            f"run_query, but this mcp-clickhouse lacks {', '.join(missing)}. "
+            "Re-check run_query against the new version or pin mcp-clickhouse==0.5.0."
+        )
+
+
+def _execute_query(query: str, query_id: str, client_config, stats: QueryStats) -> str:
+    """mcp-clickhouse 0.5.0's execute_query(), recording into ``stats``."""
+    import mcp_clickhouse.mcp_server as mc
+
+    stats.started_at = time.perf_counter()
+    with mc._active_queries_lock:
+        state = mc._active_queries.get(query_id)
+        if state is None:
+            state = mc._ActiveQueryState(query=query)
+            mc._active_queries[query_id] = state
+
+    entry = None
+    try:
+        entry = mc._acquire_clickhouse_client(client_config)
+        client = entry.client
+        stats.client_acquire_ms = (time.perf_counter() - stats.started_at) * 1000
+        with mc._active_queries_lock:
+            if state.cancelled:
+                raise mc.ToolError("Query cancelled before execution")
+            state.client_entry = entry
+
+        mc._validate_query_for_destructive_ops(query)
+
+        query_settings = mc.build_query_settings(client)
+        query_settings["query_id"] = query_id
+        with mc._active_queries_lock:
+            if state.cancelled:
+                raise mc.ToolError("Query cancelled before execution")
+        execute_started = time.perf_counter()
+        res = client.query(query, settings=query_settings)
+        stats.execute_ms = (time.perf_counter() - execute_started) * 1000
+        _record_summary(stats, res)
+        stats.rows_returned = len(res.result_rows)
+        mc.logger.info(f"Query {query_id} returned {len(res.result_rows)} rows")
+        serialize_started = time.perf_counter()
+        payload = mc._serialize_tool_result({"columns": res.column_names, "rows": res.result_rows})
+        stats.serialize_ms = (time.perf_counter() - serialize_started) * 1000
+        stats.payload_chars = len(payload)
+        return payload
+    except mc.ToolError:
+        raise
+    except Exception as err:
+        # Do not retry queries because a write may already have succeeded.
+        if entry is not None and mc._is_connection_error(err):
+            mc._evict_cached_client(client_config, client)
+        mc.logger.error(f"Error executing query {query_id}: {err}")
+        raise mc.ToolError(f"Query execution failed: {str(err)}")  # noqa: B904 (as upstream)
+    finally:
+        mc._remove_active_query(query_id, state)
+        if entry is not None:
+            mc._release_client_entry(entry)
+
+
+def run_query(query: str) -> str:
+    """Run ``query`` exactly as mcp-clickhouse 0.5.0's run_query() does.
+
+    Same pool, client cache, readonly settings, CLICKHOUSE_MCP_QUERY_TIMEOUT
+    (queue wait included), KILL QUERY on timeout, and the same ToolError /
+    RuntimeError messages. The difference: the query_id, queue wait, execution
+    time and ClickHouse's summary are recorded into the QueryStats of the
+    enclosing recording_query_stats() block, if any.
+    """
+    import mcp_clickhouse.mcp_server as mc
+
+    stats = _current_stats.get()
+    if stats is None:
+        stats = QueryStats()
+
+    mc.logger.info(f"Executing query: {query}")
+
+    client_config = mc._resolve_client_config()
+    query_id = str(uuid.uuid4())
+    stats.query_id = query_id
+    state = mc._register_active_query(query_id, query)
+
+    try:
+        with mc._active_queries_lock:
+            in_flight = len(mc._active_queries)
+        if in_flight >= mc._max_workers:
+            mc.logger.warning(
+                "Thread pool saturated: %d in-flight vs %d workers",
+                in_flight,
+                mc._max_workers,
+            )
+
+        try:
+            stats.submitted_at = time.perf_counter()
+            future = mc.QUERY_EXECUTOR.submit(_execute_query, query, query_id, client_config, stats)
+        except Exception:
+            mc._remove_active_query(query_id, state)
+            raise
+        timeout_secs = mc.get_mcp_config().query_timeout
+        try:
+            result = future.result(timeout=timeout_secs)
+            stats.returned_at = time.perf_counter()
+            return result
+        except concurrent.futures.TimeoutError:
+            stats.timed_out = True
+            mc.logger.warning(
+                "Query %s timed out after %s seconds: %s", query_id, timeout_secs, query
+            )
+            if future.cancel():
+                stats.cancelled_in_queue_at = time.perf_counter()
+                mc._remove_active_query(query_id, state)
+            else:
+                mc._mark_active_query_cancelled(query_id)
+                mc._cancel_query_with_bounded_wait(query_id)
+            raise mc.ToolError(f"Query timed out after {timeout_secs} seconds")  # noqa: B904
+    except mc.ToolError:
+        raise
+    except Exception as e:
+        mc.logger.error("Unexpected error in run_query: %s", str(e))
+        raise RuntimeError(f"Unexpected error during query execution: {str(e)}")  # noqa: B904
