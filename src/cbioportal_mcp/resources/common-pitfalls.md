@@ -409,15 +409,15 @@ GROUP BY hugo_gene_symbol;
 
 ### 10b. 🚨 RESOLVING STUDY IDENTIFIERS VIA A SUBQUERY ON A FACT TABLE
 
-`cancer_study` is a 539-row dimension table with every `cancer_study_identifier`
+`cancer_study` is a small dimension table (one row per study) with every `cancer_study_identifier`
 in the deployment. `genetic_alteration_derived`, `genomic_event_derived`, and
-`clinical_data_derived` are multi-billion-row fact tables. Never use a fact
+`clinical_data_derived` are very large fact tables. Never use a fact
 table to look up which study identifiers match a pattern — resolve against
 `cancer_study` (or `list_studies()` / `search_oncotree()`) first.
 
 #### ❌ Wrong: subquery on a fact table just to find study identifiers
 ```sql
--- INCORRECT - scans the whole (billions of rows) fact table to resolve study IDs
+-- INCORRECT - scans a whole large fact table to resolve study IDs
 SELECT hugo_gene_symbol, alteration_value
 FROM genetic_alteration_derived
 WHERE cancer_study_identifier IN (
