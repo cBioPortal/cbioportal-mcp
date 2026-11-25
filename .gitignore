@@ -70,4 +70,5 @@ clickhouse-data/
 *.log
 
 # Local configuration
-.env.localsql/clone_db.sql
+.env.local
+sql/clone_db.sql
