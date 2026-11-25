@@ -8,27 +8,27 @@ SQL_README = REPO / "sql" / "README.md"
 
 
 def _views():
-    return re.findall(r"^CREATE VIEW (\w+) SQL SECURITY INVOKER AS", SQL_4.read_text(), re.M)
+    return re.findall(r"^CREATE VIEW (\w+) SQL SECURITY INVOKER AS", SQL_4.read_text(encoding="utf-8"), re.M)
 
 
 def test_every_view_is_dropped_before_create():
-    sql = SQL_4.read_text()
+    sql = SQL_4.read_text(encoding="utf-8")
     for view in _views():
         assert f"DROP VIEW IF EXISTS {view};" in sql, view
 
 
 def test_every_view_is_documented_in_guide():
-    guide = GUIDE.read_text()
+    guide = GUIDE.read_text(encoding="utf-8")
     missing = [v for v in _views() if f"`{v}" not in guide]
     assert not missing, f"views missing from mutation-frequency-guide.md: {missing}"
 
 
 def test_every_view_is_listed_in_sql_readme():
-    readme = SQL_README.read_text()
+    readme = SQL_README.read_text(encoding="utf-8")
     missing = [v for v in _views() if f"`{v}`" not in readme]
     assert not missing, f"views missing from sql/README.md: {missing}"
 
 
 def test_views_do_not_reference_database_names():
-    sql = re.sub(r"--[^\n]*", "", SQL_4.read_text())
+    sql = re.sub(r"--[^\n]*", "", SQL_4.read_text(encoding="utf-8"))
     assert not re.search(r"\b(FROM|JOIN)\s+\w+\.\w+", sql)

@@ -175,10 +175,10 @@ def test_study_count_columns_are_created_by_the_clone_sql():
     """Every column the guides and list_studies read must be created by sql/6."""
     from pathlib import Path
 
-    sql = (Path(__file__).parent.parent / "sql" / "6-add-study-data-type-counts.sql").read_text()
+    sql = (Path(__file__).parent.parent / "sql" / "6-add-study-data-type-counts.sql").read_text(encoding="utf-8")
     guide = (
         Path(__file__).parent.parent / "src" / "cbioportal_mcp" / "resources" / "sample-filtering-guide.md"
-    ).read_text()
+    ).read_text(encoding="utf-8")
     for column in (
         "sample_count",
         "mutation_sample_count",

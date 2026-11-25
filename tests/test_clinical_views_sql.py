@@ -2,7 +2,7 @@ import re
 from pathlib import Path
 
 ROOT = Path(__file__).parent.parent
-SQL = (ROOT / "sql" / "7-clinical-views.sql").read_text()
+SQL = (ROOT / "sql" / "7-clinical-views.sql").read_text(encoding="utf-8")
 RESOURCES = ROOT / "src" / "cbioportal_mcp" / "resources"
 
 
@@ -22,13 +22,13 @@ def test_tables_are_unqualified():
 
 
 def test_every_view_is_documented_in_clinical_data_guide():
-    guide = (RESOURCES / "clinical-data-guide.md").read_text()
+    guide = (RESOURCES / "clinical-data-guide.md").read_text(encoding="utf-8")
     for view in _created_views():
         assert view in guide, f"{view} not documented in clinical-data-guide.md"
 
 
 def test_treatment_guide_points_to_treatment_views():
-    guide = (RESOURCES / "treatment-guide.md").read_text()
+    guide = (RESOURCES / "treatment-guide.md").read_text(encoding="utf-8")
     for view in _created_views():
         if view.startswith("treatment_"):
             assert view in guide, f"{view} not referenced in treatment-guide.md"

@@ -178,7 +178,7 @@ def test_no_live_path_counts_uncalled_structural_variants(alteration_type):
 
 def _view_body(view: str) -> str:
     """One CREATE VIEW statement from sql/4, comments stripped."""
-    sql = re.sub(r"--[^\n]*", "", SQL_4.read_text())
+    sql = re.sub(r"--[^\n]*", "", SQL_4.read_text(encoding="utf-8"))
     return sql[sql.index(f"CREATE VIEW {view} SQL SECURITY INVOKER AS") :].split(";", 1)[0]
 
 
