@@ -3,7 +3,7 @@
 import sqlite3
 from pathlib import Path
 
-SQL = (Path(__file__).parent.parent / "sql" / "6-add-study-data-type-counts.sql").read_text()
+SQL = (Path(__file__).parent.parent / "sql" / "6-add-study-data-type-counts.sql").read_text(encoding="utf-8")
 
 
 def test_resource_counts_resolve_stable_ids_within_study_and_preserve_scope_counts():

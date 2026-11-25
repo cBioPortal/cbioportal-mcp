@@ -47,7 +47,7 @@ ALTERATIONS = ["mutation", "amplification", "deep_deletion", "structural_variant
 def _statements(path: Path) -> list[str]:
     """Split a sql file the way clickhouse-client --queries-file would."""
     body = "\n".join(
-        line for line in path.read_text().splitlines() if not line.lstrip().startswith("--")
+        line for line in path.read_text(encoding="utf-8").splitlines() if not line.lstrip().startswith("--")
     )
     return [s.strip() for s in body.split(";") if s.strip()]
 

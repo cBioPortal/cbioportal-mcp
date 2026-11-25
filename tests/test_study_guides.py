@@ -34,7 +34,7 @@ def test_tcga_pancan_guide_tables_name_only_real_attributes():
     assert len(guides) > 1
     unknown = {}
     for guide in guides:
-        names = {n for cell in ROW_ATTRS.findall(guide.read_text()) for n in re.findall(r"`([A-Z0-9_]+)`", cell)}
+        names = {n for cell in ROW_ATTRS.findall(guide.read_text(encoding="utf-8")) for n in re.findall(r"`([A-Z0-9_]+)`", cell)}
         bad = names - TCGA_PANCAN_ATTRIBUTES
         if bad:
             unknown[guide.name] = sorted(bad)

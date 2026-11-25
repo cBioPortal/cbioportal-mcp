@@ -31,7 +31,7 @@ def _is_invoker(header):
 def test_every_non_materialized_view_uses_invoker():
     views = 0
     for path in sorted(SQL_DIR.rglob("*.sql")):
-        for header in _view_headers(path.read_text()):
+        for header in _view_headers(path.read_text(encoding="utf-8")):
             views += 1
             assert _is_invoker(header), f"{path.relative_to(SQL_DIR)}: CREATE VIEW {header.strip()}"
     assert views, "No CREATE VIEW declarations found"
