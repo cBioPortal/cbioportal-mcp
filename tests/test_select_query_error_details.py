@@ -27,7 +27,7 @@ def reply(message, query="SELECT 1"):
 
 
 def test_tables_in_query_maps_aliases_and_skips_keywords():
-    query = "SELECT * FROM cancer_study s JOIN db.genomic_event_derived AS g ON s.x = g.x WHERE 1 LEFT JOIN cancer_study"
+    query = "SELECT * FROM cancer_study s JOIN db.genomic_event_derived AS g ON s.x = g.x WHERE 1 LEFT JOIN cancer_study"  # noqa: E501
     assert query_errors.tables_in_query(query) == {
         "s": "cancer_study",
         "cancer_study": "cancer_study",
@@ -38,7 +38,7 @@ def test_tables_in_query_maps_aliases_and_skips_keywords():
 
 def test_unknown_qualified_column_lists_the_aliased_tables_columns_and_close_matches():
     out = reply(
-        "Code: 47. DB::Exception: Identifier 's.cancer_study_id' cannot be resolved from table with name s.",
+        "Code: 47. DB::Exception: Identifier 's.cancer_study_id' cannot be resolved from table with name s.",  # noqa: E501
         "SELECT s.cancer_study_id FROM cancer_study s",
     )
     assert "Columns of `cancer_study`: cancer_study_identifier, name" in out["hint"]
@@ -75,11 +75,11 @@ def test_unknown_table_suggests_the_closest_names():
             "tupleElement(test_expression, 2)",
         ),
         (
-            "Code: 1. DB::Exception: Resolved identifier 'patient_unique_id' in parent scope to expression",
+            "Code: 1. DB::Exception: Resolved identifier 'patient_unique_id' in parent scope to expression",  # noqa: E501
             "Correlated subqueries",
         ),
         (
-            "Query execution failed: Error ('Connection aborted.', ConnectionResetError(104, 'Connection reset by peer'))",
+            "Query execution failed: Error ('Connection aborted.', ConnectionResetError(104, 'Connection reset by peer'))",  # noqa: E501
             "safe to run again",
         ),
     ],
@@ -94,7 +94,7 @@ def test_a_failing_schema_lookup_only_drops_its_own_part():
 
     out = query_errors.select_query_error(
         RuntimeError(
-            "Code: 47. DB::Exception: Identifier 's.nope' cannot be resolved from table with name s."
+            "Code: 47. DB::Exception: Identifier 's.nope' cannot be resolved from table with name s."  # noqa: E501
         ),
         "SELECT s.nope FROM cancer_study s",
         boom,
@@ -122,7 +122,7 @@ def test_select_tool_retries_once_after_a_dropped_connection(monkeypatch):
         calls.append(query)
         if len(calls) == 1:
             raise RuntimeError(
-                "Error ('Connection aborted.', ConnectionResetError(104, 'Connection reset by peer'))"
+                "Error ('Connection aborted.', ConnectionResetError(104, 'Connection reset by peer'))"  # noqa: E501
             )
         return [{"n": 1}]
 
@@ -147,7 +147,7 @@ def test_select_tool_does_not_retry_a_timeout(monkeypatch):
 def test_select_tool_unknown_column_error_carries_the_real_columns(monkeypatch):
     def bad(query, query_label=None, max_rows=None):
         raise RuntimeError(
-            "Code: 47. DB::Exception: Identifier 's.cancer_study_id' cannot be resolved from table with name s."
+            "Code: 47. DB::Exception: Identifier 's.cancer_study_id' cannot be resolved from table with name s."  # noqa: E501
         )
 
     monkeypatch.setattr(server, "run_select_query", bad)

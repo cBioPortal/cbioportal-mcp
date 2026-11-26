@@ -138,14 +138,15 @@ _TABLE_REFERENCE = re.compile(
     r"\b(?:FROM|JOIN)\s+([A-Za-z_][\w.]*)(?:\s+(?:AS\s+)?([A-Za-z_]\w*))?", re.IGNORECASE
 )
 _NOT_AN_ALIAS = frozenset(
-    "where on using group order limit left right inner outer cross full join prewhere union select having "
-    "settings format final sample array global any all asof semi anti natural".split()
+    "where on using group order limit left right inner outer cross full join prewhere union "
+    "select having settings format final sample array global any all asof semi anti natural".split()
 )
 _TRANSIENT = ("Connection reset by peer", "Connection aborted", "Remote end closed connection")
 
 _TUPLE_UNREADABLE = (
-    "The result holds a tuple (for example a test function's (statistic, p_value)) that the client cannot read "
-    "next to other columns. Select its elements as scalars: tupleElement(test_expression, 2) AS p_value."
+    "The result holds a tuple (for example a test function's (statistic, p_value)) that the client "
+    "cannot read next to other columns. Select its elements as scalars: "
+    "tupleElement(test_expression, 2) AS p_value."
 )
 _CORRELATED_SUBQUERY = (
     "Correlated subqueries (a subquery that reads a column of the outer query) are not supported. "
@@ -158,12 +159,12 @@ LIST_TABLES = Callable[[], list[str] | None]
 
 
 def is_transient_connection_error(message: str) -> bool:
-    """A dropped connection: safe to repeat a SELECT once, unlike a timeout (the query is just too heavy)."""
+    """A dropped connection: safe to repeat a SELECT once, unlike a timeout (too heavy a query)."""
     return any(marker in message for marker in _TRANSIENT)
 
 
 def tables_in_query(query: str) -> dict[str, str]:
-    """Alias (or bare table name) to table name for every FROM/JOIN in the query, in order of appearance."""
+    """Alias (or bare table name) to table name for every FROM/JOIN in the query."""
     found: dict[str, str] = {}
     for match in _TABLE_REFERENCE.finditer(query):
         table = match.group(1).rsplit(".", 1)[-1]
@@ -179,7 +180,7 @@ def _first_match(patterns: tuple[re.Pattern, ...], text: str) -> str | None:
 
 
 def _identifier_detail(message: str, query: str, describe: DESCRIBE) -> str | None:
-    """The real columns of the tables the failing query reads, and the closest match to the unknown name."""
+    """The real columns of the tables the failing query reads, and the closest name."""
     identifier = _first_match(_UNKNOWN_IDENTIFIER, message)
     if not identifier:
         return None
@@ -220,9 +221,8 @@ def _table_detail(message: str, list_tables: LIST_TABLES) -> str | None:
     if close:
         lines.append(f"Closest tables: {', '.join(f'`{c}`' for c in close)}.")
     if names:
-        lines.append(
-            f"Tables: {', '.join(names[:MAX_LISTED_TABLES])}{' ...' if len(names) > MAX_LISTED_TABLES else ''}."
-        )
+        more = " ..." if len(names) > MAX_LISTED_TABLES else ""
+        lines.append(f"Tables: {', '.join(names[:MAX_LISTED_TABLES])}{more}.")
     return " ".join(lines)
 
 
