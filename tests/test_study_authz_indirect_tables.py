@@ -62,7 +62,7 @@ SEED_COLUMNS = {
     "resource_patient": "internal_id",
     "clinical_sample": "internal_id",
     "resource_sample": "internal_id",
-    "genetic_profile": "genetic_profile_id cancer_study_id stable_id",
+    "genetic_profile": "genetic_profile_id cancer_study_id stable_id cancer_study_identifier",
     "allele_specific_copy_number": "genetic_profile_id",
     "alteration_driver_annotation": "genetic_profile_id",
     "genetic_alteration": "genetic_profile_id",
@@ -293,6 +293,8 @@ def _load_fixture(server: Server) -> None:
             row = {column: _seed_value(table, column, sid) for column in columns}
             if table == "cancer_study":
                 row.update(cancer_study_identifier=study, groups="PUBLIC" if sid == 1 else study)
+            elif "cancer_study_identifier" in row:
+                row["cancer_study_identifier"] = study
             row["row_tag"] = study
             server.rows[table].append(row)
             server.expected[table][study] = {sid}
@@ -304,6 +306,7 @@ def _load_fixture(server: Server) -> None:
             "genetic_profile_id": 305,
             "cancer_study_id": 2,
             "stable_id": "profile_305",
+            "cancer_study_identifier": STUDIES[2],
             "row_tag": "unlinked_A",
         }
     )

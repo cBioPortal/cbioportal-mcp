@@ -50,7 +50,8 @@ def test_every_view_and_table_created_by_sql_dir_is_classified():
     for path in (REPO / "sql").rglob("*.sql"):
         text = path.read_text()
         created |= set(re.findall(r"CREATE\s+(?:OR\s+REPLACE\s+)?(?:VIEW|TABLE)\s+(\w+)", text))
-    created -= {"cancer_study_with_counts"}  # sql/6 staging table, dropped after EXCHANGE
+    # Staging tables, dropped after EXCHANGE (sql/6, sql/8).
+    created = {name for name in created if not name.endswith(("_with_counts", "_with_study"))}
     assert created - catalog.classified_names() == set()
 
 

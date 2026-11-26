@@ -236,6 +236,8 @@ def _load_fixture(admin) -> None:
             row = {c: indirect._seed_value(table, c, sid) for c in columns}
             if table == "cancer_study":
                 row.update(cancer_study_identifier=ident, groups="PUBLIC" if sid == 1 else GROUP)
+            elif "cancer_study_identifier" in row:
+                row["cancer_study_identifier"] = ident
             row["row_tag"] = ident
             rows.append(row)
         if table == "genetic_profile_link":

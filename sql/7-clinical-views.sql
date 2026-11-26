@@ -32,8 +32,8 @@ ENGINE = MergeTree
 ORDER BY (cancer_study_identifier, patient_unique_id)
 AS
 SELECT
-    cs.cancer_study_identifier AS cancer_study_identifier,
-    concat(cs.cancer_study_identifier, '_', p.stable_id) AS patient_unique_id,
+    assumeNotNull(cs.cancer_study_identifier) AS cancer_study_identifier,
+    concat(assumeNotNull(cs.cancer_study_identifier), '_', assumeNotNull(p.stable_id)) AS patient_unique_id,
     ce.clinical_event_id AS clinical_event_id,
     any(ce.start_date) AS start_date,
     maxIf(ced.value, ced.key = 'AGENT') AS agent,
