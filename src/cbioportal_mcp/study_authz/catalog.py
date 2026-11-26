@@ -93,6 +93,7 @@ STUDY_SCOPED_TABLE_PATHS: dict[str, StudyPath] = {
     "genomic_event_derived": StudyIdentifier("cancer_study_identifier"),
     "sample_derived": StudyIdentifier("cancer_study_identifier"),
     "sample_to_gene_panel_derived": StudyIdentifier("cancer_study_identifier"),
+    "sample_list_members": StudyIdentifier("cancer_study_identifier"),
     "treatment_event_agents": StudyIdentifier("cancer_study_identifier"),
     "mutation_derived": StudyIdentifier("studyId"),
     # cancer_study_id -> cancer_study.

@@ -2,7 +2,7 @@
 
 ## Overview
 
-Treatment data in cBioPortal is stored in **clinical event tables**, separate from clinical attributes. This allows for timeline-based treatment records with start/stop dates.
+Treatment data in cBioPortal is stored as **clinical events**, separate from clinical attributes. This allows for timeline-based treatment records with start/stop dates.
 
 ## Start Here: Treatment Views
 
@@ -16,30 +16,17 @@ SELECT * FROM treatment_counts_in_study(study='msk_chord_2024') ORDER BY patient
 SELECT * FROM treatment_regimens_in_study(study='msk_chord_2024') ORDER BY patients DESC LIMIT 20;
 ```
 
-Write raw event queries (below) only for subgroups, timelines or keys the views do not expose.
+Write event queries (below) only for subgroups, timelines or keys the views do not expose.
 
 ## Key Tables
 
 | Table | Description |
 |-------|-------------|
-| `clinical_event` | Event records with patient_id, event_type, start_date, stop_date |
-| `clinical_event_data` | Key-value pairs linked to each clinical_event_id |
+| `treatment_event_agents` | One row per Treatment event that has an AGENT: `cancer_study_identifier`, `patient_unique_id`, `clinical_event_id`, `start_date`, `agent`, `treatment_type`, `treatment_subtype`. Type and subtype come from the same event as the agent (TREATMENT_TYPE / Treatment_TYPE and SUBTYPE / TREATMENT_SUBTYPE keys are already merged). Event type matching is already case-insensitive. |
+| `clinical_event_derived` | All events: `cancer_study_identifier`, `patient_stable_id`, `event_type`, `start_date`, `stop_date` |
+| `clinical_event_data_derived` | Every key/value pair of every event: `cancer_study_identifier`, `patient_unique_id`, `event_type`, `key`, `value`, `start_date`, `stop_date`. It has no event id, so it cannot pair an agent with its subtype; use `treatment_event_agents` for that. |
 
-## Schema
-
-```
-clinical_event
-├── clinical_event_id (PK)
-├── patient_id (FK → patient.internal_id)
-├── event_type (Treatment, TREATMENT, Diagnosis, SURGERY, etc.)
-├── start_date (days from diagnosis)
-└── stop_date (days from diagnosis)
-
-clinical_event_data
-├── clinical_event_id (FK)
-├── key (AGENT, SUBTYPE, etc.)
-└── value
-```
+`start_date` / `stop_date` are days from diagnosis.
 
 ## Event Types
 
@@ -60,43 +47,31 @@ Not all studies have all event types. Common ones include:
 ### List Available Event Types in a Study
 
 ```sql
-SELECT DISTINCT ce.event_type, COUNT(*) as event_count
-FROM clinical_event ce
-JOIN patient p ON ce.patient_id = p.internal_id
-JOIN cancer_study cs ON p.cancer_study_id = cs.cancer_study_id
-WHERE cs.cancer_study_identifier = 'your_study_id'
-GROUP BY ce.event_type
+SELECT event_type, COUNT(*) AS event_count
+FROM clinical_event_derived
+WHERE cancer_study_identifier = 'your_study_id'
+GROUP BY event_type
 ORDER BY event_count DESC;
 ```
 
 ### List Treatment Data Keys in a Study
 
 ```sql
-SELECT DISTINCT ced.key, COUNT(*) as cnt
-FROM clinical_event ce
-JOIN clinical_event_data ced ON ce.clinical_event_id = ced.clinical_event_id
-JOIN patient p ON ce.patient_id = p.internal_id
-JOIN cancer_study cs ON p.cancer_study_id = cs.cancer_study_id
-WHERE cs.cancer_study_identifier = 'your_study_id'
-  AND ce.event_type IN ('Treatment', 'TREATMENT')
-GROUP BY ced.key
+SELECT key, COUNT(*) AS cnt
+FROM clinical_event_data_derived
+WHERE cancer_study_identifier = 'your_study_id'
+  AND event_type IN ('Treatment', 'TREATMENT')
+GROUP BY key
 ORDER BY cnt DESC;
 ```
 
 ### Get Most Common Treatment Agents
 
 ```sql
-SELECT 
-    ced.value as agent,
-    COUNT(DISTINCT ce.patient_id) as patient_count
-FROM clinical_event ce
-JOIN clinical_event_data ced ON ce.clinical_event_id = ced.clinical_event_id
-JOIN patient p ON ce.patient_id = p.internal_id
-JOIN cancer_study cs ON p.cancer_study_id = cs.cancer_study_id
-WHERE cs.cancer_study_identifier = 'your_study_id'
-  AND ce.event_type IN ('Treatment', 'TREATMENT')
-  AND ced.key = 'AGENT'
-GROUP BY ced.value
+SELECT agent, COUNT(DISTINCT patient_unique_id) AS patient_count
+FROM treatment_event_agents
+WHERE cancer_study_identifier = 'your_study_id'
+GROUP BY agent
 ORDER BY patient_count DESC
 LIMIT 20;
 ```
@@ -105,21 +80,16 @@ LIMIT 20;
 
 ### Get Treatment with Multiple Attributes
 
-Treatment events often have multiple key-value pairs. To get agent + subtype together:
+`treatment_event_agents` already pairs each agent with the type and subtype recorded on the same event:
 
 ```sql
-SELECT 
-    agent.value as agent,
-    subtype.value as treatment_subtype,
-    COUNT(DISTINCT ce.patient_id) as patients
-FROM clinical_event ce
-JOIN clinical_event_data agent ON ce.clinical_event_id = agent.clinical_event_id AND agent.key = 'AGENT'
-LEFT JOIN clinical_event_data subtype ON ce.clinical_event_id = subtype.clinical_event_id AND subtype.key = 'SUBTYPE'
-JOIN patient p ON ce.patient_id = p.internal_id
-JOIN cancer_study cs ON p.cancer_study_id = cs.cancer_study_id
-WHERE cs.cancer_study_identifier = 'your_study_id'
-  AND ce.event_type IN ('Treatment', 'TREATMENT')
-GROUP BY agent.value, subtype.value
+SELECT
+    treatment_subtype,
+    agent,
+    COUNT(DISTINCT patient_unique_id) AS patients
+FROM treatment_event_agents
+WHERE cancer_study_identifier = 'your_study_id'
+GROUP BY treatment_subtype, agent
 ORDER BY patients DESC;
 ```
 
@@ -129,29 +99,24 @@ Find treatments given before or after sequencing:
 
 ```sql
 WITH seq_dates AS (
-    SELECT ce.patient_id, MIN(ce.start_date) as seq_date
-    FROM clinical_event ce
-    JOIN patient p ON ce.patient_id = p.internal_id
-    JOIN cancer_study cs ON p.cancer_study_id = cs.cancer_study_id
-    WHERE cs.cancer_study_identifier = 'your_study_id'
-      AND ce.event_type = 'Sequencing'
-    GROUP BY ce.patient_id
+    SELECT concat(cancer_study_identifier, '_', patient_stable_id) AS patient_unique_id,
+           MIN(start_date) AS seq_date
+    FROM clinical_event_derived
+    WHERE cancer_study_identifier = 'your_study_id'
+      AND event_type = 'Sequencing'
+    GROUP BY patient_unique_id
 )
-SELECT 
-    CASE 
+SELECT
+    CASE
         WHEN tx.start_date < seq.seq_date THEN 'Before Sequencing'
         ELSE 'After Sequencing'
-    END as timing,
-    agent.value as treatment,
-    COUNT(DISTINCT tx.patient_id) as patients
-FROM clinical_event tx
-JOIN clinical_event_data agent ON tx.clinical_event_id = agent.clinical_event_id AND agent.key = 'AGENT'
-JOIN seq_dates seq ON tx.patient_id = seq.patient_id
-JOIN patient p ON tx.patient_id = p.internal_id
-JOIN cancer_study cs ON p.cancer_study_id = cs.cancer_study_id
-WHERE cs.cancer_study_identifier = 'your_study_id'
-  AND tx.event_type IN ('Treatment', 'TREATMENT')
-GROUP BY timing, agent.value
+    END AS timing,
+    tx.agent AS treatment,
+    COUNT(DISTINCT tx.patient_unique_id) AS patients
+FROM treatment_event_agents tx
+JOIN seq_dates seq ON tx.patient_unique_id = seq.patient_unique_id
+WHERE tx.cancer_study_identifier = 'your_study_id'
+GROUP BY timing, treatment
 ORDER BY timing, patients DESC;
 ```
 
@@ -167,17 +132,13 @@ WITH mutated_patients AS (
       AND hugo_gene_symbol = 'EGFR'
       AND variant_type = 'mutation'
 )
-SELECT 
-    agent.value as treatment,
-    COUNT(DISTINCT ce.patient_id) as treated_patients
-FROM clinical_event ce
-JOIN clinical_event_data agent ON ce.clinical_event_id = agent.clinical_event_id AND agent.key = 'AGENT'
-JOIN patient p ON ce.patient_id = p.internal_id
-JOIN cancer_study cs ON p.cancer_study_id = cs.cancer_study_id
-JOIN mutated_patients mp ON CONCAT(cs.cancer_study_identifier, '_', p.stable_id) = mp.patient_unique_id
-WHERE cs.cancer_study_identifier = 'your_study_id'
-  AND ce.event_type IN ('Treatment', 'TREATMENT')
-GROUP BY agent.value
+SELECT
+    tx.agent AS treatment,
+    COUNT(DISTINCT tx.patient_unique_id) AS treated_patients
+FROM treatment_event_agents tx
+WHERE tx.cancer_study_identifier = 'your_study_id'
+  AND tx.patient_unique_id IN (SELECT patient_unique_id FROM mutated_patients)
+GROUP BY tx.agent
 ORDER BY treated_patients DESC;
 ```
 
@@ -214,31 +175,23 @@ Treatment data in cBioPortal has a critical limitation:
 ```sql
 -- Step 1: Summarize by category
 SELECT
-    subtype.value as treatment_category,
-    COUNT(DISTINCT ce.patient_id) as patient_count
-FROM clinical_event ce
-JOIN clinical_event_data subtype ON ce.clinical_event_id = subtype.clinical_event_id
-JOIN patient p ON ce.patient_id = p.internal_id
-JOIN cancer_study cs ON p.cancer_study_id = cs.cancer_study_id
-WHERE cs.cancer_study_identifier = 'your_study_id'
-  AND ce.event_type IN ('Treatment', 'TREATMENT')
-  AND subtype.key = 'SUBTYPE'
-GROUP BY subtype.value
+    treatment_subtype AS treatment_category,
+    COUNT(DISTINCT patient_unique_id) AS patient_count
+FROM treatment_event_agents
+WHERE cancer_study_identifier = 'your_study_id'
+  AND treatment_subtype != ''
+GROUP BY treatment_subtype
 ORDER BY patient_count DESC;
 
 -- Step 2: Top agents per category
 SELECT
-    subtype.value as category,
-    agent.value as agent,
-    COUNT(DISTINCT ce.patient_id) as patients
-FROM clinical_event ce
-JOIN clinical_event_data agent ON ce.clinical_event_id = agent.clinical_event_id AND agent.key = 'AGENT'
-JOIN clinical_event_data subtype ON ce.clinical_event_id = subtype.clinical_event_id AND subtype.key = 'SUBTYPE'
-JOIN patient p ON ce.patient_id = p.internal_id
-JOIN cancer_study cs ON p.cancer_study_id = cs.cancer_study_id
-WHERE cs.cancer_study_identifier = 'your_study_id'
-  AND ce.event_type IN ('Treatment', 'TREATMENT')
-GROUP BY subtype.value, agent.value
+    treatment_subtype AS category,
+    agent,
+    COUNT(DISTINCT patient_unique_id) AS patients
+FROM treatment_event_agents
+WHERE cancer_study_identifier = 'your_study_id'
+  AND treatment_subtype != ''
+GROUP BY treatment_subtype, agent
 ORDER BY category, patients DESC;
 ```
 
@@ -252,8 +205,8 @@ ORDER BY category, patients DESC;
 
 ## Other Notes
 
-1. **Event type casing**: Some studies use `Treatment`, others use `TREATMENT` — query for both
+1. **Event type casing**: Some studies use `Treatment`, others use `TREATMENT`. `treatment_event_agents` already covers both; on `clinical_event_derived` / `clinical_event_data_derived` query for both
 2. **Date interpretation**: start_date/stop_date are typically days from diagnosis
 3. **Not all studies have treatment data**: TCGA studies often lack detailed treatment info
 4. **Key availability varies**: Always discover available keys before assuming data exists
-5. **Patient vs event counts**: One patient can have many treatment events; use COUNT(DISTINCT patient_id) for patient counts
+5. **Patient vs event counts**: One patient can have many treatment events; use COUNT(DISTINCT patient_unique_id) for patient counts

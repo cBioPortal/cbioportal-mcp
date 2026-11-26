@@ -38,7 +38,7 @@ If your query returns a frequency over 100%, **do not try to debug or explain th
 - Summing mutation events instead of `COUNT(DISTINCT sample_unique_id)` for the numerator
 - Using a study-wide sample count as the denominator instead of the gene-specific profiled count
 - Cross-study aggregation where the same biological sample appears under multiple `sample_unique_id` values (e.g., MSK-IMPACT and MSK-CHORD share patients)
-- **Joining the profiled CTE through `gene_panel` / `gene_panel_list` without a WES branch.** `gene_panel_id = 'WES'` is *not* a row in `gene_panel`, so any inner JOIN through that table silently drops WES-sequenced samples from the denominator while the numerator (from `genomic_event_derived`) still counts their mutations. Always union with `mutation_wes_coverage` (or include WES samples some other way) — see the Cross-Cancer-Type recipe below.
+- **Counting profiled samples from named panels only, without a WES branch.** WES samples are on the `WES` panel, which named-panel coverage (`mutation_panel_gene_coverage`) excludes, so leaving out `mutation_wes_coverage` silently drops WES-sequenced samples from the denominator while the numerator (from `genomic_event_derived`) still counts their mutations. Always union with `mutation_wes_coverage` (or include WES samples some other way) — see the Cross-Cancer-Type recipe below.
 
 Rewrite the query using one of the canonical patterns below (either single-study or the [Cross-Cancer-Type](#cross-cancer-type-mutation-frequency) recipe). Do **not** loop on diagnostic queries trying to attribute the >100% to "data inconsistencies" — there are none.
 
@@ -332,7 +332,7 @@ ORDER BY frequency_pct DESC;
 ### Why this works
 - **`cancer_study_query_preferences` enforces a non-overlapping cohort.** Every shipped preference resolves to studies with no shared samples, so `COUNT(DISTINCT sample_unique_id)` doesn't double-count.
 - **`CANCER_TYPE` from `clinical_data_derived`, not `type_of_cancer_id` from `cancer_study`.** Multi-cancer-type studies (MSK-CHORD, MSK-IMPACT-50k, GENIE) carry `cancer_study.type_of_cancer_id = 'mixed'`; the per-sample diagnosis lives in the clinical data. Using the clinical attribute also works uniformly for single-cancer-type studies in the same cohort.
-- **WES-aware profiled denominator.** Samples on a named panel are profiled for the genes listed in `gene_panel_list`; WES samples are profiled for *every* gene. `WES` is not in the `gene_panel` table at all, so the older recipe that joined through `gene_panel` / `gene_panel_list` silently dropped WES rows — producing >100% frequencies wherever WES studies contributed altered samples but no profiled samples. The two views in `sql/4-mutation-frequency-views.sql` (`mutation_panel_gene_coverage` and `mutation_wes_coverage`) encapsulate this split so every gene-frequency query gets the WES branch for free via the `UNION ALL` above.
+- **WES-aware profiled denominator.** Samples on a named panel are profiled for the genes listed in `gene_panel_to_gene_derived`; WES samples are profiled for *every* gene (and `mutation_panel_gene_coverage` leaves them out so `mutation_wes_coverage` carries them). The older recipe that used only the named-panel gene lists silently dropped WES rows — producing >100% frequencies wherever WES studies contributed altered samples but no profiled samples. The two views in `sql/4-mutation-frequency-views.sql` (`mutation_panel_gene_coverage` and `mutation_wes_coverage`) encapsulate this split so every gene-frequency query gets the WES branch for free via the `UNION ALL` above.
 
 ### When to vary
 - **Top-N most-mutated genes per cancer type**: drop the `hugo_gene_symbol = '…'` filter and group by `(cancer_type, hugo_gene_symbol)`. Same CTEs.
@@ -355,8 +355,7 @@ For accurate gene mutation frequency calculations, you must use gene-specific pr
 
 ## Key Tables & Relationships
 
-**mutation** → **mutation_event** → **gene** (via entrez_gene_id)
-**mutation** → **sample** → **patient** (via internal_id fields)
+**genomic_event_derived** (altered samples, one row per event) and **sample_to_gene_panel_derived** (profiled samples per panel) joined through `sample_unique_id`; **gene_panel_to_gene_derived** lists each panel's genes.
 
 ### CRITICAL: Use Derived Tables
 **Don't join raw tables manually.** Use these pre-computed views:
@@ -416,11 +415,9 @@ ORDER BY numberOfAlteredSamplesOnPanel DESC;
 -- REQUIRED: Gene-specific profiled samples (DO THIS FOR EACH GENE)
 SELECT COUNT(DISTINCT stgp.sample_unique_id) AS numberOfProfiledSamples
 FROM sample_to_gene_panel_derived stgp
-JOIN gene_panel gp ON stgp.gene_panel_id = gp.stable_id
-JOIN gene_panel_list gpl ON gp.internal_id = gpl.internal_id
-JOIN gene g ON gpl.gene_id = g.entrez_gene_id
+JOIN gene_panel_to_gene_derived gpg ON stgp.gene_panel_id = gpg.gene_panel_id
 WHERE stgp.alteration_type = 'MUTATION_EXTENDED'
-  AND g.hugo_gene_symbol = 'TP53'  -- Replace with actual gene symbol for each gene
+  AND gpg.gene = 'TP53'  -- Replace with actual gene symbol for each gene
   AND stgp.cancer_study_identifier = 'ACTUAL_STUDY_ID';  -- Replace with correct study identifier
 ```
 
@@ -495,15 +492,13 @@ Whether a difference is significant needs Fisher's exact — hand off to cBioPor
 
 ## Combined Mutation + CNA Rate (Pathway / OncoPrint-Style)
 
-For "% of tumors with an alteration in genes A, B, C" (mutation OR amplification/deep deletion), use the **`<study>_cnaseq` sample list** as the denominator — samples profiled for both mutation and CNA, which is cBioPortal's default case set for mutation+CNA queries. Count only AMP (`2`) and HOMDEL (`-2`), not gains/shallow losses.
+For "% of tumors with an alteration in genes A, B, C" (mutation OR amplification/deep deletion), use the **`<study>_cnaseq` sample list** (table `sample_list_members`, column `list_stable_id`) as the denominator — samples profiled for both mutation and CNA, which is cBioPortal's default case set for mutation+CNA queries. Count only AMP (`2`) and HOMDEL (`-2`), not gains/shallow losses.
 
 ```sql
 WITH cs AS (
-    SELECT concat('gbm_tcga_pan_can_atlas_2018_', s.stable_id) AS sid
-    FROM sample_list_list sll
-    JOIN sample_list sl ON sl.list_id = sll.list_id
-    JOIN sample s ON s.internal_id = sll.sample_id
-    WHERE sl.stable_id = 'gbm_tcga_pan_can_atlas_2018_cnaseq'
+    SELECT sample_unique_id AS sid
+    FROM sample_list_members
+    WHERE list_stable_id = 'gbm_tcga_pan_can_atlas_2018_cnaseq'
 )
 SELECT (SELECT count() FROM cs) AS n,
        uniqExact(sample_unique_id) AS altered,
@@ -556,7 +551,7 @@ These are raw counts; common genes pair often by chance. Co-occurrence/exclusivi
 ## Complete Analysis Example
 
 ### Method 1: Automated Query
-Use the `top_mutated_genes_in_study` view. It adds WES samples (`gene_panel_id = 'WES'`, profiled for every gene) to the per-gene panel coverage; a denominator built only through `gene_panel` / `gene_panel_list` drops them.
+Use the `top_mutated_genes_in_study` view. It adds WES samples (`gene_panel_id = 'WES'`, profiled for every gene) to the per-gene panel coverage; a denominator built only from named-panel gene lists drops them.
 
 ```sql
 SELECT hugo_gene_symbol, total_mutation_events AS mutations, altered_samples, profiled_samples, frequency_pct
@@ -641,7 +636,6 @@ Each gene has different profiling coverage - always use gene-specific denominato
 
 **Key Relationships:**
 - cancer_study.cancer_study_identifier → identifies the study
-- cancer_study.cancer_study_id → patient.cancer_study_id → clinical_patient (via patient.internal_id)
-- cancer_study.cancer_study_id → patient.cancer_study_id → sample.patient_id → clinical_sample (via sample.internal_id)
+- `*_derived` tables carry `cancer_study_identifier` and the globally unique `sample_unique_id` / `patient_unique_id`; join them on those, not on internal ids
 
 **Always filter by study**: JOIN with cancer_study WHERE cancer_study_identifier = 'your_study_id'

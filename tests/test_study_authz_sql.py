@@ -33,7 +33,7 @@ def test_generated_policy_template_is_up_to_date():
 
 
 def test_catalog_counts_and_buckets_are_disjoint():
-    assert len(catalog.STUDY_SCOPED_TABLE_PATHS) == 46
+    assert len(catalog.STUDY_SCOPED_TABLE_PATHS) == 47
     assert len(catalog.STUDY_SCOPED_VIEWS) == 21
     buckets = [
         set(catalog.STUDY_SCOPED_TABLE_PATHS),
@@ -126,7 +126,7 @@ def test_render_fills_every_placeholder_and_statements_split():
     assert create.split("\nAS\n", 1)[1] == modify.split("MODIFY QUERY\n", 1)[1]
     assert "FROM `cbio_green`.user_study_manual" in modify
     policies = sqlgen.statements(files["1-row-policies.sql.tmpl"])
-    assert sum(s.startswith("CREATE ROW POLICY") for s in policies) == 2 + 1 + 46 + 17 + 21
+    assert sum(s.startswith("CREATE ROW POLICY") for s in policies) == 2 + 1 + 47 + 17 + 21
 
 
 @pytest.mark.parametrize(
@@ -740,7 +740,7 @@ def test_policy_target_user_attaches_every_policy_to_that_user():
     stmts = sqlgen.statements(policies)
     assert not any("ROLE" in s.split("\n")[0] for s in stmts)
     created = [s for s in stmts if s.startswith("CREATE ROW POLICY")]
-    assert len(created) == 2 + 1 + 46 + 17 + 21
+    assert len(created) == 2 + 1 + 47 + 17 + 21
     targets = {re.split(r"\sTO\s", s)[-1] for s in created}
     assert targets == {"`llm_user`", "ALL EXCEPT `llm_user`"}
     assert stmts[-1] == "GRANT SELECT ON `authz_e2e_test`.* TO `llm_user`"

@@ -774,6 +774,17 @@ USING list_id IN (
     )
 TO __POLICY_TARGET__;
 
+-- sample_list_members: cancer_study_identifier
+CREATE ROW POLICY OR REPLACE cbioportal_mcp_study_sample_list_members
+ON __CLICKHOUSE_DATABASE__.sample_list_members
+AS PERMISSIVE FOR SELECT
+USING cancer_study_identifier IN (
+        SELECT cancer_study_identifier
+        FROM __CLICKHOUSE_DATABASE__.user_study
+        WHERE (email = '' OR email = lowerUTF8(getSettingOrDefault('SQL_cbio_user', ''))) AND valid_until > now64(3)
+    )
+TO __POLICY_TARGET__;
+
 -- sample_profile: genetic_profile_id -> genetic_profile.genetic_profile_id | cancer_study_id -> cancer_study
 CREATE ROW POLICY OR REPLACE cbioportal_mcp_study_sample_profile
 ON __CLICKHOUSE_DATABASE__.sample_profile
