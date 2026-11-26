@@ -2,7 +2,14 @@ import re
 
 from cbioportal_mcp import server
 
-NATIVE_TESTS = ("mannWhitneyUTest", "welchTTest", "studentTTest", "kolmogorovSmirnovTest", "anova", "proportionsZTest")
+NATIVE_TESTS = (
+    "mannWhitneyUTest",
+    "welchTTest",
+    "studentTTest",
+    "kolmogorovSmirnovTest",
+    "anova",
+    "proportionsZTest",
+)
 NOT_NATIVE = ("Fisher's exact", "chi-squared", "Kruskal-Wallis", "log-rank", "Cox")
 
 
@@ -36,7 +43,7 @@ def test_p_values_are_only_allowed_from_clickhouse_test_functions():
 
 def test_tuple_results_are_selected_as_scalars_in_every_example():
     guide = _guide()
-    assert 'unrecognized data found in stream' in guide
+    assert "unrecognized data found in stream" in guide
     for call in re.findall(r"(mannWhitneyUTest|welchTTest|studentTTest)\(expr, grp\)", guide):
         assert f"tupleElement({call}(expr, grp)" in guide
 
