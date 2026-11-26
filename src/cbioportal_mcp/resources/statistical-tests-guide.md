@@ -7,12 +7,12 @@ This guide ensures the correct statistical test is selected before performing an
 
 HARD RULES — NEVER FABRICATE A STATISTIC
 ----------------------------------------
-ClickHouse cannot run statistical tests. The agent therefore must NEVER produce a derived statistic that is not a literal column value from a SQL result. Specifically:
+ClickHouse runs some statistical tests natively (see "Tests ClickHouse can run" below) but not Fisher's exact, chi-squared, Kruskal-Wallis, log-rank, Cox regression or Kaplan-Meier. The agent must NEVER produce a derived statistic that is neither a literal column value from a SQL result nor the output of one of ClickHouse's own test functions. Specifically:
 
-1. **Never invent a p-value.** Not "p < 0.001", not "p ≈ 0.05", not any p-value. If the user asks "what is the p-value?", the answer is *"I can't compute that — here is the 2x2 contingency table (or group statistics). Run it in cBioPortal's Group Comparison tab, in R with `fisher.test(...)` / `wilcox.test(...)`, or in Python with `scipy.stats.fisher_exact(...)` / `mannwhitneyu(...)`."*
+1. **Never invent a p-value.** Not "p < 0.001", not "p ≈ 0.05", not any p-value. A p-value is allowed only when a ClickHouse test function returned it in this conversation (name the function, the group sizes and the direction). For any test ClickHouse cannot run, the answer is *"I can't compute that here — these are the group counts / the 2x2 contingency table. Run it in cBioPortal's Group Comparison tab, in R with `fisher.test(...)` / `kruskal.test(...)`, or in Python with `scipy.stats.fisher_exact(...)` / `kruskal(...)`."*
 2. **Never claim mutual exclusivity (or co-occurrence) from a contingency table alone.** A 2x2 table is not a test. The shape "altered/not altered × group A/group B" needs Fisher's exact + a defined direction (odds ratio < 1 with significant p). Without that test, the agent presents the table and stops. Descriptive phrasing is also a claim: "largely/mostly mutually exclusive", "rarely co-occur", "tend to co-occur" are forbidden without the test — point to cBioPortal's Mutual Exclusivity tab instead.
 3. **Never report a "median" that came from `AVG(...)` or any non-median aggregate.** "Median" and "mean" are different statistics; for skewed clinical distributions (especially survival) they differ substantially. Use ClickHouse's `quantile(0.5)(...)` for actual median, and label arithmetic averages as "mean", never "median".
-4. **Never report a hazard ratio, odds ratio, risk ratio, or relative risk** that wasn't computed by an external tool. These require regression / model fitting that ClickHouse does not do.
+4. **Never report a hazard ratio, odds ratio, risk ratio, or relative risk** that wasn't computed by an external tool. These require regression / model fitting that ClickHouse does not do. Never report a group of one or two samples as a finding: state every group's size, and say when a comparison is too small to test.
 5. **Never report median overall survival from `AVG(OS_MONTHS)` or even `quantile(0.5)(OS_MONTHS)`.** Median OS requires Kaplan-Meier estimation, which handles censoring (`OS_STATUS = 0:LIVING` means the event hasn't happened yet). Naive medians/means over `OS_MONTHS` ignore censoring and are systematically wrong. The correct handoff: return the raw `(OS_MONTHS, OS_STATUS)` pairs (or descriptive counts: N events, N censored, follow-up range) and tell the user to run KM in R (`survival::survfit`) or Python (`lifelines.KaplanMeierFitter`), or use cBioPortal's Survival comparison.
 
 If asked to do any of (1)–(5), respond with the appropriate handoff template from the "Approved Response Templates" section below — do not produce the number.
@@ -99,14 +99,48 @@ Sample Size Warnings
 - **Student's t-test / ANOVA**: Warn if any group has fewer than 3 samples.
 - **Wilcoxon / Kruskal-Wallis**: Warn if any group has fewer than 5 samples.
 
-Computing Statistics with ClickHouse
--------------------------------------
-ClickHouse does NOT have built-in statistical test functions (no Fisher's exact, no Wilcoxon, no t-test). The correct workflow is:
+Tests ClickHouse can run
+------------------------
+Verified on the portal's ClickHouse. Each test is an aggregate that returns a tuple `(statistic, p_value)`. **Select the elements as scalars with `tupleElement(test_expression, 1)` and `tupleElement(test_expression, 2)`**: the database client fails with "unrecognized data found in stream" when a tuple is returned next to other columns.
 
-1. **Query the data** from ClickHouse to build the contingency table or extract group values.
-2. **State which test is appropriate** and why (referencing this decision matrix).
-3. **Present the summary data**: contingency table for categorical data, or descriptive statistics (mean, median, N) for continuous data.
-4. **Recommend** the user run the actual test in:
+| Need | Function | Notes |
+|------|----------|-------|
+| 2 groups, continuous | `mannWhitneyUTest(value, group)` | Wilcoxon rank-sum, the portal default for clinical numeric and expression data. `group` must be 0 or 1. Returns `(u_statistic, p_value)`. |
+| 2 groups, continuous | `welchTTest(value, group)` / `studentTTest(value, group)` | Parametric; use only when asked, or when both groups are roughly normal (e.g. log2 expression). Returns `(t_statistic, p_value)`. |
+| 2 groups, distribution shape | `kolmogorovSmirnovTest('two-sided')(value, group)` | Returns `(d_statistic, p_value)`. |
+| 3+ groups, continuous | `anova(value, group_index)` | One-way ANOVA (parametric). Kruskal-Wallis is NOT available: say which test you ran. |
+| 2 proportions | `proportionsZTest(x_success, y_success, x_trials, y_trials, 0.95, 'unpooled')` | Two-proportion z-test, an approximation of Fisher's exact test. Fine when every expected cell count is at least 5; otherwise say Fisher is the right test and hand off. |
+| Correlation | `rankCorr(x, y)` (Spearman), `corr(x, y)` (Pearson) | Coefficients only, no p-value. |
+
+Not available in ClickHouse, so hand off (Group Comparison tab, R, or Python): Fisher's exact, chi-squared, Kruskal-Wallis, log-rank, Cox / hazard ratios, Kaplan-Meier, multiple-testing correction. When you scan many genes or attributes, say the p-values are uncorrected.
+
+### Example: Mann-Whitney between two groups (mutated vs wild-type expression)
+```sql
+SELECT
+  tupleElement(mannWhitneyUTest(expr, grp), 1) AS u_statistic,
+  tupleElement(mannWhitneyUTest(expr, grp), 2) AS p_value,
+  countIf(grp = 1) AS n_mutated, countIf(grp = 0) AS n_wild_type,
+  round(quantileExactIf(0.5)(expr, grp = 1), 3) AS median_mutated,
+  round(quantileExactIf(0.5)(expr, grp = 0), 3) AS median_wild_type
+FROM (
+  SELECT toFloat64OrNull(g.alteration_value) AS expr,
+         if(m.sample_unique_id != '', 1, 0) AS grp
+  FROM genetic_alteration_derived g
+  LEFT JOIN (SELECT DISTINCT sample_unique_id FROM genomic_event_derived
+             WHERE hugo_gene_symbol = 'CTNNB1' AND variant_type = 'mutation'
+               AND mutation_status != 'UNCALLED' AND cancer_study_identifier = '{study}') m
+    ON g.sample_unique_id = m.sample_unique_id
+  WHERE g.hugo_gene_symbol = 'GLS' AND g.cancer_study_identifier = '{study}'
+    AND g.profile_type = 'rna_seq_v2_mrna' AND expr IS NOT NULL
+)
+```
+Report the test name, both group sizes and medians, the direction (which group is higher) and the p-value exactly as returned. The profile type (`rna_seq_v2_mrna` here) differs by study: list a study's `profile_type` values for the gene first (see cbioportal://gene-expression-guide). For TCGA liver cancer this returns 94 mutated against 272 wild-type samples, medians 330.7 against 854.8, p about 4e-13.
+
+Workflow for every comparison
+-----------------------------
+1. **Query the data** to build the contingency table or extract group values.
+2. **State which test is appropriate** and why (the decision matrix above).
+3. **Run it in ClickHouse** if it is in the table above; otherwise present the summary data (contingency table, or N / mean / median per group) and **hand off**:
    - **cBioPortal's Group Comparison tab** (built-in, uses these same test defaults)
    - **R** (fisher.test, wilcox.test, t.test, kruskal.test, chisq.test)
    - **Python** (scipy.stats: fisher_exact, mannwhitneyu, ttest_ind, kruskal, chi2_contingency)
