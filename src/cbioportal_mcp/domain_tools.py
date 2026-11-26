@@ -216,11 +216,10 @@ def build_alteration_frequency_live_sql(genes, studies) -> str:
             SELECT stgp.sample_unique_id AS sample_unique_id,
                    stgp.alteration_type AS alteration_type
             FROM sample_to_gene_panel_derived stgp
-            JOIN gene_panel gp ON stgp.gene_panel_id = gp.stable_id
-            JOIN gene_panel_list gpl ON gp.internal_id = gpl.internal_id
-            JOIN gene ge ON gpl.gene_id = ge.entrez_gene_id
+            JOIN gene_panel_to_gene_derived ge ON stgp.gene_panel_id = ge.gene_panel_id
             WHERE stgp.cancer_study_identifier IN {s}
-              AND ge.hugo_gene_symbol IN {g}
+              AND stgp.gene_panel_id != 'WES'
+              AND ge.gene IN {g}
               AND {_study_profile_filter(_PROFILE_TYPES["any"], "stgp.")}
             UNION ALL
             SELECT sample_unique_id, alteration_type
@@ -296,17 +295,16 @@ def build_top_altered_genes_live_sql(studies, alteration_type, top_n) -> str:
               AND {_study_profile_filter(types)}
         ),
         panel_profiled AS (
-            SELECT ge.hugo_gene_symbol AS hugo_gene_symbol,
+            SELECT ge.gene AS hugo_gene_symbol,
                    COUNT(DISTINCT stgp.sample_unique_id) AS n
             FROM sample_to_gene_panel_derived stgp
-            JOIN gene_panel gp ON stgp.gene_panel_id = gp.stable_id
-            JOIN gene_panel_list gpl ON gp.internal_id = gpl.internal_id
-            JOIN gene ge ON gpl.gene_id = ge.entrez_gene_id
+            JOIN gene_panel_to_gene_derived ge ON stgp.gene_panel_id = ge.gene_panel_id
             WHERE stgp.cancer_study_identifier IN {s}
+              AND stgp.gene_panel_id != 'WES'
               AND {_study_profile_filter(types, "stgp.")}
               AND stgp.sample_unique_id NOT IN (SELECT sample_unique_id FROM wes_samples)
-              AND ge.hugo_gene_symbol IN (SELECT hugo_gene_symbol FROM altered)
-            GROUP BY ge.hugo_gene_symbol
+              AND ge.gene IN (SELECT hugo_gene_symbol FROM altered)
+            GROUP BY ge.gene
         )
         SELECT a.hugo_gene_symbol AS hugo_gene_symbol,
                a.altered_samples AS altered_samples,
@@ -366,12 +364,11 @@ def build_frequency_by_cancer_type_live_sql(genes, alteration_type, preference, 
         profiled_samples_for_gene AS (
             SELECT stgp.sample_unique_id AS sample_unique_id,
                    stgp.cancer_study_identifier AS cancer_study_identifier,
-                   ge.hugo_gene_symbol AS hugo_gene_symbol
+                   ge.gene AS hugo_gene_symbol
             FROM sample_to_gene_panel_derived stgp
-            JOIN gene_panel gp ON stgp.gene_panel_id = gp.stable_id
-            JOIN gene_panel_list gpl ON gp.internal_id = gpl.internal_id
-            JOIN gene ge ON gpl.gene_id = ge.entrez_gene_id
-            WHERE ge.hugo_gene_symbol IN {g}
+            JOIN gene_panel_to_gene_derived ge ON stgp.gene_panel_id = ge.gene_panel_id
+            WHERE ge.gene IN {g}
+              AND stgp.gene_panel_id != 'WES'
               AND stgp.alteration_type IN {types}
             UNION ALL
             SELECT w.sample_unique_id, w.cancer_study_identifier, x.hugo_gene_symbol

@@ -196,8 +196,8 @@ def _load_fixture(admin, db: str = DB) -> None:
         "ENGINE=MergeTree ORDER BY internal_id",
         f"CREATE TABLE {db}.clinical_patient (internal_id Int64, attr_value String) "
         "ENGINE=MergeTree ORDER BY internal_id",
-        f"CREATE TABLE {db}.genetic_profile (genetic_profile_id Int64, cancer_study_id Int64) "
-        "ENGINE=MergeTree ORDER BY genetic_profile_id",
+        f"CREATE TABLE {db}.genetic_profile (genetic_profile_id Int64, cancer_study_id Int64, "
+        "cancer_study_identifier String) ENGINE=MergeTree ORDER BY genetic_profile_id",
         f"CREATE TABLE {db}.mutation (mutation_event_id Int64, genetic_profile_id Int64, "
         "sample_id Int64) ENGINE=MergeTree ORDER BY mutation_event_id",
         f"CREATE TABLE {db}.mutation_event (mutation_event_id Int64, hugo String) "
@@ -219,7 +219,7 @@ def _load_fixture(admin, db: str = DB) -> None:
     ins(f"{db}.patient", [[s * 10, s] for s in STUDIES])
     ins(f"{db}.sample", [[s * 100, s * 10] for s in STUDIES])
     ins(f"{db}.clinical_patient", [[s * 10, "x"] for s in STUDIES])
-    ins(f"{db}.genetic_profile", [[s, s] for s in STUDIES])
+    ins(f"{db}.genetic_profile", [[s, s, i] for s, (i, _) in STUDIES.items()])
     # Event 9999 is shared by pub_a and priv_1: visible to everyone via pub_a.
     ins(
         f"{db}.mutation",
