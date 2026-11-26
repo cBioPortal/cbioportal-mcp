@@ -124,7 +124,9 @@ MAX_LISTED_COLUMNS = 60
 MAX_LISTED_TABLES = 40
 
 _UNKNOWN_IDENTIFIER = (
-    re.compile(r"Unknown expression(?: or function)?(?: or table expression)? identifier [`']([^`']+)[`']"),
+    re.compile(
+        r"Unknown expression(?: or function)?(?: or table expression)? identifier [`']([^`']+)[`']"
+    ),
     re.compile(r"Identifier '([^']+)' cannot be resolved"),
     re.compile(r"Missing columns: '([^']+)'"),
 )
@@ -132,7 +134,9 @@ _UNKNOWN_TABLE = (
     re.compile(r"Unknown table(?: expression)?(?: identifier)? [`']([^`']+)[`']"),
     re.compile(r"Table (?:\w+\.)?(\w+) (?:does not exist|doesn't exist)"),
 )
-_TABLE_REFERENCE = re.compile(r"\b(?:FROM|JOIN)\s+([A-Za-z_][\w.]*)(?:\s+(?:AS\s+)?([A-Za-z_]\w*))?", re.IGNORECASE)
+_TABLE_REFERENCE = re.compile(
+    r"\b(?:FROM|JOIN)\s+([A-Za-z_][\w.]*)(?:\s+(?:AS\s+)?([A-Za-z_]\w*))?", re.IGNORECASE
+)
 _NOT_AN_ALIAS = frozenset(
     "where on using group order limit left right inner outer cross full join prewhere union select having "
     "settings format final sample array global any all asof semi anti natural".split()
@@ -181,20 +185,28 @@ def _identifier_detail(message: str, query: str, describe: DESCRIBE) -> str | No
         return None
     qualifier, _, column = identifier.rpartition(".")
     references = tables_in_query(query)
-    tables = [references[qualifier]] if qualifier in references else list(dict.fromkeys(references.values()))
+    tables = (
+        [references[qualifier]]
+        if qualifier in references
+        else list(dict.fromkeys(references.values()))
+    )
     lines = [f"`{identifier}` does not exist."]
     for table in tables[:4]:
         columns = describe(table)
         if not columns:
             continue
-        shown = ", ".join(columns[:MAX_LISTED_COLUMNS]) + (" ..." if len(columns) > MAX_LISTED_COLUMNS else "")
+        shown = ", ".join(columns[:MAX_LISTED_COLUMNS]) + (
+            " ..." if len(columns) > MAX_LISTED_COLUMNS else ""
+        )
         lines.append(f"Columns of `{table}`: {shown}.")
         if column in columns:
             lines.append(f"`{column}` is a column of `{table}`.")
             continue
         close = difflib.get_close_matches(column, columns, n=3, cutoff=0.6)
         if close:
-            lines.append(f"Closest to `{column}` in `{table}`: {', '.join(f'`{c}`' for c in close)}.")
+            lines.append(
+                f"Closest to `{column}` in `{table}`: {', '.join(f'`{c}`' for c in close)}."
+            )
     return " ".join(lines) if len(lines) > 1 else None
 
 
@@ -208,11 +220,15 @@ def _table_detail(message: str, list_tables: LIST_TABLES) -> str | None:
     if close:
         lines.append(f"Closest tables: {', '.join(f'`{c}`' for c in close)}.")
     if names:
-        lines.append(f"Tables: {', '.join(names[:MAX_LISTED_TABLES])}{' ...' if len(names) > MAX_LISTED_TABLES else ''}.")
+        lines.append(
+            f"Tables: {', '.join(names[:MAX_LISTED_TABLES])}{' ...' if len(names) > MAX_LISTED_TABLES else ''}."
+        )
     return " ".join(lines)
 
 
-def _detail_for(message: str, query: str, describe: DESCRIBE, list_tables: LIST_TABLES) -> str | None:
+def _detail_for(
+    message: str, query: str, describe: DESCRIBE, list_tables: LIST_TABLES
+) -> str | None:
     """Facts about this particular failure; a failing lookup just leaves its part out."""
     for build in (
         lambda: _identifier_detail(message, query, describe),
@@ -225,7 +241,6 @@ def _detail_for(message: str, query: str, describe: DESCRIBE, list_tables: LIST_
         if detail:
             return detail
     return None
-
 
 
 def _error_code(message: str) -> int | None:
@@ -270,7 +285,11 @@ def select_query_error(
     message = str(exc)
     reply = {"error_message": _clean_message(message)}
     hint = _hint_for(message)
-    detail = _detail_for(message, query, describe or (lambda _t: None), list_tables or (lambda: None)) if query else None
+    detail = (
+        _detail_for(message, query, describe or (lambda _t: None), list_tables or (lambda: None))
+        if query
+        else None
+    )
     if hint or detail:
         reply["hint"] = " ".join(part for part in (detail, hint) if part)
     return reply
