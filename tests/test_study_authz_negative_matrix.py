@@ -115,6 +115,8 @@ DIRECT_DDL = [
     "ENGINE = MergeTree ORDER BY internal_id",
     "CREATE TABLE {db}.gene_panel_list (internal_id Int64, gene_id Int64) "
     "ENGINE = MergeTree ORDER BY internal_id",
+    "CREATE TABLE {db}.gene_panel_to_gene_derived (gene_panel_id String, gene String) "
+    "ENGINE = MergeTree ORDER BY gene_panel_id",
 ]
 # Stand-ins named like catalog views (SQL SECURITY INVOKER, like sql/4, 5, 7).
 VIEW_DDL = [
@@ -276,6 +278,7 @@ def _load_fixture(admin) -> None:
     admin.insert(f"{DB}.gene", [[7157, "TP53"]])
     admin.insert(f"{DB}.gene_panel", [[1, "PANEL_X"]])
     admin.insert(f"{DB}.gene_panel_list", [[1, 7157]])
+    admin.insert(f"{DB}.gene_panel_to_gene_derived", [["PANEL_X", "TP53"]])
 
 
 @dataclass

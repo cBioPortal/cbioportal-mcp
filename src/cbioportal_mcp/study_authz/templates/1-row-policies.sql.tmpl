@@ -823,6 +823,17 @@ USING genetic_profile_id IN (
     )
 TO __POLICY_TARGET__;
 
+-- treatment_event_agents: cancer_study_identifier
+CREATE ROW POLICY OR REPLACE cbioportal_mcp_study_treatment_event_agents
+ON __CLICKHOUSE_DATABASE__.treatment_event_agents
+AS PERMISSIVE FOR SELECT
+USING cancer_study_identifier IN (
+        SELECT cancer_study_identifier
+        FROM __CLICKHOUSE_DATABASE__.user_study
+        WHERE (email = '' OR email = lowerUTF8(getSettingOrDefault('SQL_cbio_user', ''))) AND valid_until > now64(3)
+    )
+TO __POLICY_TARGET__;
+
 -- 4. Study-agnostic reference data: readable by everyone (USING 1).
 CREATE ROW POLICY OR REPLACE cbioportal_mcp_reference_cosmic_mutation ON __CLICKHOUSE_DATABASE__.cosmic_mutation AS PERMISSIVE FOR SELECT USING 1 TO __POLICY_TARGET__;
 CREATE ROW POLICY OR REPLACE cbioportal_mcp_reference_gene ON __CLICKHOUSE_DATABASE__.gene AS PERMISSIVE FOR SELECT USING 1 TO __POLICY_TARGET__;
