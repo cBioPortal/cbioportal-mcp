@@ -160,7 +160,8 @@ profiled AS (
 SELECT a.cancer_type,
        a.altered_samples,
        p.profiled_samples,
-       ROUND(a.altered_samples * 100.0 / NULLIF(p.profiled_samples, 0), 1) AS frequency_pct
+       ROUND(a.altered_samples * 100.0 / NULLIF(p.profiled_samples, 0), 1) AS frequency_pct,
+       {gene:String} AS hugo_gene_symbol
 FROM altered a
 JOIN profiled p USING (cancer_type)
 WHERE p.profiled_samples >= 50;
@@ -234,7 +235,8 @@ profiled AS (
 SELECT a.cancer_type,
        a.altered_samples,
        p.profiled_samples,
-       ROUND(a.altered_samples * 100.0 / NULLIF(p.profiled_samples, 0), 1) AS frequency_pct
+       ROUND(a.altered_samples * 100.0 / NULLIF(p.profiled_samples, 0), 1) AS frequency_pct,
+       {gene:String} AS hugo_gene_symbol
 FROM altered a
 JOIN profiled p USING (cancer_type)
 WHERE p.profiled_samples >= 50;
@@ -309,7 +311,8 @@ profiled AS (
 SELECT a.cancer_type,
        a.altered_samples,
        p.profiled_samples,
-       ROUND(a.altered_samples * 100.0 / NULLIF(p.profiled_samples, 0), 1) AS frequency_pct
+       ROUND(a.altered_samples * 100.0 / NULLIF(p.profiled_samples, 0), 1) AS frequency_pct,
+       {gene:String} AS hugo_gene_symbol
 FROM altered a
 JOIN profiled p USING (cancer_type)
 WHERE p.profiled_samples >= 50;
@@ -426,7 +429,8 @@ profiled AS (
 SELECT a.cancer_type,
        a.altered_samples,
        p.profiled_samples,
-       ROUND(a.altered_samples * 100.0 / NULLIF(p.profiled_samples, 0), 1) AS frequency_pct
+       ROUND(a.altered_samples * 100.0 / NULLIF(p.profiled_samples, 0), 1) AS frequency_pct,
+       {gene:String} AS hugo_gene_symbol
 FROM altered a
 JOIN profiled p USING (cancer_type)
 WHERE p.profiled_samples >= 50;
@@ -641,7 +645,8 @@ SELECT a.mutation_variant,
        a.altered_samples,
        (SELECT n FROM profiled_count) AS profiled_samples,
        ROUND(a.altered_samples * 100.0 / NULLIF((SELECT n FROM profiled_count), 0), 1) AS frequency_pct,
-       a.total_mutation_events
+       a.total_mutation_events,
+       {gene:String} AS hugo_gene_symbol
 FROM altered_per_variant a
 ORDER BY altered_samples DESC, mutation_variant ASC;
 

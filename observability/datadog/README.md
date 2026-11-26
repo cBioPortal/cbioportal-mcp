@@ -15,6 +15,15 @@ LLM Observability queries; the dotted names above are for span/APM queries.
 The LLMObs span also records the tool arguments as input, the result content as
 output, and, for a failed call, the error type, message and stack.
 
+Tool call metrics (`cbioportal_mcp.tool.calls`, `cbioportal_mcp.tool.errors`,
+`cbioportal_mcp.tool.duration_ms`) tag failures with `error_kind:result` for
+returned error payloads or `error_kind:exception` for raised exceptions.
+Successful calls omit `error_kind`. Error messages are never metric tags.
+
+Monitor queries use `@` for custom span attributes. The client-surface monitor
+uses `@mcp.client.name` as its group-by and `{{[@mcp.client.name].name}}` in
+notifications, following Datadog's [facet variable syntax for dotted keys](https://docs.datadoghq.com/monitors/notify/variables/#attribute-and-tag-variables).
+
 They were written and JSON-validated locally but **not applied against a live
 Datadog account** — this environment has no `DD_API_KEY`/`DD_APP_KEY`. Apply
 and sanity-check the widget/monitor results once you have access.

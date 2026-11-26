@@ -265,7 +265,7 @@
               {
                 "data_source": "spans",
                 "name": "query1",
-                "search": { "query": "service:cbioportal-mcp $env mcp.tool.success:false" },
+                "search": { "query": "service:cbioportal-mcp $env @mcp.tool.success:false" },
                 "group_by": [
                   { "facet": "@mcp.client.name", "limit": 10, "sort": { "order": "desc", "aggregation": "count" } }
                 ],
