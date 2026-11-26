@@ -5,7 +5,7 @@ def test_all_numbered_pitfalls_are_parsed():
     sections = server._common_pitfall_sections()
 
     for number in ["1", "2", "3", "4", "5", "5b", "5c", "6", "7", "8", "9", "10",
-                    "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22"]:
+                    "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "24"]:
         assert number in sections, f"pitfall #{number} missing from parsed sections"
 
 
@@ -57,3 +57,11 @@ def test_system_prompt_routes_pitfall_16_and_21_to_fragment_uris():
 
     assert "cbioportal://common-pitfalls#16" in prompt
     assert "cbioportal://common-pitfalls#21" in prompt
+
+
+def test_select_tool_description_points_at_dialect_pitfall():
+    description = server.mcp._tool_manager._tools["clickhouse_run_select_query"].description
+
+    assert "UNION ALL" in description
+    assert "cbioportal://common-pitfalls#24" in description
+    assert "DIALECT" in server.read_guide.fn.__wrapped__("cbioportal://common-pitfalls#24")

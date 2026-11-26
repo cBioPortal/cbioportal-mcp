@@ -305,6 +305,27 @@ WHERE
     );
 ```
 
+### 3. Overlap Between Two Studies
+
+For "how many patients/samples in study A (with filter X) are also in study B", match on the bare stable ids in `sample_derived` (`patient_stable_id`, `sample_stable_id`), which are the same string in both studies. Do not slice the study prefix off `patient_unique_id`, and do not self-join `clinical_data_derived`.
+
+```sql
+SELECT count(DISTINCT patient_stable_id) AS patients_in_both
+FROM sample_derived
+WHERE cancer_study_identifier = '<study_a>'
+  AND sample_unique_id IN (
+      SELECT sample_unique_id FROM clinical_data_derived
+      WHERE cancer_study_identifier = '<study_a>'
+        AND attribute_name = 'ONCOTREE_CODE' AND attribute_value = '<code>'
+  )
+  AND patient_stable_id IN (
+      SELECT patient_stable_id FROM sample_derived
+      WHERE cancer_study_identifier = '<study_b>'
+  );
+```
+
+Run it once. If it returns 0, apply `cbioportal://common-pitfalls#23` instead of rewriting the join.
+
 ## Best Practices
 
 1. **Always specify study identifier** - Never query across all studies unless intended

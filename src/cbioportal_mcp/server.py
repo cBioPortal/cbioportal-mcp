@@ -366,6 +366,10 @@ def _validate_db_permissions(config):
 @asynccontextmanager
 async def _startup_lifespan(server):
     logging.basicConfig(level=logging.INFO)
+    # httpx logs full request URLs at INFO, and the OAuth token checks put the
+    # caller's access token in the query string.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
     _validate_server_startup(server.startup_transport)
     # Filtering-on study lists are request scoped; never preload them anonymously.
     if (
@@ -507,6 +511,10 @@ def enforce_study_policy_coverage(database: str) -> None:
 def main():
     """Main entry point for the server."""
     logging.basicConfig(level=logging.INFO)
+    # httpx logs full request URLs at INFO, and the OAuth token checks put the
+    # caller's access token in the query string.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
     logger.info("🚀 Starting cBioPortal MCP Server with FastMCP...")
 
     # Get config
@@ -537,6 +545,8 @@ def main():
             }
             if config.mcp_http_path:
                 run_kwargs["path"] = config.mcp_http_path
+            if transport == TransportType.HTTP.value and config.mcp_stateless_http:
+                run_kwargs["stateless_http"] = True
             # Behind a TLS-terminating reverse proxy, uvicorn must trust
             # X-Forwarded-Proto or the trailing-slash 307 on /mcp will
             # downgrade https → http and strict clients (e.g. Claude
@@ -709,6 +719,11 @@ DEFAULT_SELECT_MAX_ROWS = min(result_format.default_max_rows(), MAX_SELECT_MAX_R
 @mcp.tool(
     description=f"""
     Execute a ClickHouse SQL SELECT query.
+
+    ClickHouse dialect: function names are case-sensitive (median, quantile, countIf, toFloat64OrNull;
+    not MEDIAN/QUANTILE/COUNTIF/TRY_CAST); use UNION ALL, never bare UNION; no correlated subqueries
+    (use JOIN or IN); no quoted aliases (AS 'x'); check columns with clickhouse_list_table_columns
+    before guessing. Details: cbioportal://common-pitfalls#24
 
     For complex analysis patterns, consult these query guides:
     - cbioportal://mutation-frequency-guide - Gene mutation frequency calculations with proper denominators

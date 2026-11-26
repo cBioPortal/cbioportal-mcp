@@ -55,6 +55,9 @@ export CLICKHOUSE_MCP_SERVER_TRANSPORT=http # default; or sse
 # Set when reverse-proxied behind a prefix so trailing-slash redirects
 # include it, e.g. /db/mcp when served at https://host/db/mcp.
 # export CLICKHOUSE_MCP_HTTP_PATH=/db/mcp
+# Optional: the http transport is stateless by default (no MCP session IDs, so a
+# restart can't strand open client sessions). Set to false to keep sessions.
+# export CLICKHOUSE_MCP_STATELESS_HTTP=false
 # Optional: how long table lists, column descriptions, and generated study
 # guides are cached in-process (default: 3600; 0 disables the cache).
 # export CBIOPORTAL_MCP_METADATA_CACHE_TTL_SECONDS=3600
@@ -240,6 +243,13 @@ docker run -p 8000:8000 -e CBIOPORTAL_MCP_STUDY_FILTERING=off \
   -e CBIOPORTAL_MCP_AUTH_ENFORCEMENT=off -e CBIOPORTAL_MCP_AUTH_TEST_USERS= \
   -e CBIOPORTAL_MCP_PUBLIC_DB_CHECK=off cbioportal-mcp
 ```
+
+### Chat eval (CI)
+
+PRs that change the server also run a behavioral eval: an LLM agent answers a fixed question set through this
+PR's image and through `cbioportal/mcp:latest`, and the check fails if the answers got worse. See
+[docs/chat-eval.md](docs/chat-eval.md) for what it measures and the repository secrets it needs
+(`CLICKHOUSE_*`, and `ANTHROPIC_API_KEY` or an AWS role for Bedrock via OIDC).
 
 ## License
 

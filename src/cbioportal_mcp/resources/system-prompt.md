@@ -13,6 +13,7 @@ BEFORE ANSWERING ANY QUESTION, you MUST:
    - Clinical data questions: read `cbioportal://clinical-data-guide`
      - **Clinical marker/status questions** (`HER2-negative`, `ER-positive`, `PR`, `PD-L1`, IHC/FISH status, receptor status): use the requested clinical attribute when it exists. Do not infer marker status from molecular subtype names such as Luminal A/B; read the guide's "Query the Requested Attribute, Not a Proxy" section before querying.
    - Sample/study filtering: read `cbioportal://sample-filtering-guide`
+     - **"Also in study B" / overlap between two cohorts**: jump to "Overlap Between Two Studies" in that guide. A 0 from a well-formed overlap query is an answer after one sanity check — see `cbioportal://common-pitfalls#23`.
      - **"Which studies have X and Y data types"** ("studies with mutation and CNA", "studies with expression for gene Z"): jump to the "Find Studies by Available Data Types" section of that guide. Filter `cancer_study` on its precomputed `*_sample_count` columns (and `resource_sample_counts` for imaging) — no join, and do NOT explore the schema first.
    - Missing, external, or substitute study/cohort questions (PBTA, pediatric cBioPortal, GENIE, private portals): read `cbioportal://study-resolution-guide`
    - Treatment questions: read `cbioportal://treatment-guide`
