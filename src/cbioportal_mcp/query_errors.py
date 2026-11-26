@@ -17,7 +17,9 @@ list every expected token) before the name, while the code is always in the
 header. Codes and names: ClickHouse src/Common/ErrorCodes.cpp.
 """
 
+import difflib
 import re
+from collections.abc import Callable
 
 _HTTP_ERROR_HEADER = re.compile(
     r"^Query execution failed: HTTPDriver for \S+ received ClickHouse error code \d+\s+"
@@ -118,6 +120,114 @@ _CLIENT_TIMEOUT_HINT = (
 )
 
 
+MAX_LISTED_COLUMNS = 60
+MAX_LISTED_TABLES = 40
+
+_UNKNOWN_IDENTIFIER = (
+    re.compile(r"Unknown expression(?: or function)?(?: or table expression)? identifier [`']([^`']+)[`']"),
+    re.compile(r"Identifier '([^']+)' cannot be resolved"),
+    re.compile(r"Missing columns: '([^']+)'"),
+)
+_UNKNOWN_TABLE = (
+    re.compile(r"Unknown table(?: expression)?(?: identifier)? [`']([^`']+)[`']"),
+    re.compile(r"Table (?:\w+\.)?(\w+) (?:does not exist|doesn't exist)"),
+)
+_TABLE_REFERENCE = re.compile(r"\b(?:FROM|JOIN)\s+([A-Za-z_][\w.]*)(?:\s+(?:AS\s+)?([A-Za-z_]\w*))?", re.IGNORECASE)
+_NOT_AN_ALIAS = frozenset(
+    "where on using group order limit left right inner outer cross full join prewhere union select having "
+    "settings format final sample array global any all asof semi anti natural".split()
+)
+_TRANSIENT = ("Connection reset by peer", "Connection aborted", "Remote end closed connection")
+
+_TUPLE_UNREADABLE = (
+    "The result holds a tuple (for example a test function's (statistic, p_value)) that the client cannot read "
+    "next to other columns. Select its elements as scalars: tupleElement(test_expression, 2) AS p_value."
+)
+_CORRELATED_SUBQUERY = (
+    "Correlated subqueries (a subquery that reads a column of the outer query) are not supported. "
+    "Rewrite with a JOIN or a CTE (WITH ... AS)."
+)
+_CONNECTION_DROPPED = "The database connection dropped; the same query is safe to run again."
+
+DESCRIBE = Callable[[str], list[str] | None]
+LIST_TABLES = Callable[[], list[str] | None]
+
+
+def is_transient_connection_error(message: str) -> bool:
+    """A dropped connection: safe to repeat a SELECT once, unlike a timeout (the query is just too heavy)."""
+    return any(marker in message for marker in _TRANSIENT)
+
+
+def tables_in_query(query: str) -> dict[str, str]:
+    """Alias (or bare table name) to table name for every FROM/JOIN in the query, in order of appearance."""
+    found: dict[str, str] = {}
+    for match in _TABLE_REFERENCE.finditer(query):
+        table = match.group(1).rsplit(".", 1)[-1]
+        alias = match.group(2)
+        if alias and alias.lower() not in _NOT_AN_ALIAS:
+            found.setdefault(alias, table)
+        found.setdefault(table, table)
+    return found
+
+
+def _first_match(patterns: tuple[re.Pattern, ...], text: str) -> str | None:
+    return next((m.group(1) for p in patterns if (m := p.search(text))), None)
+
+
+def _identifier_detail(message: str, query: str, describe: DESCRIBE) -> str | None:
+    """The real columns of the tables the failing query reads, and the closest match to the unknown name."""
+    identifier = _first_match(_UNKNOWN_IDENTIFIER, message)
+    if not identifier:
+        return None
+    qualifier, _, column = identifier.rpartition(".")
+    references = tables_in_query(query)
+    tables = [references[qualifier]] if qualifier in references else list(dict.fromkeys(references.values()))
+    lines = [f"`{identifier}` does not exist."]
+    for table in tables[:4]:
+        columns = describe(table)
+        if not columns:
+            continue
+        shown = ", ".join(columns[:MAX_LISTED_COLUMNS]) + (" ..." if len(columns) > MAX_LISTED_COLUMNS else "")
+        lines.append(f"Columns of `{table}`: {shown}.")
+        if column in columns:
+            lines.append(f"`{column}` is a column of `{table}`.")
+            continue
+        close = difflib.get_close_matches(column, columns, n=3, cutoff=0.6)
+        if close:
+            lines.append(f"Closest to `{column}` in `{table}`: {', '.join(f'`{c}`' for c in close)}.")
+    return " ".join(lines) if len(lines) > 1 else None
+
+
+def _table_detail(message: str, list_tables: LIST_TABLES) -> str | None:
+    table = _first_match(_UNKNOWN_TABLE, message)
+    if not table:
+        return None
+    names = list_tables() or []
+    close = difflib.get_close_matches(table.rsplit(".", 1)[-1], names, n=3, cutoff=0.5)
+    lines = [f"Table `{table}` does not exist."]
+    if close:
+        lines.append(f"Closest tables: {', '.join(f'`{c}`' for c in close)}.")
+    if names:
+        lines.append(f"Tables: {', '.join(names[:MAX_LISTED_TABLES])}{' ...' if len(names) > MAX_LISTED_TABLES else ''}.")
+    return " ".join(lines)
+
+
+def _detail_for(message: str, query: str, describe: DESCRIBE, list_tables: LIST_TABLES) -> str | None:
+    """Facts about this particular failure; a failing lookup just leaves its part out."""
+    for build in (
+        lambda: _identifier_detail(message, query, describe),
+        lambda: _table_detail(message, list_tables),
+    ):
+        try:
+            detail = build()
+        except Exception:
+            continue
+        if detail:
+            return detail
+    return None
+
+
+
 def _error_code(message: str) -> int | None:
     match = _ERROR_CODE.search(message)
     if match is None:
@@ -136,11 +246,22 @@ def _hint_for(message: str) -> str | None:
     """Return a fix-it hint for a ClickHouse error message, or None for unrecognized errors."""
     if _CLIENT_TIMEOUT.match(message):
         return _CLIENT_TIMEOUT_HINT
+    if "unrecognized data found in stream" in message:
+        return _TUPLE_UNREADABLE
+    if "in parent scope" in message:
+        return _CORRELATED_SUBQUERY
+    if is_transient_connection_error(message):
+        return _CONNECTION_DROPPED
     code = _error_code(message)
     return _HINTS.get(code) if code is not None else None
 
 
-def select_query_error(exc: BaseException) -> dict[str, str]:
+def select_query_error(
+    exc: BaseException,
+    query: str | None = None,
+    describe: DESCRIBE | None = None,
+    list_tables: LIST_TABLES | None = None,
+) -> dict[str, str]:
     """The tool reply for a failed query: {"error_message": ..., "hint": ...}.
 
     "hint" is present only for recognized errors. Messages that did not come
@@ -149,6 +270,7 @@ def select_query_error(exc: BaseException) -> dict[str, str]:
     message = str(exc)
     reply = {"error_message": _clean_message(message)}
     hint = _hint_for(message)
-    if hint:
-        reply["hint"] = hint
+    detail = _detail_for(message, query, describe or (lambda _t: None), list_tables or (lambda: None)) if query else None
+    if hint or detail:
+        reply["hint"] = " ".join(part for part in (detail, hint) if part)
     return reply

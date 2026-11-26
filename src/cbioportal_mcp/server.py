@@ -540,6 +540,45 @@ def germline_guide() -> str:
 # agent's context with an unbounded result set (mirrors MAX_LIST_LIMIT below).
 # The default is CBIOPORTAL_MCP_MAX_RESULT_ROWS (100 when unset).
 MAX_SELECT_MAX_ROWS = 10000
+def _retry_dropped_connection(call):
+    """Run a SELECT, once more after a dropped connection. A timeout is not retried: the query is just too heavy."""
+    try:
+        return call()
+    except Exception as e:
+        if not query_errors.is_transient_connection_error(str(e)):
+            raise
+        logger.warning("retrying a SELECT after a dropped connection: %s", e)
+        time.sleep(0.5)
+        return call()
+
+
+def _column_names(table: str) -> list[str] | None:
+    """Column names of a table for an error hint: from the schema cache, else DESCRIBE. None when unavailable."""
+    try:
+        table = _validate_table_name(table)
+        cached = _cache_get(_schema_cache, ("columns", table))
+        if cached is not None:
+            return [c["name"] for c in cached["columns"]]
+        from mcp_clickhouse.mcp_server import run_query
+
+        raw = json.loads(run_query(f"DESCRIBE TABLE {table}"))
+        return [row[0] for row in raw.get("rows", []) if row]
+    except Exception:
+        return None
+
+
+def _table_names() -> list[str] | None:
+    try:
+        cached = _cache_get(_schema_cache, ("tables",))
+        if cached is not None:
+            return [t["name"] for t in cached["tables"]]
+        from mcp_clickhouse.mcp_server import run_query
+
+        return [row[0] for row in json.loads(run_query("SHOW TABLES")).get("rows", []) if row]
+    except Exception:
+        return None
+
+
 DEFAULT_SELECT_MAX_ROWS = min(result_format.default_max_rows(), MAX_SELECT_MAX_ROWS)
 
 
@@ -588,8 +627,10 @@ def clickhouse_run_select_query(
         safe_max_rows = max(1, min(int(max_rows), MAX_SELECT_MAX_ROWS))
         # run_select_query returns at most safe_max_rows + 1 rows (capped in
         # ClickHouse), so one extra row signals that the result was truncated.
-        result = run_select_query(
-            query, query_label="clickhouse_run_select_query", max_rows=safe_max_rows
+        result = _retry_dropped_connection(
+            lambda: run_select_query(
+                query, query_label="clickhouse_run_select_query", max_rows=safe_max_rows
+            )
         )
         logger.debug("clickhouse_run_select_query returns %s", result)
         if result_format.is_compact():
@@ -615,7 +656,9 @@ def clickhouse_run_select_query(
         return {"rows": result}
     except Exception as e:
         logger.error(f"clickhouse_run_select_query: {e}")
-        return query_errors.select_query_error(e)
+        return query_errors.select_query_error(
+            e, query, describe=_column_names, list_tables=_table_names
+        )
 
 
 @mcp.tool(
