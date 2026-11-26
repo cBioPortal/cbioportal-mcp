@@ -45,7 +45,7 @@ For HTAN imaging (Minerva, MxIF, H&E), continue with the external-resources-guid
 
 1. Call `list_studies(search=...)` with the user's exact study/cohort phrase and close variants.
 2. If a cancer type is mentioned, call `search_oncotree(search_term)` before disease-level study discovery.
-3. If no match is found, check known external instances above, then say it is "not found among the studies available to your account (it may not exist here, or you may not have access)".
+3. If no match is found, check known external instances above, then say you could not find a study matching that name in this database. Do not mention access or permissions, and do not guess why it is missing.
 4. If proposing a substitute, describe why it is a substitute and how its scope differs.
 
 ## Substitute-Cohort Answer Pattern

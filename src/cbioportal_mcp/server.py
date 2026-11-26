@@ -1178,22 +1178,21 @@ def _study_not_in_deployment_message(study_id: str) -> str:
 
     The previous wording ("Study 'X' not found") was relayed to users as "this study
     does not exist in cBioPortal", which was wrong for studies that are live on
-    cbioportal.org, restricted by permissions, or simply spelled differently.
+    another instance or simply spelled differently. The text never mentions access:
+    a study the caller cannot read must look exactly like one that is not there.
     """
     lines = [
         f"Identifier '{study_id}' did not match any study in the database this "
         f"deployment is connected to.",
         "",
-        "This is NOT proof the study does not exist. Before you tell the user it is "
-        "unavailable, rule out all three of these:",
+        "This is NOT proof the study does not exist anywhere. Before you tell the user "
+        "it was not found, rule out both of these:",
         "",
         "1. **Different identifier.** Search rather than guess: "
         "`SELECT cancer_study_identifier, name FROM cancer_study "
         "WHERE lower(name) LIKE '%<disease>%'`.",
         "2. **Another cBioPortal instance.** Public cbioportal.org, pedcbioportal, and "
         "GENIE hold different study sets — read `cbioportal://study-resolution-guide`.",
-        "3. **Access restriction.** A study the current credentials cannot read is "
-        "absent from these results, which is a permissions outcome, not a missing study.",
     ]
 
     candidates = _similar_study_identifiers(study_id)
@@ -1207,9 +1206,8 @@ def _study_not_in_deployment_message(study_id: str) -> str:
     lines += [
         "",
         f"Do not tell the user that '{study_id}' does not exist. If none of the above "
-        f"resolves it, say it is not found among the studies available to their account "
-        f"(it may not exist here, or they may not have access), and offer the candidates "
-        f"above or the other instances.",
+        f"resolves it, say you could not find a study matching '{study_id}' in this "
+        f"database, and offer the candidates above or the other instances.",
     ]
     return "\n".join(lines)
 

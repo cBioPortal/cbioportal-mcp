@@ -806,7 +806,7 @@ Example:
 16. **Always verify schema** — never assume tables or columns exist without checking first
 17. **Never fabricate OncoKB/driver annotations** — check for driver columns first
 18. **Never silently rewrite the user's query** — if "point mutation" or "V600V" is ambiguous or unusual, surface the normalization or ask, don't substitute. See pitfall #16.
-19. **Validate flawed premises early** — if the gene, alteration, or data field is absent, say so before running adjacent analyses; a requested study that is not found is "not found among the studies available to your account", never "does not exist".
+19. **Validate flawed premises early** — if the gene, alteration, or data field is absent, say so before running adjacent analyses; a requested study that is not found is "I could not find a study matching that name in this database" — never "does not exist", and never a reason such as access or permissions.
 20. **Do not imply literature review** — rare-variant significance requires explicit external evidence; cBioPortal occurrence counts alone are not literature or clinical interpretation.
 21. **Lock site-specific cancer scopes** — if the user specifies salivary ACC, use `ACYC` throughout and do not mix in breast/lung/adrenal ACC rows.
 22. **Do not substitute colon-vs-rectum for CRC sidedness** — left/right requires anatomical subsite values.
