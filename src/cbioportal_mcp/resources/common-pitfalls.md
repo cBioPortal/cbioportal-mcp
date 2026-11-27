@@ -785,34 +785,6 @@ Example:
 
 > The mutation filter can be run, but the expression-profile join failed because I could not identify a MYC expression profile for this study. I can first list available expression profiles, then intersect mutation-positive samples with expression values.
 
-## Best Practices Summary
-
-1. **Always use gene-specific denominators** for mutation frequencies
-2. **Filter out off-panel mutations** with `off_panel = 0`
-3. **Exclude uncalled mutations** with `mutation_status != 'UNCALLED'`
-4. **Always specify study identifier** for consistent results
-5. **Keep patient vs sample aggregation separate**
-6. **Filter by SAMPLE_TYPE** when asked about specific sample types (primary, metastatic, etc.)
-7. **Cast clinical values to appropriate data types**
-8. **Handle NULL values explicitly**
-9. **Use proper join keys and conditions**
-10. **Avoid cartesian products**
-11. **Use derived tables when possible** for better performance
-12. **Use numeric values for CNA** (2=AMP, -2=HOMDEL)
-13. **Use correct column names** (`mutation_variant` not `protein_change`)
-14. **Use subqueries instead of CTEs** for complex aggregations in ClickHouse
-15. **Check resource tables before saying "out of scope"** — `resource`, `resource_definition` may have external links
-16. **Always verify schema** — never assume tables or columns exist without checking first
-17. **Never fabricate OncoKB/driver annotations** — check for driver columns first
-18. **Never silently rewrite the user's query** — if "point mutation" or "V600V" is ambiguous or unusual, surface the normalization or ask, don't substitute. See pitfall #16.
-19. **Validate flawed premises early** — if the gene, alteration, or data field is absent, say so before running adjacent analyses; a requested study that is not found is "I could not find a study matching that name in this database" — never "does not exist", and never a reason such as access or permissions.
-20. **Do not imply literature review** — rare-variant significance requires explicit external evidence; cBioPortal occurrence counts alone are not literature or clinical interpretation.
-21. **Lock site-specific cancer scopes** — if the user specifies salivary ACC, use `ACYC` throughout and do not mix in breast/lung/adrenal ACC rows.
-22. **Do not substitute colon-vs-rectum for CRC sidedness** — left/right requires anatomical subsite values.
-23. **Hold scope boundaries after refusal** — do not provide paper critiques, slide outlines, external pipeline code, or medical advice after user pushback.
-24. **Do not promise unavailable outputs** — provide data/handoffs instead of claiming to create plots, CSV files, or external apps.
-25. **LEFT JOIN yields '' / 0, not NULL** — use `IN (SELECT …)` / `NOT IN (SELECT …)` for group membership (pitfall #22)
-
 ### 21. ENUMERATION / CATALOG QUESTIONS TRIGGER SCHEMA EXPLORATION
 
 Questions that ask *"what X is available"* or *"what kind of Y are there"* are catalog/enumeration questions. A first-class list tool answers them in ONE call. Do not schema-explore.
@@ -886,12 +858,11 @@ SELECT s FROM a WHERE sample_unique_id IN (SELECT sample_unique_id FROM b)
 
 | Table | Real columns | Commonly invented |
 |-------|--------------|-------------------|
-| `sample` | `internal_id`, `stable_id`, `patient_id` | `cancer_study_id`, `sample_id`, `sample_unique_id`, `patient_unique_id` |
 | `genetic_profile` | `genetic_profile_id`, `stable_id`, `cancer_study_id`, `genetic_alteration_type`, `datatype`, `name` | `cancer_study_identifier`, `profile_name`, `molecular_profile_id` |
 | `genetic_alteration_derived` | `sample_unique_id`, `cancer_study_identifier`, `hugo_gene_symbol`, `profile_type`, `alteration_value` | `sample_id`, `protein_change` |
 | `cancer_study` | `cancer_study_id`, `cancer_study_identifier`, `type_of_cancer_id`, `sample_count`, ... | `type_of_cancer`, `patient_count` |
 
-For `sample_unique_id` / `cancer_study_identifier` use `clinical_data_derived`, `genomic_event_derived` or `genetic_alteration_derived`; the raw `sample` table has neither. When unsure, call `clickhouse_list_table_columns` once instead of retrying.
+For `sample_unique_id` / `cancer_study_identifier` use `sample_derived`, `clinical_data_derived`, `genomic_event_derived` or `genetic_alteration_derived`. When unsure, call `clickhouse_list_table_columns` once instead of retrying.
 
 **Table-function output columns.** The gene-parameter views (`gene_mutation_frequency_in_study`, `gene_mutation_frequency_in_studies`, `gene_mutation_frequency_by_cancer_type`, `gene_alteration_frequency_by_cancer_type`, `gene_mutation_variants_in_study`) echo the gene as `hugo_gene_symbol`, so several genes can be stacked with `UNION ALL`. Output columns are those documented in each view's header comment; `top_*` views return one row per gene with `hugo_gene_symbol`.
 
@@ -916,8 +887,10 @@ Before trusting your results, ask:
 - [ ] Did I verify all tables and columns exist before querying them?
 - [ ] Did I answer the literal question, or did I silently rewrite it? If I normalized a term ("point mutation" → SNV set, "V600V" → V600E), did I surface that to the user?
 - [ ] Did I validate the user's premise before querying adjacent data?
+- [ ] Did I use derived tables and views where they exist, and subqueries instead of CTEs for complex aggregations?
+- [ ] If a requested study was not found, did I say "I could not find a study matching that name in this database" (never "does not exist", never an access reason)?
 - [ ] Did I avoid claiming literature, guideline, or external-database support unless a tool or user-provided source supplied it?
-- [ ] If the user named an anatomical site with an ambiguous abbreviation like ACC, did every query use the same site-specific OncoTree scope?
+- [ ] If the user named an anatomical site with an ambiguous abbreviation like ACC, did every query use the same site-specific OncoTree scope (salivary ACC is `ACYC`; do not mix in breast/lung/adrenal ACC rows)?
 - [ ] If the user asked for left- vs right-sided CRC, did I verify subsite-level location values instead of using colon-vs-rectum?
 - [ ] Did I keep scope boundaries after any refusal?
 - [ ] Did I avoid promising plots, downloads, or external-code debugging that this MCP server cannot perform?
