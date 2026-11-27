@@ -256,6 +256,7 @@ def query_pool(monkeypatch):
     pools = []
 
     def install(cap, client):
+        monkeypatch.setattr(server, "MAX_CONCURRENT_QUERIES", cap)
         pool = concurrent.futures.ThreadPoolExecutor(max_workers=cap)
         pools.append((pool, client))
         monkeypatch.setattr(ms, "QUERY_EXECUTOR", pool)
@@ -321,6 +322,7 @@ from cbioportal_mcp import server
 import mcp_clickhouse.mcp_server as ms
 from fastmcp import Client
 from test_parallel_tool_exec import FakeClickHouseClient
+server.ensure_db_permissions = lambda config: None
 
 mode = sys.argv[1]
 client = FakeClickHouseClient(hang=True, kill="fail" if mode == "sequential" else "slow")
@@ -557,13 +559,13 @@ def test_script_mode_ignores_a_cwd_dotenv_like_mcp_clickhouse(tmp_path):
 _MAIN_WITH_MCP_CLICKHOUSE_FIRST = """
 import mcp_clickhouse.mcp_server
 from cbioportal_mcp import server
-server.main()
+server._validate_server_startup()
 """
 
 
 def test_server_refuses_to_start_on_a_mis_sized_pool(tmp_path):
     """mcp_clickhouse imported first sizes its pool to its default of 10; with a
-    cap of 1 the server entry point must exit, naming the real size and fixes."""
+    cap of 1 the shared startup gate must exit, naming the real size and fixes."""
     done = _fresh_python(
         _MAIN_WITH_MCP_CLICKHOUSE_FIRST,
         {"CBIOPORTAL_MCP_MAX_CONCURRENT_QUERIES": "1"},
@@ -635,7 +637,7 @@ def test_unrecognised_mcp_clickhouse_pool_stops_the_server(monkeypatch, caplog, 
         query_concurrency.query_pool_size()
     with caplog.at_level(logging.CRITICAL, logger=server.logger.name):
         with pytest.raises(SystemExit) as exit_info:
-            server.main()
+            server._validate_server_startup()
     assert exit_info.value.code == 2
     assert "pin mcp-clickhouse==0.5.0" in caplog.text
 
@@ -820,6 +822,7 @@ N_REAL = 8
 
 
 def _real_query_pool(monkeypatch, size):
+    monkeypatch.setattr(server, "MAX_CONCURRENT_QUERIES", size)
     pool = concurrent.futures.ThreadPoolExecutor(max_workers=size)
     monkeypatch.setattr(mcp_clickhouse.mcp_server, "QUERY_EXECUTOR", pool)
     return pool

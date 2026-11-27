@@ -1,6 +1,10 @@
 # Compares this PR's server against the released image on a fixed set of tool calls.
 # Tests and workflow: https://github.com/cBioPortal/cbioportal-mcp-qa (mcp_tests/calls/mcp.yaml).
 # Label a PR `mcp-behavior-change` when the difference is intended; diffs are then report-only.
+#
+# The baseline is the image built from the PR's target branch (beta → :beta,
+# main → :latest). The server needs its study-authz switches set explicitly
+# (all off here: no study filtering in CI).
 name: MCP regression
 
 on:
@@ -9,8 +13,14 @@ on:
 
 jobs:
   mcp-regression:
-    uses: cBioPortal/cbioportal-mcp-qa/.github/workflows/mcp-regression.yml@v1
+    uses: cBioPortal/cbioportal-mcp-qa/.github/workflows/mcp-regression.yml@8d9bb1a27ea8024b1bc1cd9130c47530a6a76a8c
     with:
       server: mcp
-      qa-ref: v1
+      qa-ref: 8d9bb1a27ea8024b1bc1cd9130c47530a6a76a8c
+      baseline-image: ${{ github.base_ref == 'beta' && 'cbioportal/mcp:beta' || 'cbioportal/mcp:latest' }}
+      server-env: |
+        CBIOPORTAL_MCP_STUDY_FILTERING=off
+        CBIOPORTAL_MCP_AUTH_ENFORCEMENT=off
+        CBIOPORTAL_MCP_AUTH_TEST_USERS=
+        CBIOPORTAL_MCP_PUBLIC_DB_CHECK=off
     secrets: inherit

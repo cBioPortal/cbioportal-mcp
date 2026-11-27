@@ -54,12 +54,13 @@ ORDER BY numberOfAlteredSamplesOnPanel DESC;
 -- STEP 2: FOR EACH GENE, run this profiling query:
 SELECT COUNT(DISTINCT stgp.sample_unique_id) AS numberOfProfiledSamples
 FROM sample_to_gene_panel_derived stgp
-JOIN gene_panel gp ON stgp.gene_panel_id = gp.stable_id
-JOIN gene_panel_list gpl ON gp.internal_id = gpl.internal_id
-JOIN gene g ON gpl.gene_id = g.entrez_gene_id
+JOIN gene_panel_to_gene_derived gpg ON stgp.gene_panel_id = gpg.gene_panel_id
 WHERE stgp.alteration_type = 'MUTATION_EXTENDED'
-  AND g.hugo_gene_symbol = 'TP53'  -- Replace with each gene from Step 1
+  AND gpg.gene = 'TP53'  -- Replace with each gene from Step 1
   AND stgp.cancer_study_identifier = 'your_study_id';
+-- WES samples (gene_panel_id = 'WES') are listed under every gene here, so this
+-- one query already counts them; prefer the mutation_panel_gene_coverage /
+-- mutation_wes_coverage views, which separate the two cases.
 
 -- STEP 3: Calculate frequency = numberOfAlteredSamplesOnPanel / numberOfProfiledSamples * 100
 ```
@@ -165,17 +166,16 @@ WHERE cancer_study_identifier = 'your_study_id';
 
 ### 5b. 🚨 SAMPLE TYPE FILTERING ERRORS
 
-#### ❌ WRONG: Using `sample.sample_type` column instead of clinical attribute
+#### ❌ WRONG: Using `sample_type` column instead of clinical attribute
 ```sql
--- INCORRECT - sample.sample_type is NOT the primary/metastatic distinction!
+-- INCORRECT - sample_derived.sample_type is NOT the primary/metastatic distinction!
 SELECT COUNT(*) as primary_samples
-FROM sample s
-JOIN patient p ON s.patient_id = p.internal_id
-WHERE p.cancer_study_id = 791
-  AND s.sample_type = 'Primary';  -- WRONG COLUMN!
+FROM sample_derived
+WHERE cancer_study_identifier = 'your_study_id'
+  AND sample_type = 'Primary';  -- WRONG COLUMN!
 -- Returns 0 because sample_type contains "Primary Solid Tumor" for ALL samples
 ```
-**Problem**: The `sample.sample_type` column contains general classifications like "Primary Solid Tumor" (for all tumor samples). It does NOT distinguish between primary vs metastatic samples!
+**Problem**: The `sample_derived.sample_type` column contains general classifications like "Primary Solid Tumor" (for all tumor samples). It does NOT distinguish between primary vs metastatic samples!
 
 #### ❌ WRONG: Assuming all samples are "Primary"
 ```sql
@@ -323,18 +323,18 @@ WHERE attribute_name = 'AGE';
 
 #### ❌ Wrong: Joining on wrong keys
 ```sql
--- INCORRECT - Wrong join relationship
+-- INCORRECT - sample ids repeat across studies, so joining on the stable id alone mixes studies
 SELECT *
-FROM patient p
-JOIN sample s ON p.cancer_study_id = s.internal_id;  -- Wrong keys!
+FROM sample_derived s
+JOIN clinical_data_derived cd ON cd.sample_unique_id = s.sample_stable_id;  -- Wrong keys!
 ```
 
 #### ✅ Correct: Use proper join keys
 ```sql
--- CORRECT - Proper foreign key relationship
+-- CORRECT - join on the globally unique id
 SELECT *
-FROM patient p
-JOIN sample s ON p.internal_id = s.patient_id;
+FROM sample_derived s
+JOIN clinical_data_derived cd ON cd.sample_unique_id = s.sample_unique_id;
 ```
 
 ### 9. 🚨 CARTESIAN PRODUCTS
@@ -547,12 +547,10 @@ FROM resource_definition
 WHERE display_name ILIKE '%Minerva%' OR description ILIKE '%Minerva%';
 
 -- Step 3: Check sample-level resource links for matching studies
-SELECT r.url, rd.display_name as resource_name, s.stable_id as sample_id
+SELECT r.url, rd.display_name as resource_name, r.sample_id
 FROM resource r
 JOIN resource_definition rd ON r.resource_id = rd.resource_id AND r.cancer_study_id = rd.cancer_study_id
-JOIN sample s ON r.sample_id = s.stable_id
-JOIN patient p ON s.patient_id = p.internal_id AND p.cancer_study_id = r.cancer_study_id
-JOIN cancer_study cs ON p.cancer_study_id = cs.cancer_study_id
+JOIN cancer_study cs ON r.cancer_study_id = cs.cancer_study_id
 WHERE r.resource_scope = 'SAMPLE' AND cs.cancer_study_identifier ILIKE '%htan%';
 ```
 
@@ -587,12 +585,10 @@ WHERE attribute_name = 'TUMOR_GRADE' AND cancer_study_identifier = 'brca_tcga';
 #### ❌ Wrong: counting a study's samples through patient/sample joins
 ```sql
 -- INCORRECT - can differ from the portal's study list by a few samples
-SELECT cs.cancer_study_identifier, COUNT(DISTINCT s.internal_id) as sample_count
-FROM cancer_study cs
-JOIN patient p ON p.cancer_study_id = cs.cancer_study_id
-JOIN sample s ON s.patient_id = p.internal_id
-WHERE cs.cancer_study_identifier = 'brca_metabric'
-GROUP BY cs.cancer_study_identifier;
+SELECT cancer_study_identifier, COUNT(DISTINCT sample_unique_id) as sample_count
+FROM sample_derived
+WHERE cancer_study_identifier = 'brca_metabric'
+GROUP BY cancer_study_identifier;
 ```
 
 #### ✅ Correct: read the precomputed columns on cancer_study
@@ -807,7 +803,7 @@ Example:
 16. **Always verify schema** — never assume tables or columns exist without checking first
 17. **Never fabricate OncoKB/driver annotations** — check for driver columns first
 18. **Never silently rewrite the user's query** — if "point mutation" or "V600V" is ambiguous or unusual, surface the normalization or ask, don't substitute. See pitfall #16.
-19. **Validate flawed premises early** — if the gene, alteration, study, or data field is absent, say so before running adjacent analyses.
+19. **Validate flawed premises early** — if the gene, alteration, or data field is absent, say so before running adjacent analyses; a requested study that is not found is "I could not find a study matching that name in this database" — never "does not exist", and never a reason such as access or permissions.
 20. **Do not imply literature review** — rare-variant significance requires explicit external evidence; cBioPortal occurrence counts alone are not literature or clinical interpretation.
 21. **Lock site-specific cancer scopes** — if the user specifies salivary ACC, use `ACYC` throughout and do not mix in breast/lung/adrenal ACC rows.
 22. **Do not substitute colon-vs-rectum for CRC sidedness** — left/right requires anatomical subsite values.

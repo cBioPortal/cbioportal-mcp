@@ -10,9 +10,7 @@ Clinical data in cBioPortal is stored at both patient and sample levels. Underst
 - **Sample-level**: Sample type, sequencing platform, purity (can have multiple per patient)
 
 ### Key Tables
-- `clinical_patient`: Patient-level clinical attributes
-- `clinical_sample`: Sample-level clinical attributes
-- `clinical_data_derived`: Pre-joined view combining both levels
+- `clinical_data_derived`: Patient- and sample-level clinical attributes (one row per attribute value)
 - `clinical_attribute_meta`: Metadata about available clinical attributes
 
 ## Recommended Approach: Use clinical_data_derived
@@ -55,7 +53,7 @@ ORDER BY patient_attribute, attr_id;
 ```
 
 **Key Fields:**
-- **attr_id**: matches attr_id in clinical_sample/clinical_patient tables
+- **attr_id**: matches `attribute_name` in `clinical_data_derived`
 - **description**: human-readable description of the attribute
 - **patient_attribute**: true = patient attribute, false = sample attribute
 - **cancer_study_id**: links to cancer_study table (filter by study)
@@ -377,39 +375,24 @@ FROM (
 
 If a large share of patients sits at one boundary, compute age from `DAYS_TO_BIRTH` instead (negative days from birth to diagnosis): age in years = `-toFloat64OrNull(attribute_value) / 365.25`. Tell the user which attribute you used and why. Check the study guide too — it may already name the right attribute. All TARGET GDC studies (`*_target_gdc`) floor `AGE` at 18 — use `DAYS_TO_BIRTH` for them.
 
-## Raw Table Queries (Advanced)
+## Patient- vs Sample-Level Attributes
 
-If you need to use raw clinical tables instead of the derived view:
+`clinical_data_derived` holds both levels. Patient-level attributes (AGE, OS_MONTHS, SEX ...) have an empty `sample_unique_id`; sample-level attributes (SAMPLE_TYPE, CANCER_TYPE ...) have both ids. The `type` column says which ('patient' or 'sample').
 
-### Patient-Level Query:
 ```sql
--- Query patient-level data directly
-SELECT
-    cp.patient_id,
-    cp.attr_id,
-    cp.attr_value
-FROM cancer_study cs
-JOIN patient p ON cs.cancer_study_id = p.cancer_study_id
-JOIN clinical_patient cp ON p.internal_id = cp.patient_id
-WHERE
-    cs.cancer_study_identifier = 'your_study_id'
-    AND cp.attr_id = 'CANCER_TYPE';
-```
+-- Patient-level value
+SELECT patient_unique_id, attribute_name, attribute_value
+FROM clinical_data_derived
+WHERE cancer_study_identifier = 'your_study_id'
+  AND type = 'patient'
+  AND attribute_name = 'SEX';
 
-### Sample-Level Query:
-```sql
--- Query sample-level data directly
-SELECT
-    cs_sample.internal_id as sample_id,
-    cs_sample.attr_id,
-    cs_sample.attr_value
-FROM cancer_study cs
-JOIN patient p ON cs.cancer_study_id = p.cancer_study_id
-JOIN sample s ON p.internal_id = s.patient_id
-JOIN clinical_sample cs_sample ON s.internal_id = cs_sample.internal_id
-WHERE
-    cs.cancer_study_identifier = 'your_study_id'
-    AND cs_sample.attr_id = 'SAMPLE_TYPE';
+-- Sample-level value
+SELECT sample_unique_id, attribute_name, attribute_value
+FROM clinical_data_derived
+WHERE cancer_study_identifier = 'your_study_id'
+  AND type = 'sample'
+  AND attribute_name = 'SAMPLE_TYPE';
 ```
 
 ## Treatment and Clinical Events Data
@@ -417,24 +400,20 @@ WHERE
 Treatment data is stored separately from clinical attributes, in the clinical events tables. For per-agent or per-regimen patient counts in one study, use `treatment_counts_in_study` / `treatment_regimens_in_study` (see Study-View Chart Counts above). Details: `cbioportal://treatment-guide`.
 
 ### Key Tables for Treatment Data
-- `clinical_event`: Contains event records (Treatment, Diagnosis, Surgery, etc.)
-- `clinical_event_data`: Contains key-value data for each event
+- `treatment_event_agents`: one row per Treatment event with an AGENT (`agent`, `treatment_type`, `treatment_subtype`, `patient_unique_id`, `start_date`)
+- `clinical_event_derived`: all events (`event_type`, `start_date`, `stop_date`, `patient_stable_id`)
+- `clinical_event_data_derived`: key/value pairs of every event (`key`, `value`, `event_type`, `patient_unique_id`)
 
 ### Query Treatment Information
 
 ```sql
 -- Find most common treatments in a study
-SELECT 
-    ced.value as treatment_agent,
-    COUNT(DISTINCT ce.patient_id) as patient_count
-FROM clinical_event ce
-JOIN clinical_event_data ced ON ce.clinical_event_id = ced.clinical_event_id
-JOIN patient p ON ce.patient_id = p.internal_id
-JOIN cancer_study cs ON p.cancer_study_id = cs.cancer_study_id
-WHERE cs.cancer_study_identifier = 'your_study_id'
-    AND ce.event_type IN ('Treatment', 'TREATMENT')
-    AND ced.key = 'AGENT'
-GROUP BY ced.value
+SELECT
+    agent AS treatment_agent,
+    COUNT(DISTINCT patient_unique_id) AS patient_count
+FROM treatment_event_agents
+WHERE cancer_study_identifier = 'your_study_id'
+GROUP BY agent
 ORDER BY patient_count DESC
 LIMIT 10;
 ```
@@ -453,12 +432,10 @@ Common event types include:
 
 ```sql
 -- See what event types are available
-SELECT DISTINCT ce.event_type, COUNT(*) as event_count
-FROM clinical_event ce
-JOIN patient p ON ce.patient_id = p.internal_id
-JOIN cancer_study cs ON p.cancer_study_id = cs.cancer_study_id
-WHERE cs.cancer_study_identifier = 'your_study_id'
-GROUP BY ce.event_type
+SELECT event_type, COUNT(*) AS event_count
+FROM clinical_event_derived
+WHERE cancer_study_identifier = 'your_study_id'
+GROUP BY event_type
 ORDER BY event_count DESC;
 ```
 
@@ -469,4 +446,4 @@ ORDER BY event_count DESC;
 3. **Handle missing values** - clinical data can have NULL or empty values
 4. **Distinguish patient vs sample level** - know whether you need patient or sample-level aggregation
 5. **Filter by study** - always specify cancer_study_identifier for consistent results
-6. **Use clinical_event for treatment data** - treatment info is in clinical events, not clinical attributes
+6. **Use treatment_event_agents for treatment data** - treatment info is in clinical events, not clinical attributes

@@ -112,6 +112,7 @@ def test_background_refresh_updates_cache_without_a_live_caller(monkeypatch):
     server._clear_studies_cache()
     monkeypatch.setattr(server, "run_select_query", fake_run_select_query)
 
+    server.validate_startup()
     server._refresh_studies_cache_once()
     assert call_count == 1
 
@@ -121,6 +122,7 @@ def test_background_refresh_updates_cache_without_a_live_caller(monkeypatch):
 
     # The background cycle refreshes on its own, with no list_studies() call
     # driving it.
+    server.validate_startup()
     server._refresh_studies_cache_once()
     assert call_count == 2
 
@@ -138,6 +140,7 @@ def test_background_refresh_failure_is_logged_not_raised(monkeypatch, caplog):
     server._clear_studies_cache()
     monkeypatch.setattr(server, "run_select_query", failing_run_select_query)
 
+    server.validate_startup()
     server._refresh_studies_cache_once()
 
     assert "Background list_studies cache refresh failed" in caplog.text
@@ -177,7 +180,8 @@ def test_study_count_columns_are_created_by_the_clone_sql():
 
     sql = (Path(__file__).parent.parent / "sql" / "6-add-study-data-type-counts.sql").read_text()
     guide = (
-        Path(__file__).parent.parent / "src" / "cbioportal_mcp" / "resources" / "sample-filtering-guide.md"
+        Path(__file__).parent.parent
+        / "src" / "cbioportal_mcp" / "resources" / "sample-filtering-guide.md"
     ).read_text()
     for column in (
         "sample_count",
