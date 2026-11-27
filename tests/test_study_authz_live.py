@@ -421,10 +421,10 @@ def test_user_study_shows_only_own_and_public_rows(server):
 
 
 def test_clickhouse_connect_needs_invalid_setting_action_send(server):
-    """Notes for the server change (P7): clickhouse_connect rejects SQL_cbio_user client-side.
+    """clickhouse_connect rejects SQL_cbio_user client-side.
 
     Its default invalid_setting_action='error' raises before sending, and 'drop'
-    would silently degrade to public-only, so P7 must set it to 'send'.
+    would silently degrade to public-only, so the server must set it to 'send'.
     """
     import clickhouse_connect
     from clickhouse_connect import common
@@ -462,7 +462,7 @@ def test_role_is_the_only_path_and_direct_grant_bypasses(server):
     server.http("SET ROLE NONE", "mcp_restricted", session_id="s-role-only")
     with pytest.raises(RuntimeError, match="ACCESS_DENIED"):
         server.http(sql, "mcp_restricted", session_id="s-role-only")
-    # Role + direct grant (misconfiguration, P6's startup check will refuse it):
+    # Role + direct grant (misconfiguration, the server's startup check refuses it):
     # filtered while the role is active, everything once it is not.
     assert server.http(sql, "mcp_direct") == str(len(PUBLIC))
     server.http("SET ROLE NONE", "mcp_direct", session_id="s-direct")
@@ -681,7 +681,7 @@ def test_p7_user_tools_and_cache_isolation(server, monkeypatch):
     # have reset rollout. Drop that pin so this test can switch filtering on.
     monkeypatch.setattr(rollout, "_PIN", None)
 
-    # The P4 minimal fixture omits list_studies' deployment metadata columns.
+    # The minimal admin-tool fixture omits list_studies' deployment metadata columns.
     for column in ("description String", "type_of_cancer_id String", "sample_count UInt64"):
         server.admin.command(f"ALTER TABLE {DB}.cancer_study ADD COLUMN IF NOT EXISTS {column}")
     previous = common.get_setting("invalid_setting_action")
@@ -869,7 +869,7 @@ def test_review_repro_placeholder_database_cannot_redirect_apply(server):
     ).result_rows
 
 
-# --- P6: the server's startup check, run as the runtime user itself ----------
+# --- The server's startup check, run as the runtime user itself ----------
 
 
 def _runtime_client(server, user: str):
@@ -957,7 +957,7 @@ def test_startup_check_readable_user_study_manual_refused(server):
 
 
 def test_startup_check_foreign_policy_refused(server):
-    """P4's ownership rule at startup: a foreign PERMISSIVE policy TO the policy
+    """The admin tool's ownership rule at startup: a foreign PERMISSIVE policy TO the policy
     role is OR-ed with ours and widens the MCP user; one TO another principal
     is widened by our catch-all. Both refuse."""
     admin = server.admin
@@ -1049,7 +1049,7 @@ def test_startup_check_through_the_mcp_connection(server, monkeypatch):
         startup_check.run_startup_check(DB, env=on)
 
 
-# --- P6 allow-list audit: the reviewer's false-PASS repros -------------------
+# --- Startup-check allow-list audit: the reviewer's false-PASS repros -------------------
 
 
 def _p6_user_target_db(admin, db: str, user: str):
@@ -1549,7 +1549,7 @@ def test_apply_refuses_previous_layout_and_migrate_replaces_it(server):
 async def test_misconfigured_runtime_starts_degraded_and_mcp_returns_no_rows(
     server, monkeypatch, caplog, request, linked_reference
 ):
-    """Real runtime permissions + P6 connection + MCP dispatch, no checker stubs."""
+    """Real runtime permissions + startup-check connection + MCP dispatch, no checker stubs."""
     from fastmcp import Client
     from mcp_clickhouse import mcp_env
 

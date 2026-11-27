@@ -1,4 +1,4 @@
-"""P10 startup and availability contract."""
+"""Public-database check: startup and availability contract."""
 
 import json
 import logging

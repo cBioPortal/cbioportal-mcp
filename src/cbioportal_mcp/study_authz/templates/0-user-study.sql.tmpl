@@ -4,7 +4,7 @@
 -- TEMPLATE. Render and apply with
 --   uv run python -m cbioportal_mcp.study_authz apply --database <db> \
 --       --public-group <group> --app-name <app>
--- (see docs/study-authz.md). Placeholders:
+-- (see docs/study-filtering-design.md). Placeholders:
 --   __CLICKHOUSE_DATABASE__   target database (blue/green name)
 --   __PUBLIC_GROUP__          cBioPortal always_show_study_group (required)
 --   __APP_NAME__              cBioPortal app.name (required; recorded for the
@@ -33,7 +33,7 @@
 --               refresh keeps only each email's newest token (by issued_at).
 --               Adding it is one more UNION ALL branch in `grants` in
 --               user-study-query.sql.tmpl; no policy or user_study schema
---               change (docs/study-authz.md).
+--               change (docs/study-filtering-design.md).
 --
 -- Why not `CREATE TABLE user_study` + `... REFRESH ... TO user_study` (the
 -- previous layout): there the refresh swaps the table named user_study itself.
@@ -55,7 +55,7 @@
 -- in place, so readers keep the old snapshot until the next refresh, and the
 -- file then waits for one refresh. A database with the previous layout (a
 -- plain user_study table and/or user_study_refresh) is refused by apply unless
--- --migrate is given (docs/study-authz.md, "Migrating from user_study_refresh").
+-- --migrate is given (docs/study-filtering-design.md, "Migrating from user_study_refresh").
 -- ============================================================================
 
 CREATE TABLE IF NOT EXISTS __CLICKHOUSE_DATABASE__.user_study_manual

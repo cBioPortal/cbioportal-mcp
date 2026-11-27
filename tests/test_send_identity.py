@@ -1,4 +1,4 @@
-"""P7 request settings, thread isolation and fail-closed user surfaces."""
+"""Per-request identity settings, thread isolation and fail-closed user surfaces."""
 
 import asyncio
 import json

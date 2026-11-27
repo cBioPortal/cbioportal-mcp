@@ -20,8 +20,8 @@ the study row policies of its database. Using that same connection:
    cannot read system.dictionaries (ACCESS_DENIED on 25.8 and 26.6), and a
    dictionary configured outside SQL belongs to no database.
    Every row policy on the database must be ours and attached to this target
-   (``sqlgen.policy_conflicts``, P4's ownership rule): a foreign PERMISSIVE
-   policy is OR-ed with ours.
+   (``sqlgen.policy_conflicts``, the admin tool's ownership rule): a foreign
+   PERMISSIVE policy is OR-ed with ours.
 3. Fail-closed SHOW GRANTS / SHOW GRANTS FINAL parsing audits every held
    privilege, including dormant and nested roles, without system-table grants.
 4. Other readable databases must not contain privileged views, dictionaries,
@@ -245,7 +245,7 @@ def _check(
         raise PolicyCoverageError(f"no tables visible in {database}")
     # The refresh status (system.view_refreshes) is admin-only; stale private
     # rows expire on their own, and the admin `check` covers it.
-    # P4's ownership rule: every row policy on the database is ours and
+    # The admin tool's ownership rule: every row policy on the database is ours and
     # attached to this target. A foreign PERMISSIVE policy is OR-ed with ours,
     # so one that applies to this user widens what it reads; one on another
     # principal is widened by our catch-all. Either way, refuse.

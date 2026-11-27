@@ -37,7 +37,7 @@ class _FakeClient:
 
 @pytest.fixture(autouse=True)
 def all_preconditions_met(monkeypatch):
-    """Baseline: every precondition for filtering=on holds, P6 passes (mocked)."""
+    """Baseline: every precondition for filtering=on holds, the startup check passes (mocked)."""
     monkeypatch.setenv(FILTERING, "on")
     monkeypatch.setenv(ENFORCEMENT, "enforce")
     monkeypatch.setenv(DB_CHECK, "enforce")
@@ -271,7 +271,7 @@ def test_redact_strips_credentials_and_emails(detail):
 #
 # These tests run the REAL permission gate, the REAL mcp-clickhouse client
 # factory (and, for runtime queries, the REAL upstream run_query) and the REAL
-# P6 checker. Only clickhouse_connect.get_client is replaced, so every log
+# startup checker. Only clickhouse_connect.get_client is replaced, so every log
 # record the upstream stack emits is captured and checked.
 
 REVIEW_SECRET = "review-secret-0042"
@@ -513,11 +513,11 @@ def test_startup_with_failing_upstream_acquire_is_scrubbed(below_upstream, monke
     assert_logs_clean(caplog)
 
 
-# --- P6 through the real checker: driver errors are never echoed -------------
+# --- The real startup checker: driver errors are never echoed -------------
 
 
 def _p6_answers(failing_sql: str, error):
-    """Let P6 get past its first queries, then fail at the given query."""
+    """Let the startup check get past its first queries, then fail at the given query."""
     db_grants = get_mcp_config().mcp_database
 
     def answer(sql):
@@ -556,7 +556,7 @@ def test_p6_real_checker_query_error_never_echoes_credentials(below_upstream, ca
 def test_p6_real_checker_connect_error_never_echoes_credentials(
     below_upstream, monkeypatch, caplog, form
 ):
-    """The SELECT check passes; P6's own client creation then fails."""
+    """The SELECT check passes; the startup check's own client creation then fails."""
     import clickhouse_connect
 
     db = get_mcp_config().mcp_database
@@ -602,7 +602,7 @@ def test_redactor_keeps_non_secret_text():
     )
 
 
-# --- P6 failure keeps every transport serving in degraded mode ------------------
+# --- A startup-check failure keeps every transport serving in degraded mode ------------------
 
 
 @pytest.mark.asyncio
@@ -633,7 +633,7 @@ async def test_p6_failure_serves_degraded_local_stdio(monkeypatch):
 
 
 def test_on_auth_enforce_still_needs_a_login_route(monkeypatch):
-    """P2: enforce without Google or a bridge secret refuses, secret-free."""
+    """Enforcement without Google or a bridge secret refuses, secret-free."""
     monkeypatch.delenv(BRIDGE)
     with pytest.raises(ValueError, match="Auth enforce requires") as error:
         _validate_server_startup()
@@ -645,7 +645,7 @@ def test_off_never_runs_p6_or_needs_public_databases(monkeypatch, caplog):
     monkeypatch.setenv(DB_CHECK, "off")
     monkeypatch.delenv(PUBLIC_DBS)
     monkeypatch.setattr(
-        startup_check, "_check", lambda *a, **k: pytest.fail("P6 must not run with off")
+        startup_check, "_check", lambda *a, **k: pytest.fail("startup check ran with off")
     )
     with caplog.at_level(logging.INFO):
         _validate_server_startup()

@@ -5,7 +5,7 @@ same catalog FK paths as the policies), copies reference tables whole,
 recreates the catalog views, rewrites ``cancer_study.groups`` so gated
 studies carry a private group and the rest the public group, applies the
 study-authz SQL, and seeds ``user_study_manual``. Auth tables (users,
-authorities, ...) are never copied. See docs/study-authz.md for usage.
+authorities, ...) are never copied. See docs/study-filtering-design.md for usage.
 """
 
 from __future__ import annotations

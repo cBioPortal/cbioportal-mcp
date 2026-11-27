@@ -42,7 +42,7 @@ USER_STUDY_TEMPLATE = TEMPLATES / "0-user-study.sql.tmpl"
 USER_STUDY_QUERY_TEMPLATE = TEMPLATES / "user-study-query.sql.tmpl"
 USER_STUDY_QUERY = "__USER_STUDY_QUERY__"
 # The previous layout's writer (`... REFRESH ... TO user_study`); only apply's
-# migration still names it (docs/study-authz.md, "Migrating from user_study_refresh").
+# migration still names it (docs/study-filtering-design.md, "Migrating from user_study_refresh").
 LEGACY_REFRESH_VIEW = "user_study_refresh"
 ROW_POLICIES_TEMPLATE = TEMPLATES / "1-row-policies.sql.tmpl"
 
@@ -52,7 +52,7 @@ TARGET = "__POLICY_TARGET__"
 USER_SETTING = "SQL_cbio_user"
 # The caller's own rows plus the public ('') rows, while still valid. A
 # missing setting reads as '' (public only). Nothing relies on a
-# settings-profile default for SQL_cbio_user (docs/study-authz.md).
+# settings-profile default for SQL_cbio_user (docs/study-filtering-design.md).
 USER_STUDY_MATCH = (
     f"(email = '' OR email = lowerUTF8(getSettingOrDefault('{USER_SETTING}', ''))) "
     "AND valid_until > now64(3)"
@@ -151,7 +151,7 @@ _HEADER = f"""\
 -- GENERATED from src/cbioportal_mcp/study_authz/catalog.py by
 -- `python -m cbioportal_mcp.study_authz generate` - do not edit by hand;
 -- tests/test_study_authz_sql.py fails on drift. Apply after 0-user-study.sql.tmpl
--- with `python -m cbioportal_mcp.study_authz apply` (docs/study-authz.md).
+-- with `python -m cbioportal_mcp.study_authz apply` (docs/study-filtering-design.md).
 --
 -- Every study row resolves to its cancer_study_identifier and is visible iff
 -- that study is in
@@ -439,7 +439,7 @@ def apply(client, params: Params, log=print, *, migrate: bool = False) -> None:
     layout first (migration_statements); the rendered file then creates
     user_study and waits for its first refresh. Policy administration on the
     database must be serialized with apply; run `check` afterwards
-    (docs/study-authz.md).
+    (docs/study-filtering-design.md).
     """
     params.validate()
     files = rendered_files(params)
@@ -466,7 +466,7 @@ def apply(client, params: Params, log=print, *, migrate: bool = False) -> None:
             "blue/green database, or study filtering off), then rerun apply with --migrate, "
             f"which drops {LEGACY_REFRESH_VIEW} and the user_study table, recreates user_study "
             f"as a refreshable view and waits for its first refresh ({USER_STUDY_MANUAL_TABLE} "
-            "is kept); see docs/study-authz.md"
+            "is kept); see docs/study-filtering-design.md"
         )
     if legacy:
         log(f"migrate {params.database}: {'; '.join(legacy)}")
