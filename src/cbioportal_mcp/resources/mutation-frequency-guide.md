@@ -6,18 +6,18 @@
 - When reporting across multiple studies, show **ranges** (e.g., "TP53 is mutated in 30–60% of samples") rather than a single average
 - **NEVER** sum mutation events across studies to compute an aggregate frequency — this can exceed 100% due to double-counting
 - Warn users that samples may overlap across cohorts (e.g., MSK studies may share patients)
-- **Choose and state the counting unit**: use patient-level frequencies for prevalence/rate questions unless the user explicitly asks for samples; use sample-level frequencies when the user asks about samples.
+- **Choose and state the counting unit** from the question: patients when it asks about patients, samples when it asks about samples or for a mutation/alteration frequency (what the portal and the frequency views report).
 - **For "across cancer types" questions**, jump to the [Cross-Cancer-Type Mutation Frequency](#cross-cancer-type-mutation-frequency) section below — there is one correct recipe and several common wrong ones.
 
 ## Counting Unit: Samples vs Patients
 
-Before answering any mutation count or frequency question, decide whether the unit is samples or patients and state that choice in the answer.
+The unit depends on the question. Decide whether it is samples or patients and state that choice in the answer.
 
 | User wording | Counting unit |
 |--------------|---------------|
-| "prevalence", "rate", "fraction of patients", "patients with", "how common is" | Patient-level: `COUNT(DISTINCT patient_unique_id)` |
-| "samples", "specimens", "biopsies", sample-level cohort composition | Sample-level: `COUNT(DISTINCT sample_unique_id)` |
-| Ambiguous | Ask, or default to patient-level for prevalence/rate language and say so |
+| "prevalence", "rate", "fraction of patients", "patients with", "how many patients" | Patient-level: `COUNT(DISTINCT patient_unique_id)` |
+| "samples", "specimens", "biopsies", "mutation frequency", "altered in X%", sample-level cohort composition | Sample-level: `COUNT(DISTINCT sample_unique_id)`, as the portal and the frequency views count |
+| Ambiguous ("how common is") | Pick the unit that fits the question, say which one you used, and give the other when it differs materially (multi-sample patients) |
 
 ### Cross-study sample-count caveat
 
@@ -381,7 +381,7 @@ For accurate gene mutation frequency calculations, you must use gene-specific pr
 
 ### Key Rules:
 - **DO NOT use genomic_event_derived for total sample counts** - this gives study-wide counts, not gene-specific
-- Report **the requested counting unit**: patient-level for prevalence/rate questions, sample-level only when the user asks for samples or specimens
+- Report **the counting unit the question asks for** (see Counting Unit above) and name it
 - **Each gene has different profiling coverage** - denominators vary by gene
 - Sample frequency: numberOfAlteredSamplesOnPanel / gene_specific_profiled_samples
 - Patient frequency: altered patients with at least one profiled altered sample / patients with at least one sample profiled for the gene
@@ -569,7 +569,7 @@ FROM top_mutated_genes_in_study(study = 'your_study_id', top_n = 20);
 - **Off-panel filtering**: Use `off_panel = 0` to exclude mutations not covered by the gene panel
 - **Mutation status filtering**: Exclude `UNCALLED` mutations for accurate counts
 - **Study-specific analysis**: Always filter by specific cancer study for consistent results
-- **Counting unit**: Patient-level prevalence is usually more clinically meaningful than sample-level prevalence because patients can have multiple samples
+- **Counting unit**: patient and sample counts differ when patients have several samples; use the one the question asks about
 - **Be efficient**: Minimize database calls where possible
 
 ## Copy Number Alteration (CNA) Queries
