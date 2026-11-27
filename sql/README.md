@@ -102,4 +102,4 @@ portal-specific files, to prevent ordinary views from losing the explicit clause
 Row policies for a *restricted* deployment (public studies + per-email
 grants) live in `src/cbioportal_mcp/study_authz/`, not in this directory, so
 neither `apply_sql.sh` nor the daily public clone ever applies them. See
-[`docs/study-authz.md`](../docs/study-authz.md).
+[`docs/study-filtering-design.md`](../docs/study-filtering-design.md).

@@ -3,7 +3,7 @@
 The SQL in ``templates/0-user-study.sql.tmpl`` implements the same rules; the
 live tests check the two against each other. ``normalize_authority`` is not
 used by the SQL yet: it is the rule the future per-email (JWT) source must
-apply to IdP claims before writing grant keys (docs/study-authz.md).
+apply to IdP claims before writing grant keys (docs/study-filtering-design.md).
 
 Rules, from cBioPortal's ``CancerStudyPermissionEvaluator``:
 

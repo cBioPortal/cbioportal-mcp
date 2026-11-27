@@ -79,7 +79,7 @@ The four `CBIOPORTAL_MCP_*` switches above choose between:
 
 They have no defaults over HTTP: a missing or misspelled value refuses startup. If a check fails at startup, the server keeps running but blocks study data; `GET /health` reports `study_data_available` and a `reason`.
 
-Details: [docs/access-control.md](docs/access-control.md) (switches, login, health), [docs/study-filtering-rollout.md](docs/study-filtering-rollout.md) (setting up filtering), [docs/study-authz.md](docs/study-authz.md) (how the row policies work).
+Details: [docs/access-control.md](docs/access-control.md) (switches, login, health), [docs/study-filtering-setup.md](docs/study-filtering-setup.md) (setting up filtering), [docs/study-filtering-design.md](docs/study-filtering-design.md) (how the row policies work).
 
 ### Datadog Tool Metrics
 

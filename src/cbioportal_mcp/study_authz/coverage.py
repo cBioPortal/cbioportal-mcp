@@ -239,7 +239,7 @@ def user_study_shape_error(engine: str, create_query: str) -> str | None:
     if engine != "MaterializedView":
         return (
             f"{engine} table, not a refreshable materialized view (previous layout; "
-            "migrate with `apply --migrate`, docs/study-authz.md)"
+            "migrate with `apply --migrate`, docs/study-filtering-design.md)"
         )
     sql = _unquoted_sql(create_query)
     if sql is None or not re.match(r"\s*CREATE\s+MATERIALIZED\s+VIEW\b", sql, re.I):

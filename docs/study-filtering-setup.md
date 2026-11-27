@@ -1,6 +1,6 @@
 # Setting up study filtering (private portals)
 
-Steps to run with `CBIOPORTAL_MCP_STUDY_FILTERING=on`: each user sees the public studies plus the studies granted to their email. Public portals don't need this; they run with filtering `off` (see [access-control.md](access-control.md)). How the row policies work: [study-authz.md](study-authz.md).
+Steps to run with `CBIOPORTAL_MCP_STUDY_FILTERING=on`: each user sees the public studies plus the studies granted to their email. Public portals don't need this; they run with filtering `off` (see [access-control.md](access-control.md)). How the row policies work: [study-filtering-design.md](study-filtering-design.md).
 
 Emails below are placeholders. Real emails go only in the grant table, never in this repository or in committed env files.
 
@@ -156,4 +156,4 @@ Then through the MCP, signed in as a granted and an ungranted user: `list_studie
 
 - **Checks run at startup only.** Restart the MCP after any grant, role, policy or schema change. (Changes to `user_study_manual` don't need a restart.)
 - **Renamed copies can slip past the audit.** Other databases are recognised as study data by table and column names; a copy that renames both is not detected. The safest setup is an MCP user that reads only the protected database.
-- **Only manual grants exist today.** Token-based (JWT/Keycloak) grants are designed but not built ([study-authz.md](study-authz.md#future-per-email-jwt-source)).
+- **Only manual grants exist today.** Token-based (JWT/Keycloak) grants are designed but not built ([study-filtering-design.md](study-filtering-design.md#future-per-email-jwt-source)).

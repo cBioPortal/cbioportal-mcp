@@ -14,7 +14,7 @@ All four are required over HTTP/SSE: the server refuses to start if one is missi
 
 | Variable | Values | Meaning |
 |---|---|---|
-| `CBIOPORTAL_MCP_STUDY_FILTERING` | `off` / `on` | Filter studies per user (needs the row policies, see [setup](study-filtering-rollout.md)). |
+| `CBIOPORTAL_MCP_STUDY_FILTERING` | `off` / `on` | Filter studies per user (needs the row policies, see [setup](study-filtering-setup.md)). |
 | `CBIOPORTAL_MCP_AUTH_ENFORCEMENT` | `off` / `enforce` | `enforce`: every request needs a verified login. |
 | `CBIOPORTAL_MCP_AUTH_TEST_USERS` | comma-separated emails, may be empty | With enforcement `off`, these users get the full login checks (for trying it out). Ignored under `enforce`. |
 | `CBIOPORTAL_MCP_PUBLIC_DB_CHECK` | `off` / `enforce` | Run the public-database check at startup. |
@@ -70,7 +70,7 @@ Entries are compared case-insensitively, but whitespace counts (as in cBioPortal
 
 ## Study filtering
 
-Each user sees the public studies plus those granted to their email. ClickHouse enforces this with row policies, so it also holds for raw SQL. The server sends the user's verified email with every query. Setup, grants and rollback: [study-filtering-rollout.md](study-filtering-rollout.md). How it works and why: [study-authz.md](study-authz.md).
+Each user sees the public studies plus those granted to their email. ClickHouse enforces this with row policies, so it also holds for raw SQL. The server sends the user's verified email with every query. Setup, grants and rollback: [study-filtering-setup.md](study-filtering-setup.md). How it works and why: [study-filtering-design.md](study-filtering-design.md).
 
 Study data is served only when all of these hold:
 

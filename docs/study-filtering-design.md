@@ -1,6 +1,6 @@
 # How study filtering works
 
-Reference for the row-policy side of study filtering: what the admin tool creates in ClickHouse, why, and what the server checks at startup. For the switches and login see [access-control.md](access-control.md); for setup steps see [study-filtering-rollout.md](study-filtering-rollout.md).
+Reference for the row-policy side of study filtering: what the admin tool creates in ClickHouse, why, and what the server checks at startup. For the switches and login see [access-control.md](access-control.md); for setup steps see [study-filtering-setup.md](study-filtering-setup.md).
 
 ## Overview
 
@@ -134,7 +134,7 @@ WHERE database = '<db>' AND view = 'user_study';
 SYSTEM REFRESH VIEW <db>.user_study;   -- then SYSTEM WAIT VIEW <db>.user_study;
 ```
 
-Manual grants: see [study-filtering-rollout.md](study-filtering-rollout.md#4-grant-studies-to-users).
+Manual grants: see [study-filtering-setup.md](study-filtering-setup.md#4-grant-studies-to-users).
 
 ### Migrating from `user_study_refresh`
 
