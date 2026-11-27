@@ -1,144 +1,66 @@
-# Study filtering rollout runbook (private deployments)
+# Setting up study filtering (private portals)
 
-This runbook turns on `CBIOPORTAL_MCP_STUDY_FILTERING=on` for a **private**
-deployment: one whose ClickHouse database holds studies that not every
-logged-in user may see. The design and the full list of checks are in
-[`study-authz.md`](study-authz.md); this page is the operator checklist.
+Steps to run with `CBIOPORTAL_MCP_STUDY_FILTERING=on`: each user sees the public studies plus the studies granted to their email. Public portals don't need this; they run with filtering `off` (see [access-control.md](access-control.md)). How the row policies work: [study-authz.md](study-authz.md).
 
-**The public deployment keeps filtering `off` permanently.** The public clone
-(`scripts/apply_sql.sh` over `sql/`) has no gated studies and never gets row
-policies. P4's tool refuses any database name containing `public` unless you
-pass `--allow-public-database-name`. Do not pass it for the public clone.
-
-All emails below are placeholders (`@example.org`). Real tester emails belong
-only in the grant table (`user_study_manual`), never in this repository, in
-env files that are committed, or in tickets.
+Emails below are placeholders. Real emails go only in the grant table, never in this repository or in committed env files.
 
 ## 1. Prerequisites
 
-- **ClickHouse 24.10 or later.** The policies use `getSettingOrDefault`, and
-  the grant refresh is a refreshable materialized view. Tested on Docker 25.8
-  and 26.6, and on ClickHouse Cloud 26.6.1.
-- **`custom_settings_prefixes` includes `SQL_`.** It does by default (also on
-  Cloud). The MCP sends the caller's email as the custom setting
-  `SQL_cbio_user`.
-- **The MCP's ClickHouse user must be able to change settings per query
-  (`readonly=0`).** The MCP sends `readonly=1` together with `SQL_cbio_user`
-  on every study-data query. A user or settings profile that already forces
-  `readonly` rejects those per-query settings, and the startup check disables study data
-  (`SQL_cbio_user rejected`). Do not attach a read-only settings profile; the
-  user's grants keep it read-only instead (see §3).
-- **An admin ClickHouse user** that can `CREATE ROLE`, `CREATE ROW POLICY`,
-  `CREATE USER` and create tables/views in the protected database. Use it only
-  for the steps in §2 and §4, never as the MCP runtime user.
-- **Login.** `CBIOPORTAL_MCP_AUTH_ENFORCEMENT=enforce` needs Google OAuth (all
-  three `CBIOPORTAL_MCP_GOOGLE_*` variables) and/or the LibreChat bridge
-  (`CBIOPORTAL_MCP_BRIDGE_SECRET`). See the README's "Required login" section.
+- **ClickHouse 24.10 or later**, with `custom_settings_prefixes` including `SQL_` (the default, also on Cloud). Tested on 25.8, 26.6 and Cloud 26.6.1.
+- **A dedicated ClickHouse user for the MCP** that can change settings per query: no read-only settings profile. The MCP sends `readonly=1` itself on every query; grants (step 3) keep the user read-only.
+- **An admin ClickHouse user** that can create roles, row policies, users and tables in the protected database. Use it only for steps 2 and 4.
+- **Login**: Google OAuth and/or the LibreChat bridge ([access-control.md](access-control.md#login)).
 
-## 2. Generate and apply the row policies
+## 2. Apply the row policies
 
-Use P4's tool with admin credentials. Choose **one** policy target:
-
-- **Role target** (default role `cbioportal_mcp_study_restricted`): `apply`
-  creates the role; the runtime user gets the role and nothing else.
-- **User target** (`--policy-user <existing_user>`): the policies name an
-  existing runtime user directly. Use this when the runtime user is already
-  provisioned (for example it also reads other databases).
+Run the admin tool with admin credentials. Attach the policies either to a **role** (default `cbioportal_mcp_study_restricted`; the MCP user gets only this role) or directly to an **existing user** (`--policy-user`).
 
 ```bash
 export CLICKHOUSE_HOST=... CLICKHOUSE_PORT=8443 CLICKHOUSE_SECURE=true
 export CLICKHOUSE_ADMIN_USER=... CLICKHOUSE_ADMIN_PASSWORD=...
 
-# Role target
+# Role
 uv run python -m cbioportal_mcp.study_authz apply --database <protected_db> \
     --public-group <PUBLIC_GROUP> --app-name <app_name>
 CBIOPORTAL_MCP_RESTRICTED_PASSWORD=... uv run python -m cbioportal_mcp.study_authz \
     user-sql --user <mcp_user> --database <protected_db> --apply
 uv run python -m cbioportal_mcp.study_authz check --database <protected_db>
 
-# ...or user target
+# ...or an existing user
 uv run python -m cbioportal_mcp.study_authz apply --database <protected_db> \
     --public-group <PUBLIC_GROUP> --app-name <app_name> --policy-user <mcp_user>
-uv run python -m cbioportal_mcp.study_authz check --database <protected_db> \
-    --target <mcp_user>
+uv run python -m cbioportal_mcp.study_authz check --database <protected_db> --target <mcp_user>
 ```
 
-`render` (same flags as `apply`) prints the SQL instead of running it.
+- `--public-group`: cBioPortal's `always_show_study_group`. A study is public when one of its `groups` entries equals it exactly (case-insensitive, spaces count).
+- `--app-name`: cBioPortal's `app.name`, kept for future token-based grants.
+- `render` (same flags as `apply`) prints the SQL instead of running it.
+- `apply` refuses a database that has row policies it didn't create, and won't move its policies to another role or user. Re-applying is safe. Run `check` after every `apply`, and let only one person administer row policies at a time.
+- The tool refuses database names containing `public` (so it can't touch the public clone) unless you pass `--allow-public-database-name`.
 
-**`--public-group` and `--app-name` have no defaults.** Pass the same values
-the cBioPortal webapp uses:
+**Databases set up before the `user_study` view** (a `user_study` table plus a `user_study_refresh` view) are refused by `apply`, `check` and the server. Migrate the copy that serves no traffic with `apply --migrate` (same flags): it rebuilds `user_study`, keeps the manual grants and waits for the first refresh. Then `check`, restart the MCP and switch traffic.
 
-- `--public-group`: cBioPortal's `always_show_study_group`. A study is public
-  when one whole entry of its `cancer_study.groups` (split on `;`, compared
-  case-insensitively, **not trimmed**) equals this value. `'A; PUBLIC'` does
-  not make a study public because of the space.
-- `--app-name`: cBioPortal's `app.name`. Recorded now for the future JWT grant
-  source (cBioPortal `<app>:<group>` authority matching); it does not affect
-  the manual source.
+## 3. Grants for the MCP user
 
-`apply` refuses a database that already has row policies it did not create
-(any policy not named `cbioportal_mcp_*`), and refuses to move its policies to
-a different target. Re-applying to the same target is safe. Run `check` after
-every `apply`, and let only one person or job administer row policies on the
-database at a time.
-
-### Migrating a database applied before the `user_study` view
-
-Older databases have a plain `user_study` table written by a separate
-`user_study_refresh` view (`REFRESH ... TO user_study`). That refresh's table
-swap could make filtered queries silently return no rows (measured: 31/400 on
-25.8, 23/400 on 26.6 during a forced refresh loop). `apply`, `check` and the
-MCP startup check now refuse that layout; `apply` says so in one line and
-changes nothing. To migrate:
-
-1. Pick the copy that serves **no traffic**: the inactive blue/green
-   database, or this database with study filtering off. Between the drop and
-   the create, filtered queries fail with `UNKNOWN_TABLE` (not silent zeros);
-   after the create and until the first refresh finishes, `user_study` is
-   empty, so filtered queries see no studies at all.
-2. `uv run python -m cbioportal_mcp.study_authz apply --migrate --database <protected_db> --public-group <PUBLIC_GROUP> --app-name <app_name> [--policy-user <mcp_user>]`
-   drops `user_study_refresh` and the `user_study` table, creates the
-   `user_study` refreshable view, re-applies the policies and waits for the
-   first refresh. `user_study_manual` is kept.
-3. `check`, then restart the MCP (its startup check re-runs) and switch traffic.
-
-## 3. Grants for the MCP runtime user
-
-The runtime user (or, for a role target, the role) needs exactly:
+The MCP user (or its role) needs exactly what `apply` grants:
 
 ```sql
 GRANT SHOW ROW POLICIES ON <protected_db>.* TO <target>;
 GRANT SELECT ON <protected_db>.* TO <target>;
 ```
 
-`apply` issues both, after every policy, so the target never sees an
-unfiltered table.
+Anything more disables study data at startup:
 
-- **No `system` grants of any kind** (`system.*`, `system.query_log`,
-  `system.grants`, ...). The startup check degrades the server for these grants.
-- **No table- or column-level grants**, on any database. Only database-wide
-  `ON <db>.*` grants are accepted; narrower grants hide columns from the
-  startup audit, so they disable study data.
-- No global (`*.*`) grants, no `GRANT OPTION` / `ADMIN OPTION`, no write,
-  DDL, `REMOTE`/table-function, `dictGet` or `CREATE TEMPORARY TABLE`
-  privileges.
-- Role target: the user's only direct grant is the role, which must be a
-  **default** role. A direct `SELECT` next to the role lets `SET ROLE NONE`
-  bypass the policies; startup disables study data. `user-sql` produces this shape.
+- grants on `system` tables, global (`*.*`) grants, `GRANT OPTION`/`ADMIN OPTION`;
+- table- or column-level grants on any database (only whole-database `ON <db>.*` grants are accepted);
+- writes, DDL, table functions, `dictGet`, temporary tables;
+- for a role: a direct `SELECT` next to the role (`SET ROLE NONE` would bypass the policies), or a role that isn't a default role. `user-sql` sets this up correctly.
 
-**Recommended: the MCP database user can read only the protected database.**
-Every other database the user can `SELECT` from is audited at startup, and
-any that looks like study data must either be covered by our policies or be
-declared public in `CBIOPORTAL_MCP_STUDY_FILTERING_PUBLIC_DATABASES` (§5).
-The simplest safe setup is a dedicated user with nothing else.
+**Simplest: the MCP user reads only the protected database.** Every other readable database is audited at startup; one that looks like study data must be covered by policies or listed in `CBIOPORTAL_MCP_STUDY_FILTERING_PUBLIC_DATABASES`.
 
-## 4. Populate grants (`user_study`)
+## 4. Grant studies to users
 
-The row policies read only `<protected_db>.user_study`. Never write it
-directly: it is itself a refreshable materialized view that rebuilds itself from
-
-- the public studies (stored under the empty email `''`), and
-- `user_study_manual`, which an admin maintains:
+The policies read `user_study`, a view that rebuilds itself every 5 minutes from the public studies and from `user_study_manual`, which you maintain:
 
 ```sql
 INSERT INTO <protected_db>.user_study_manual (email, grant_key, valid_until, note)
@@ -152,29 +74,19 @@ WHERE email = 'tester-a@example.org' AND grant_key = 'TEAM_A';
 SYSTEM REFRESH VIEW <protected_db>.user_study;
 ```
 
-`grant_key` is a study id, a whole `cancer_study.groups` entry, or `ALL` /
-`ALL_TCGA` / `ALL_NCI_TARGET`. Emails are compared lower-cased; the
-MCP sends the verified login email lower-cased too.
-
-**Grants refresh every 5 minutes** (`apply --refresh-minutes`, default 5).
-New grants and revocations take effect at the next refresh, with no MCP
-restart. If the refresh stops, private rows expire after the grace period
-(`--private-grace-minutes`, default 15) and only public studies stay visible.
-`check` reports a failing refresh.
+`grant_key` is a study id, a whole `groups` entry, or `ALL` / `ALL_TCGA` / `ALL_NCI_TARGET`. Emails are compared lower-cased. Grant changes need no MCP restart. If the refresh stops, private grants expire after 15 minutes (`--private-grace-minutes`) and only public studies stay visible; `check` reports a failing refresh.
 
 ## 5. Configure and start the MCP
 
 ```bash
-# Connect as the runtime user, to the protected database.
-export CLICKHOUSE_HOST=... CLICKHOUSE_PORT=8443 CLICKHOUSE_SECURE=true
 export CLICKHOUSE_USER=<mcp_user> CLICKHOUSE_PASSWORD=...
 export CLICKHOUSE_DATABASE=<protected_db>
 
 export CBIOPORTAL_MCP_STUDY_FILTERING=on
 export CBIOPORTAL_MCP_AUTH_ENFORCEMENT=enforce
 export CBIOPORTAL_MCP_PUBLIC_DB_CHECK=enforce
-export CBIOPORTAL_MCP_AUTH_TEST_USERS=          # must be set; ignored under enforce
-export CBIOPORTAL_MCP_STUDY_FILTERING_PUBLIC_DATABASES=''   # see below
+export CBIOPORTAL_MCP_AUTH_TEST_USERS=
+export CBIOPORTAL_MCP_STUDY_FILTERING_PUBLIC_DATABASES=''
 
 # Login: Google OAuth and/or the LibreChat bridge
 export CBIOPORTAL_MCP_GOOGLE_CLIENT_ID=... CBIOPORTAL_MCP_GOOGLE_CLIENT_SECRET=...
@@ -182,235 +94,66 @@ export CBIOPORTAL_MCP_GOOGLE_BASE_URL=https://<this-server>
 # export CBIOPORTAL_MCP_BRIDGE_SECRET=...
 ```
 
-With `CBIOPORTAL_MCP_STUDY_FILTERING=on`, study data remains blocked unless
-**all** of these hold (the server stays running in degraded mode on failure):
+`CBIOPORTAL_MCP_STUDY_FILTERING_PUBLIC_DATABASES`: leave it `''` when the MCP user reads only the protected database. Otherwise list the other readable databases that hold **only data every logged-in user may see**. Listing grants nothing and never overrides the startup checks. Never list a private copy to make a startup error go away.
 
-1. `CBIOPORTAL_MCP_AUTH_ENFORCEMENT=enforce`;
-2. `CBIOPORTAL_MCP_PUBLIC_DB_CHECK=enforce`;
-3. `CBIOPORTAL_MCP_STUDY_FILTERING_PUBLIC_DATABASES` is explicitly set;
-4. the database-side startup check passes (study-authz.md, "Server startup
-   check").
-
-**`CBIOPORTAL_MCP_STUDY_FILTERING_PUBLIC_DATABASES`** has no default. Set it to
-`''` when the runtime user reads only the protected database (recommended).
-Otherwise list, comma-separated, the other readable databases that hold
-**only data every logged-in user may see**. Listing a database does not grant
-access and never overrides the unsafe-object checks. Never list a private
-source copy to clear degraded status.
-
-The startup audit now also recognizes `sample_id`, `sample_list`, `sample_unique_id`, `patient_unique_id`, and `genetic_profile_stable_id` in other readable databases, so operators may need to add affected databases that contain only public data to `CBIOPORTAL_MCP_STUDY_FILTERING_PUBLIC_DATABASES`.
-
-**Success** looks like these INFO lines, in this order:
+A successful start logs:
 
 ```
-ClickHouse query pool: 4 workers
-🔐 Checking ClickHouse privileges for user '<mcp_user>' on DB '<protected_db>'.
-✅ ClickHouse permission checks passed for user '<mcp_user>' on DB '<protected_db>'.
 Study filtering: <mcp_user> is covered by the row policies on <protected_db> (role cbioportal_mcp_study_restricted, <N> objects)
-cBioPortal MCP startup: study_filtering=on transport=http
 cBioPortal MCP rollout switches: study_filtering=on auth_enforcement=enforce auth_test_users_count=0 public_db_check=enforce
 ```
 
-(`(user <mcp_user>, ...)` for a user target.) A study-filtering failure logs
-one redacted `CRITICAL` line at startup and leaves the server running. Every
-refused call logs one redacted line and returns an MCP tool/resource error,
-never an empty or zero result. Raw SQL, study lists, study/deployment guides
-(including static files), frequency tools and direct resource reads are all
-blocked, including public data. Login, schema listings and OncoTree remain
-available, with login admission still enforced as configured. No study cache
-is preloaded in degraded mode. Checks run once per process; fix configuration
-or grants and restart to retry.
-
-`GET /health` returns only `study_data_available` (boolean) and `reason`:
-`checks_pending`, `rollout_not_enforced`, `filtering_check_failed`,
-`public_db_check_failed`, `ready`, or `filtering_off`. Normal uvicorn startup
-binds the listening socket only
-after the lifespan and checks finish: probes during checks get connection
-refused, not HTTP 503. Hosts that skip the lifespan can reach the endpoint
-before checks and receive HTTP 503 (`checks_pending`). After normal startup
-it returns HTTP 200 even when degraded. This keeps Kubernetes readiness
-routing login and schema requests to a running server without restart loops. Operators must
-inspect the JSON availability flag or the startup log; HTTP 200 alone does
-not establish study-data availability. No identities, secrets, hosts or
-study counts appear in the response.
-
-Refused calls stop before the telemetry middleware and do **not** appear in
-tool metrics. Alert on the `Study data unavailable` refusal log line or on
-`/health` JSON with `study_data_available: false`. A probe that checks only
-HTTP status 200 will miss degraded mode.
-
-The general ClickHouse permission gate exits with code 2 on failure. An MCP
-already degraded by P10 skips that permission gate. Missing or invalid
-filtering/rollout switch values, login configuration errors and
-transport/stdio violations still refuse startup. Driver errors are reported
-by class and ClickHouse error code, never free-form text.
-
-Log records from the ClickHouse client stack (`mcp-clickhouse`,
-`clickhouse_connect`, `urllib3`) and from this package are scrubbed when they
-are created: credential values (URL userinfo; `password`, `passwd`, `pwd`,
-`secret`, `token`, `api_key`, `client_secret`, `authorization` keys with or
-without quotes and with `=` or `:`; the **whole** value of any
-`Authorization` / `Proxy-Authorization` header, whatever its scheme, including
-Digest parameter lists; bare Basic/Bearer/Digest credentials) are replaced
-with `<redacted>`. Redaction fails closed and may remove more than the secret:
-an unquoted `Authorization` value takes the rest of its line, including any
-neighbouring fields on it (and folded continuation lines); a quoted value that
-never closes, or closes mid-token, takes everything to the end of the message. WARNING-and-above records are collapsed to one physical
-line, with any traceback or stack folded into it after ` | `. A message that
-cannot be rendered is logged as `<unloggable message redacted>`; scrubbing
-never raises into the code that logs. Use the error code and check name to diagnose; reproduce with
-`clickhouse-client` as the runtime user when you need the full server text.
-
-### Public-database check (P10)
-
-With `CBIOPORTAL_MCP_STUDY_FILTERING=off` and
-`CBIOPORTAL_MCP_PUBLIC_DB_CHECK=enforce`, P10 checks the connected database once
-per startup, including when pods restart after a blue/green switch. It blocks study
-data if any study has `public = 0`, if any group entry falls outside the allowlist,
-or if an existing `authorities` table has rows. It splits `cancer_study.groups`
-on semicolons, drops empty entries, and compares case-insensitively with
-whitespace preserved, as cBioPortal does. An absent or empty `authorities` table
-passes.
-
-Derive the public portal allowlist from individual group entries on a verified
-public copy. Run this query against that copy and review the entries before
-setting the allowlist.
-
-```sql
-SELECT DISTINCT arrayJoin(splitByChar(';', ifNull(groups, ''))) AS group_entry
-FROM cancer_study
-WHERE group_entry != ''
-ORDER BY group_entry;
-```
-
-Set `CBIOPORTAL_MCP_PUBLIC_DB_ALLOWED_GROUPS` to those comma-separated values,
-preserving the whitespace in each entry. Use an explicitly empty string when
-no groups are allowed. The setting is required in this mode and ignored for all
-other switch combinations. With filtering `on`, the two enforcement switches
-are still required and the row-policy check runs.
-
-A rule failure, connection error, or query error leaves the server running in
-degraded mode. It logs one `CRITICAL` line identifying the failed check, blocks
-study-data tools and resources, sets `/health` to `study_data_available: false`
-with reason `public_db_check_failed`, and fires the Datadog monitor
-**Study data blocked**. Correct the database or configuration and restart to
-retry. Successful enforcement reports `ready`. With the public-database check
-`off`, a filtering-off deployment reports `filtering_off`.
+and `/health` shows `study_data_available: true, reason: ready`. On failure the server runs in degraded mode (see [access-control.md](access-control.md#when-something-fails-degraded-mode-and-health)); fix the cause and restart.
 
 ## 6. Verify
 
-After each restart, check `/health` for `study_data_available: true` and
-`reason: ready`, and inspect the startup log. Process uptime or HTTP 200 is
-insufficient. In a deliberately misconfigured test deployment, confirm
-`study_data_available: false`, a stable failure reason and actual MCP errors
-with no rows from both raw SQL and `list_studies`; public studies must also
-be blocked. Login, schema listings and OncoTree should remain usable.
-
-Run as the **runtime user** (an admin is in the policies' `ALL EXCEPT`
-catch-all and sees everything), e.g. with `clickhouse-client --user <mcp_user>`.
-Use a granted placeholder email, an ungranted one, and the empty email:
+As the **MCP user** (an admin sees everything), e.g. `clickhouse-client --user <mcp_user>`:
 
 ```sql
--- Granted: public studies plus the granted ones
+-- Granted: public + granted studies
 SELECT cancer_study_identifier FROM <protected_db>.cancer_study ORDER BY 1
 SETTINGS SQL_cbio_user = 'tester-a@example.org';
 
--- Ungranted: public studies only
+-- Ungranted, and no email at all: public studies only (identical results)
 SELECT cancer_study_identifier FROM <protected_db>.cancer_study ORDER BY 1
 SETTINGS SQL_cbio_user = 'nobody@example.org';
-
--- Empty email (what a query without identity gets): public studies only,
--- identical to the ungranted result
 SELECT cancer_study_identifier FROM <protected_db>.cancer_study ORDER BY 1
 SETTINGS SQL_cbio_user = '';
 
--- The grant tables leak nothing: only the caller's own rows and the public
--- rows in user_study; user_study_manual returns no rows.
+-- The grant tables leak nothing
 SELECT DISTINCT email FROM <protected_db>.user_study
-SETTINGS SQL_cbio_user = 'tester-a@example.org';      -- '' and tester-a only
+SETTINGS SQL_cbio_user = 'tester-a@example.org';   -- '' and tester-a only
 SELECT count() FROM <protected_db>.user_study_manual
-SETTINGS SQL_cbio_user = 'tester-a@example.org';      -- 0
+SETTINGS SQL_cbio_user = 'tester-a@example.org';   -- 0
 ```
 
-Then through the MCP, signed in as a granted and an ungranted account:
-`list_studies` shows the same split; a raw `clickhouse_run_select_query` over
-a gated table with no study filter returns gated rows only for the granted
-account; `get_study_guide` on a gated study is unavailable to the ungranted
-account; ungranted callers get the public-only note; and SQL that sets or
-reads `SQL_cbio_user` is rejected.
+Then through the MCP, signed in as a granted and an ungranted user: `list_studies` and raw SQL show the same split, `get_study_guide` on a gated study fails for the ungranted user, and SQL that sets or reads `SQL_cbio_user` is rejected.
 
 ## 7. Rollback
 
-Order matters. While the policies exist and the MCP sends no email, the
-runtime user sees only public studies in the protected database. **Once the
-policies are dropped, every principal that can still `SELECT` from the
-protected database reads every study.** Changing `CLICKHOUSE_DATABASE` is
-**not** enough: it only changes the default database, the old grant stays, and
-filtering-off SQL accepts fully qualified names such as
-`SELECT * FROM <protected_db>.cancer_study`.
+**Order matters.** Once the policies are dropped, anyone who can still `SELECT` from the protected database sees every study. Changing `CLICKHOUSE_DATABASE` is not enough: the grant stays, and fully qualified table names still work.
 
-1. Set `CBIOPORTAL_MCP_STUDY_FILTERING=off` and `CBIOPORTAL_MCP_PUBLIC_DB_CHECK=off`
-   and restart the MCP. Without `SQL_cbio_user`, the policies show the MCP only
-   public studies.
-   Verify `/health` reports `study_data_available: true`, `reason: filtering_off`,
-   and check the startup log. A previous degraded status does not survive restart.
-2. Remove the runtime access to the protected database, **before any policy is
-   dropped**, with exactly one of:
-   - **A. Revoke** (admin) from the policy target, i.e. the role for a role
-     target or the user for a user target:
-     ```sql
-     REVOKE SELECT, SHOW ROW POLICIES ON <protected_db>.* FROM <target>;
-     ```
-   - **B. Replace the credentials:** restart the MCP with a different
-     `CLICKHOUSE_USER` that has no grant on the protected database, then
-     `DROP USER <old_mcp_user>` (admin). The old user must go too: otherwise
-     anyone holding its password reads everything after step 4.
-3. Verify, as the runtime user the MCP now uses (e.g.
-   `clickhouse-client --user <mcp_user>`), that it can no longer read the
-   protected database:
+1. Set `CBIOPORTAL_MCP_STUDY_FILTERING=off` and `CBIOPORTAL_MCP_PUBLIC_DB_CHECK=off`, restart, and check `/health` shows `reason: filtering_off`. With no email sent, the policies show the MCP only public studies.
+2. Remove the MCP's access to the protected database **before dropping any policy**, either:
+   - `REVOKE SELECT, SHOW ROW POLICIES ON <protected_db>.* FROM <target>;` (the role or the user), or
+   - switch the MCP to a different `CLICKHOUSE_USER` with no access, and `DROP USER <old_mcp_user>`.
+3. Confirm nobody non-admin can still read it. As the MCP user: `CHECK GRANT SELECT ON <protected_db>.*` returns 0 and `SELECT count() FROM <protected_db>.cancer_study` fails with `ACCESS_DENIED`. As admin:
    ```sql
-   CHECK GRANT SELECT ON <protected_db>.*;               -- must return 0
-   SELECT count() FROM <protected_db>.cancer_study;     -- must fail: ACCESS_DENIED (497)
-   SHOW GRANTS FINAL;   -- no line may cover <protected_db>.* or *.*
-   ```
-   and, as admin, that no other non-admin principal still can:
-   ```sql
-   SELECT user_name, role_name, access_type, database
-   FROM system.grants
+   SELECT user_name, role_name, access_type, database FROM system.grants
    WHERE access_type IN ('SELECT', 'ALL') AND (database = '<protected_db>' OR database IS NULL);
    ```
-   Do not continue until both checks are clean.
-4. Drop the policies (admin). Generate the statements, review, then run them:
+4. Only then drop the policies (review the generated statements before running them):
    ```sql
    SELECT format('DROP ROW POLICY IF EXISTS `{}` ON `{}`.{};', short_name, database,
                  if(table = '', '*', concat('`', table, '`')))
    FROM system.row_policies
    WHERE database = '<protected_db>' AND startsWith(short_name, 'cbioportal_mcp_')
-   ORDER BY table = ''
-   FORMAT TSVRaw;
+   ORDER BY table = '' FORMAT TSVRaw;
    ```
-   (The database-wide policies have an empty `table`.) Optionally drop
-   `user_study` (the view; its inner tables go with it) and
-   `user_study_manual`, and the role.
-
-P4 only manages row policies it created. `apply` refuses a database that has
-row policies it did not create, so remove or migrate any such policy by hand
-before re-applying.
+   Optionally drop `user_study`, `user_study_manual` and the role.
 
 ## Known limits
 
-- **Startup-only check.** Grants, roles, policies, columns and engines are
-  inspected only when the MCP starts. **Restart the MCP after any grant,
-  policy, role or schema change** so the check runs against the new state.
-  (`user_study` grant changes do not need a restart.)
-- **Renamed study columns can evade the startup check.** Other readable
-  databases are classified as study data by table names and study-link column
-  names. A copy that renames both the table and every recognized linkage
-  column is not detected. Operators must make sure no other readable database
-  holds gated data under disguised names; the simplest guarantee is a runtime
-  user that reads only the protected database.
-- **JWT / Keycloak grant sources are not built yet.** Only the manual source
-  (`user_study_manual`) feeds `user_study` today; the JWT layout is reserved
-  (study-authz.md, "Future per-email (JWT) source").
-- **P10 checks only the configured database.** Control access to any other
-  databases through ClickHouse grants, including during rollback.
+- **Checks run at startup only.** Restart the MCP after any grant, role, policy or schema change. (Changes to `user_study_manual` don't need a restart.)
+- **Renamed copies can slip past the audit.** Other databases are recognised as study data by table and column names; a copy that renames both is not detected. The safest setup is an MCP user that reads only the protected database.
+- **Only manual grants exist today.** Token-based (JWT/Keycloak) grants are designed but not built ([study-authz.md](study-authz.md#future-per-email-jwt-source)).

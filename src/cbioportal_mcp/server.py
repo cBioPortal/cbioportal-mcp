@@ -332,7 +332,7 @@ def _validate_server_startup(transport=None):
     )
 
     enforce_public_db_check()
-    # On P10 failure, skip the separate permission check so an unreachable
+    # If the public-database check failed, skip the separate permission check so an unreachable
     # database still allows the degraded server to start.
     if availability.reason() != "public_db_check_failed":
         _validate_db_permissions(config)

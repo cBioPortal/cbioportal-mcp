@@ -281,7 +281,7 @@ def test_extra_open_policy_through_another_enabled_role_refused():
 
 
 def test_foreign_policy_widening_the_user_refused():
-    """P4's ownership rule: a policy not named cbioportal_mcp_* is OR-ed with ours."""
+    """The admin tool's ownership rule: a policy not named cbioportal_mcp_* is OR-ed with ours."""
     fake = FakeClickHouse()
     study = sqlgen.study_condition("cancer_study").replace(sqlgen.DB, DB)
     fake.policies.append(("team_view", "cancer_study", study, 0, False, (ROLE,), ()))
