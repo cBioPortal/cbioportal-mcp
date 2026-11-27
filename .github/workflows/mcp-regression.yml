@@ -2,8 +2,9 @@
 # Tests and workflow: https://github.com/cBioPortal/cbioportal-mcp-qa (mcp_tests/calls/mcp.yaml).
 # Label a PR `mcp-behavior-change` when the difference is intended; diffs are then report-only.
 #
-# On beta the baseline is the beta image, and the server needs its study-authz
-# switches set explicitly (all off here: no study filtering in CI).
+# The baseline is the image built from the PR's target branch (beta → :beta,
+# main → :latest). The server needs its study-authz switches set explicitly
+# (all off here: no study filtering in CI).
 name: MCP regression
 
 on:
@@ -16,7 +17,7 @@ jobs:
     with:
       server: mcp
       qa-ref: 8d9bb1a27ea8024b1bc1cd9130c47530a6a76a8c
-      baseline-image: cbioportal/mcp:beta
+      baseline-image: ${{ github.base_ref == 'beta' && 'cbioportal/mcp:beta' || 'cbioportal/mcp:latest' }}
       server-env: |
         CBIOPORTAL_MCP_STUDY_FILTERING=off
         CBIOPORTAL_MCP_AUTH_ENFORCEMENT=off
