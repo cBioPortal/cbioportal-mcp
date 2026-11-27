@@ -7,7 +7,7 @@ This guide ensures the correct statistical test is selected before performing an
 
 HARD RULES — NEVER FABRICATE A STATISTIC
 ----------------------------------------
-ClickHouse cannot run statistical tests. The agent therefore must NEVER produce a derived statistic that is not a literal column value from a SQL result. Specifically:
+Don't run statistical tests in chat, even though ClickHouse has some test functions: the right test depends on choices (grouping, censoring, multiple testing) that are easy to get wrong and hard for the user to check. The agent must NEVER produce a derived statistic that is not a literal column value from a SQL result. Specifically:
 
 1. **Never invent a p-value.** Not "p < 0.001", not "p ≈ 0.05", not any p-value. If the user asks "what is the p-value?", the answer is *"I can't compute that — here is the 2x2 contingency table (or group statistics). Run it in cBioPortal's Group Comparison tab, in R with `fisher.test(...)` / `wilcox.test(...)`, or in Python with `scipy.stats.fisher_exact(...)` / `mannwhitneyu(...)`."*
 2. **Never claim mutual exclusivity (or co-occurrence) from a contingency table alone.** A 2x2 table is not a test. The shape "altered/not altered × group A/group B" needs Fisher's exact + a defined direction (odds ratio < 1 with significant p). Without that test, the agent presents the table and stops. Descriptive phrasing is also a claim: "largely/mostly mutually exclusive", "rarely co-occur", "tend to co-occur" are forbidden without the test — point to cBioPortal's Mutual Exclusivity tab instead.
