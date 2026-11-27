@@ -5,7 +5,7 @@ This guide highlights frequent mistakes when analyzing cBioPortal data and provi
 
 ## Critical Pitfalls
 
-### 1. 🚨 CRITICAL MUTATION FREQUENCY ERRORS
+### 1. MUTATION FREQUENCY ERRORS
 
 #### ❌ WRONG: Using study-wide totals for gene frequencies
 ```sql
@@ -65,13 +65,13 @@ WHERE stgp.alteration_type = 'MUTATION_EXTENDED'
 -- STEP 3: Calculate frequency = numberOfAlteredSamplesOnPanel / numberOfProfiledSamples * 100
 ```
 
-#### 🚨 WORKFLOW REQUIREMENTS VIOLATIONS:
+#### WORKFLOW REQUIREMENTS VIOLATIONS:
 - **Missing denominator columns**: Must show gene-specific profiled samples per row
 - **Wrong table format**: Should be | Gene | # Mutations | # Samples | Profiled Samples | Sample % |
 - **Not replacing gene symbols**: Must replace 'TP53' with actual gene for each query
 - **Using study totals**: Never use genomic_event_derived for total sample counts
 
-### 2. 🚨 OFF-PANEL MUTATION INCLUSION
+### 2. OFF-PANEL MUTATION INCLUSION
 
 #### ❌ Wrong: Including off-panel mutations
 ```sql
@@ -87,7 +87,7 @@ FROM genomic_event_derived
 WHERE variant_type = 'mutation' AND off_panel = 0;
 ```
 
-### 3. 🚨 MUTATION STATUS FILTERING ERRORS
+### 3. MUTATION STATUS FILTERING ERRORS
 
 #### ❌ WRONG: Filtering mutation_status = 'SOMATIC'
 ```sql
@@ -115,7 +115,7 @@ WHERE variant_type = 'mutation' AND mutation_status != 'UNCALLED';
 
 **Germline-only**: filter with `upper(mutation_status) = 'GERMLINE'`. Spellings vary by study ('Germline', 'GERMLINE'); `= 'Germline'` drops whole studies (e.g. pog570_bcgsc_2020).
 
-### 4. 🚨 MISSING STUDY FILTERS
+### 4. MISSING STUDY FILTERS
 
 #### ❌ Wrong: Querying across all studies
 ```sql
@@ -135,7 +135,7 @@ WHERE variant_type = 'mutation' AND cancer_study_identifier = 'your_study_id'
 GROUP BY hugo_gene_symbol;
 ```
 
-### 5. 🚨 PATIENT VS SAMPLE CONFUSION
+### 5. PATIENT VS SAMPLE CONFUSION
 
 #### ❌ Wrong: Mixing patient and sample counts
 ```sql
@@ -164,7 +164,7 @@ FROM clinical_data_derived
 WHERE cancer_study_identifier = 'your_study_id';
 ```
 
-### 5b. 🚨 SAMPLE TYPE FILTERING ERRORS
+### 5b. SAMPLE TYPE FILTERING ERRORS
 
 #### ❌ WRONG: Using `sample_type` column instead of clinical attribute
 ```sql
@@ -214,7 +214,7 @@ ORDER BY sample_count DESC;
 **Critical Distinction:**
 | Column/Attribute | Location | Contains | Use For |
 |------------------|----------|----------|---------|
-| `sample.sample_type` | sample table | General class (e.g., "Primary Solid Tumor") | NOT for primary/metastatic queries |
+| `sample_derived.sample_type` | sample_derived | General class (e.g., "Primary Solid Tumor") | NOT for primary/metastatic queries |
 | `SAMPLE_TYPE` attribute | clinical_data_derived | Specific type (Primary, Metastasis, etc.) | Primary vs metastatic filtering |
 
 **Common SAMPLE_TYPE Values (clinical_data_derived):**
@@ -227,7 +227,7 @@ ORDER BY sample_count DESC;
 
 **Key Rule**: When asked about "primary samples", "metastatic samples", etc., ALWAYS use `clinical_data_derived` with `attribute_name = 'SAMPLE_TYPE'`. NEVER use the `sample.sample_type` column!
 
-### 5c. 🚨 FABRICATING OncoKB / DRIVER MUTATION ANNOTATIONS
+### 5c. FABRICATING OncoKB / DRIVER MUTATION ANNOTATIONS
 
 #### ❌ Wrong: Claiming mutations are OncoKB-annotated drivers without querying driver data
 ```sql
@@ -258,7 +258,7 @@ WHERE cancer_study_identifier = 'msk_impact_2017'
 
 -- Step 3: If driver columns do NOT exist or are empty for the study, inform the user:
 -- "Driver mutation annotations are not available in the current database.
---  Use the cBioPortal web interface with OQL DRIVER syntax (e.g., BRAF: DRIVER)"
+--  Use the cBioPortal web interface with OQL DRIVER syntax (e.g., BRAF: MUT_DRIVER)"
 ```
 
 `driver_filter` values and the full oncogenic-only workflow: mutation-frequency-guide, "Driver / Oncogenic Mutations Only".
@@ -271,6 +271,8 @@ If the driver query returns no rows (e.g. `driver_filter` is '' in all 78,142 ms
 - `BRAF: AMP_DRIVER` — OncoKB-annotated driver amplifications
 - `BRAF: HOMDEL_DRIVER` — OncoKB-annotated driver deletions
 
+Both `DRIVER` and `MUT_DRIVER` are correct; pick by the question. Use `MUT_DRIVER` when the user asks about mutations, `DRIVER` when they ask about any driver alteration (mutation, CNA or structural variant).
+
 **Key rules:**
 1. NEVER claim a mutation is an "OncoKB driver" without confirming from driver annotation data
 2. Always check for driver columns before answering driver mutation questions
@@ -279,7 +281,7 @@ If the driver query returns no rows (e.g. `driver_filter` is '' in all 78,142 ms
 
 ## Data Type Pitfalls
 
-### 6. 🚨 STRING VS NUMERIC COMPARISONS
+### 6. STRING VS NUMERIC COMPARISONS
 
 #### ❌ Wrong: Treating numbers as strings
 ```sql
@@ -296,7 +298,7 @@ SELECT * FROM clinical_data_derived
 WHERE attribute_name = 'AGE' AND toFloat64OrNull(attribute_value) > 50;
 ```
 
-### 7. 🚨 NULL VALUE HANDLING
+### 7. NULL VALUE HANDLING
 
 #### ❌ Wrong: Ignoring NULL values
 ```sql
@@ -319,7 +321,7 @@ WHERE attribute_name = 'AGE';
 
 ## Join Pitfalls
 
-### 8. 🚨 INCORRECT JOINS
+### 8. INCORRECT JOINS
 
 #### ❌ Wrong: Joining on wrong keys
 ```sql
@@ -337,7 +339,7 @@ FROM sample_derived s
 JOIN clinical_data_derived cd ON cd.sample_unique_id = s.sample_unique_id;
 ```
 
-### 9. 🚨 CARTESIAN PRODUCTS
+### 9. CARTESIAN PRODUCTS
 
 #### ❌ Wrong: Missing join conditions
 ```sql
@@ -357,7 +359,7 @@ JOIN clinical_data_derived c ON g.sample_unique_id = c.sample_unique_id
 WHERE g.cancer_study_identifier = 'your_study_id';
 ```
 
-### 22. 🚨 LEFT JOIN DOES NOT PRODUCE NULLs IN CLICKHOUSE
+### 22. LEFT JOIN DOES NOT PRODUCE NULLs IN CLICKHOUSE
 
 Unmatched right-side columns get their type's default value (`''` for String, `0` for numbers), not NULL. `WHERE r.col IS NULL` matches nothing and `CASE WHEN r.col IS NOT NULL` is always true, so every row silently lands in one group. `SETTINGS join_use_nulls=1` is rejected (queries run read-only).
 
@@ -400,7 +402,7 @@ If you must LEFT JOIN, test the default value instead: `WHERE t.patient_unique_i
 
 ## Performance Pitfalls
 
-### 10. 🚨 INEFFICIENT QUERIES
+### 10. INEFFICIENT QUERIES
 
 #### ❌ Wrong: Multiple subqueries
 ```sql
@@ -421,7 +423,7 @@ FROM genomic_event_derived
 GROUP BY hugo_gene_symbol;
 ```
 
-### 10b. 🚨 RESOLVING STUDY IDENTIFIERS VIA A SUBQUERY ON A FACT TABLE
+### 10b. RESOLVING STUDY IDENTIFIERS VIA A SUBQUERY ON A FACT TABLE
 
 `cancer_study` is a 539-row dimension table with every `cancer_study_identifier`
 in the deployment. `genetic_alteration_derived`, `genomic_event_derived`, and
@@ -462,7 +464,7 @@ find the distinct values.
 
 ## CNA and Column Name Pitfalls
 
-### 11. 🚨 CNA VALUES ARE NUMERIC, NOT STRINGS
+### 11. CNA VALUES ARE NUMERIC, NOT STRINGS
 
 #### ❌ Wrong: Using string values for CNA
 ```sql
@@ -482,7 +484,7 @@ WHERE cna_alteration = -2;  -- -2 = Homozygous Deletion
 
 `genomic_event_derived` stores only 2 and -2. For shallow deletion (-1), gain (1) or diploid (0), query `genetic_alteration_derived WHERE profile_type = 'gistic'` — see the CNA section of `cbioportal://mutation-frequency-guide`. Zero rows for `cna_alteration = -1` does not mean no shallow deletions.
 
-### 12. 🚨 WRONG COLUMN NAMES
+### 12. WRONG COLUMN NAMES
 
 #### ❌ Wrong: Using non-existent column names
 ```sql
@@ -504,7 +506,7 @@ SELECT mutation_variant FROM genomic_event_derived;
 
 ## ClickHouse-Specific Pitfalls
 
-### 13. 🚨 CTE COLUMN REFERENCE ISSUES
+### 13. CTE COLUMN REFERENCE ISSUES
 
 ClickHouse has limitations with CTEs - you can't always reference CTE column aliases in outer expressions.
 
@@ -513,7 +515,7 @@ ClickHouse has limitations with CTEs - you can't always reference CTE column ali
 -- MAY FAIL - CTE alias reference issues
 WITH stats AS (
     SELECT patient_id, MAX(CASE WHEN gene='TP53' THEN 1 ELSE 0 END) as tp53
-    FROM mutations GROUP BY patient_id
+    FROM genomic_event_derived WHERE variant_type = 'mutation' GROUP BY patient_unique_id
 )
 SELECT SUM(tp53) FROM stats;  -- 'tp53' may not be recognized
 ```
@@ -523,11 +525,11 @@ SELECT SUM(tp53) FROM stats;  -- 'tp53' may not be recognized
 -- CORRECT - Use subquery for complex aggregations
 SELECT SUM(tp53) FROM (
     SELECT patient_id, MAX(CASE WHEN gene='TP53' THEN 1 ELSE 0 END) as tp53
-    FROM mutations GROUP BY patient_id
+    FROM genomic_event_derived WHERE variant_type = 'mutation' GROUP BY patient_unique_id
 );
 ```
 
-### 14. 🚨 PREMATURELY DECLARING SOMETHING OUT OF SCOPE
+### 14. PREMATURELY DECLARING SOMETHING OUT OF SCOPE
 
 #### ❌ Wrong: Immediately saying something is out of scope without checking
 ```
@@ -556,7 +558,7 @@ WHERE r.resource_scope = 'SAMPLE' AND cs.cancer_study_identifier ILIKE '%htan%';
 
 **Key rule:** cBioPortal stores external resource links in `resource` (with `resource_scope` values `SAMPLE`, `PATIENT`, or `STUDY`) and `resource_definition` tables. Always check these before saying something is out of scope.
 
-### 15. 🚨 HALLUCINATED TABLES OR COLUMNS
+### 15. HALLUCINATED TABLES OR COLUMNS
 
 #### ❌ Wrong: Querying tables or columns that don't exist
 ```sql
@@ -615,7 +617,7 @@ FROM a JOIN b USING (sample_unique_id);
 -- full working pattern, or cbioportal://gene-expression-guide.
 ```
 
-### 16. 🚨 SILENT QUERY SUBSTITUTION ("did you mean...")
+### 16. SILENT QUERY SUBSTITUTION ("did you mean...")
 
 When the user's wording differs from canonical terminology (e.g. "V600V" looks like "V600E" with a typo, or "point mutation" sounds like "missense"), it is forbidden to silently rewrite the question and answer the rewritten version. Doing so produces an answer that looks confident but is for a different question — the user cannot tell what was changed.
 
@@ -651,7 +653,7 @@ For an unusual-looking variant the user may have typed deliberately:
 
 **Promoter mutations.** TERT promoter variants (C228T, C250T) are *not* missense — they sit upstream of the coding sequence. Don't search for them with a missense filter, and don't count all `TERT` mutations as promoter mutations. First inspect the study's promoter profiles and available columns. See `mutation-frequency-guide.md` for the canonical pattern.
 
-### 17. 🚨 FLAWED PREMISE OR NONEXISTENT DATA FIELD
+### 17. FLAWED PREMISE OR NONEXISTENT DATA FIELD
 
 If the user's question relies on a premise that conflicts with cBioPortal data or schema, surface that problem before running adjacent analyses.
 
@@ -673,7 +675,7 @@ Use this pattern when:
 
 Do not query unrelated genes or "helpful" substitutes unless you state why and the user accepts the substitution.
 
-### 17b. 🚨 IMPLIED LITERATURE REVIEW FOR RARE VARIANTS
+### 17b. IMPLIED LITERATURE REVIEW FOR RARE VARIANTS
 
 Do not present a rare-variant answer as though you reviewed papers or clinical guidelines when the only available evidence came from cBioPortal.
 
@@ -694,7 +696,7 @@ Correct workflow:
 4. If no external-source tool was used, do not say "in the literature" or "studies have shown."
 5. End with a clear handoff for biological significance or clinical interpretation.
 
-### 17c. 🚨 AMBIGUOUS ACC / ADENOID CYSTIC CARCINOMA SCOPES
+### 17c. AMBIGUOUS ACC / ADENOID CYSTIC CARCINOMA SCOPES
 
 `ACC` is ambiguous. It can mean adrenocortical carcinoma (`ACC`), adenoid cystic carcinoma of the salivary gland (`ACYC`), adenoid cystic breast cancer (`ACBC`), or other site-specific entities. When the user names an anatomical site, lock every downstream query and narrative summary to the matching OncoTree code.
 
@@ -718,7 +720,7 @@ After resolving the site-specific OncoTree code, quote it back to the user and u
 
 If any result row or narrative claim comes from another `cancer_type_detailed`, drop it or explicitly label it as outside the requested scope.
 
-### 17d. 🚨 LEFT- VS RIGHT-SIDED COLORECTAL CANCER
+### 17d. LEFT- VS RIGHT-SIDED COLORECTAL CANCER
 
 Left-sided vs right-sided colorectal cancer is an anatomical/embryological distinction. It is not the same as colon vs rectum.
 
@@ -741,7 +743,7 @@ If the deployment/study only has `Colon` and `Rectum`, answer:
 
 > I do not see the anatomical subsite detail needed to compare left- vs right-sided CRC in this study. I should not substitute colon-vs-rectum, because that is a different comparison.
 
-### 18. 🚨 OUT-OF-SCOPE DRIFT AFTER USER PUSHBACK
+### 18. OUT-OF-SCOPE DRIFT AFTER USER PUSHBACK
 
 If you decline a request because it is outside cBioPortal scope, hold that boundary when the user rephrases or pushes gently.
 
@@ -760,7 +762,7 @@ For external code failures:
 
 > That error is in an external Databricks/PySpark workflow, not in cBioPortal MCP. I can't debug that pipeline here, but I can help retrieve the cBioPortal data inputs you would need for your analysis.
 
-### 19. 🚨 MISLEADING OUTPUT PROMISES
+### 19. MISLEADING OUTPUT PROMISES
 
 Do not promise outputs the MCP server cannot produce.
 
@@ -768,7 +770,7 @@ Do not promise outputs the MCP server cannot produce.
 - CSV export: provide a compact table or query; do not claim to create a downloadable file.
 - Large patient-level dumps: summarize and offer a bounded query with `LIMIT`, or point to cBioPortal/DataHub download workflows.
 
-### 20. 🚨 MALFORMED TABLES AND UNCLEAR QUERY ERRORS
+### 20. MALFORMED TABLES AND UNCLEAR QUERY ERRORS
 
 When a query returns tabular data, keep columns aligned with values. Prefer JSON or a compact Markdown table generated directly from query column names.
 
@@ -811,7 +813,7 @@ Example:
 24. **Do not promise unavailable outputs** — provide data/handoffs instead of claiming to create plots, CSV files, or external apps.
 25. **LEFT JOIN yields '' / 0, not NULL** — use `IN (SELECT …)` / `NOT IN (SELECT …)` for group membership (pitfall #22)
 
-### 21. 🚨 ENUMERATION / CATALOG QUESTIONS TRIGGER SCHEMA EXPLORATION
+### 21. ENUMERATION / CATALOG QUESTIONS TRIGGER SCHEMA EXPLORATION
 
 Questions that ask *"what X is available"* or *"what kind of Y are there"* are catalog/enumeration questions. A first-class list tool answers them in ONE call. Do not schema-explore.
 
@@ -846,7 +848,7 @@ User: *"What kind of cancer are there in the database?"*
 
 ---
 
-### 23. 🚨 A VERIFIED ZERO IS AN ANSWER
+### 23. A VERIFIED ZERO IS AN ANSWER
 
 A well-formed query that returns 0 rows or a count of 0 is often the correct result (for example, no patient with one diagnosis appears in a second cohort even though the cohorts overlap overall). Do not keep rebuilding the query to "fix" it.
 
@@ -855,7 +857,7 @@ A well-formed query that returns 0 rows or a count of 0 is often the correct res
 3. Do not re-derive the same count with different join forms, hex-dump ids, or re-count each side repeatedly. If three differently written queries agree, stop and answer.
 4. Background claims in a guide such as "~96% of patients are also in study X" describe the cohorts as a whole, not any one subtype, so they do not contradict a 0 for a subtype.
 
-### 24. 🚨 CLICKHOUSE DIALECT: FUNCTION NAMES, SUBQUERIES, UNION, ALIASES
+### 24. CLICKHOUSE DIALECT: FUNCTION NAMES, SUBQUERIES, UNION, ALIASES
 
 Most failed queries are SQL habits from other databases. ClickHouse function names are **case-sensitive** and a few common ones are spelled differently.
 
