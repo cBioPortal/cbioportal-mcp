@@ -1,6 +1,7 @@
 import os
 from unittest.mock import Mock, patch
 
+import pytest
 from key_value.aio.stores.redis import RedisStore
 from key_value.aio.wrappers.encryption import FernetEncryptionWrapper
 
@@ -31,19 +32,22 @@ def test_returns_none_when_no_google_env_set():
         assert _build_auth_provider() is None
 
 
-def test_returns_none_when_client_id_missing():
+def test_rejects_when_client_id_missing():
     with patch.dict(os.environ, _without("CBIOPORTAL_MCP_GOOGLE_CLIENT_ID"), clear=True):
-        assert _build_auth_provider() is None
+        with pytest.raises(ValueError, match="Partial Google OAuth"):
+            _build_auth_provider()
 
 
-def test_returns_none_when_client_secret_missing():
+def test_rejects_when_client_secret_missing():
     with patch.dict(os.environ, _without("CBIOPORTAL_MCP_GOOGLE_CLIENT_SECRET"), clear=True):
-        assert _build_auth_provider() is None
+        with pytest.raises(ValueError, match="Partial Google OAuth"):
+            _build_auth_provider()
 
 
-def test_returns_none_when_base_url_missing():
+def test_rejects_when_base_url_missing():
     with patch.dict(os.environ, _without("CBIOPORTAL_MCP_GOOGLE_BASE_URL"), clear=True):
-        assert _build_auth_provider() is None
+        with pytest.raises(ValueError, match="Partial Google OAuth"):
+            _build_auth_provider()
 
 
 def test_builds_google_provider_when_all_three_set():

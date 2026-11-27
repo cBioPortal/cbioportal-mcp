@@ -40,7 +40,15 @@ export CLICKHOUSE_USER=your-username
 export CLICKHOUSE_PASSWORD=your-password
 export CLICKHOUSE_DATABASE=your-cbioportal-database  # see "Preparing the database" below
 export CLICKHOUSE_SECURE=true  # or false for insecure connections
-export CLICKHOUSE_MCP_SERVER_TRANSPORT=stdio # or http or sse
+# Access control: all four required, "off" for a public portal (see below).
+export CBIOPORTAL_MCP_STUDY_FILTERING=off
+export CBIOPORTAL_MCP_AUTH_ENFORCEMENT=off
+export CBIOPORTAL_MCP_AUTH_TEST_USERS=
+export CBIOPORTAL_MCP_PUBLIC_DB_CHECK=off
+export CLICKHOUSE_MCP_SERVER_TRANSPORT=http # default; or sse
+# Local stdio: set both of these.
+# export CLICKHOUSE_MCP_SERVER_TRANSPORT=stdio
+# export CBIOPORTAL_MCP_LOCAL_DEV=1
 # Optional: mount the HTTP endpoint under a sub-path (default: /mcp).
 # Set when reverse-proxied behind a prefix so trailing-slash redirects
 # include it, e.g. /db/mcp when served at https://host/db/mcp.
@@ -60,6 +68,18 @@ export CLICKHOUSE_MCP_SERVER_TRANSPORT=stdio # or http or sse
 # cbioportal_mcp with a different pool size, the server refuses to start.
 # export CBIOPORTAL_MCP_MAX_CONCURRENT_QUERIES=4
 ```
+
+### Access control
+
+The four `CBIOPORTAL_MCP_*` switches above choose between:
+
+- **off**: no extra checks. Every current deployment runs this way.
+- **public-database check**: refuse to serve study data if the database contains private studies.
+- **study filtering**: each user sees public studies plus those granted to their email, enforced by ClickHouse row policies. Needs login (Google OAuth and/or the LibreChat bridge).
+
+They have no defaults over HTTP: a missing or misspelled value refuses startup. If a check fails at startup, the server keeps running but blocks study data; `GET /health` reports `study_data_available` and a `reason`.
+
+Details: [docs/access-control.md](docs/access-control.md) (switches, login, health), [docs/study-filtering-setup.md](docs/study-filtering-setup.md) (setting up filtering), [docs/study-filtering-design.md](docs/study-filtering-design.md) (how the row policies work).
 
 ### Datadog Tool Metrics
 
@@ -120,7 +140,8 @@ For an end-to-end reference deployment (Kubernetes CronJob that handles the clon
 To connect to the MCP server and see requests and replies, use MCP Inspector.
 You can run it with:
 ```bash
-fastmcp dev inspector src/cbioportal_mcp/server.py
+CBIOPORTAL_MCP_STUDY_FILTERING=off CBIOPORTAL_MCP_LOCAL_DEV=1 \
+  CLICKHOUSE_MCP_SERVER_TRANSPORT=stdio fastmcp dev inspector src/cbioportal_mcp/server.py
 ```
 
 ### Running the Server
@@ -136,7 +157,9 @@ cbioportal-mcp
 ```bash
 # Build the image
 docker build -t cbioportal-mcp -f docker/Dockerfile .
-docker run -i -p 8000:8000 cbioportal-mcp
+docker run -p 8000:8000 -e CBIOPORTAL_MCP_STUDY_FILTERING=off \
+  -e CBIOPORTAL_MCP_AUTH_ENFORCEMENT=off -e CBIOPORTAL_MCP_AUTH_TEST_USERS= \
+  -e CBIOPORTAL_MCP_PUBLIC_DB_CHECK=off cbioportal-mcp
 ```
 
 ### Chat eval (CI)

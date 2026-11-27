@@ -1,0 +1,102 @@
+-- ============================================================================
+-- study-authz 0: user_study (a refreshable materialized view) and its manual source
+-- ============================================================================
+-- TEMPLATE. Render and apply with
+--   uv run python -m cbioportal_mcp.study_authz apply --database <db> \
+--       --public-group <group> --app-name <app>
+-- (see docs/study-filtering-design.md). Placeholders:
+--   __CLICKHOUSE_DATABASE__   target database (blue/green name)
+--   __PUBLIC_GROUP__          cBioPortal always_show_study_group (required)
+--   __APP_NAME__              cBioPortal app.name (required; recorded for the
+--                             future JWT source's claim matching)
+--   __REFRESH_MINUTES__       refresh interval
+--   __PRIVATE_GRACE_MINUTES__ how long a private row outlives its last refresh
+-- The two query slots below (USER_STUDY_QUERY, double underscores) take
+-- user-study-query.sql.tmpl, inlined by sqlgen.user_study_template() before
+-- the placeholders above are filled.
+--
+-- Never part of sql/ or the daily public clone: filtering stays OFF there.
+-- Requires ClickHouse >= 24.10 (refreshable materialized views without the
+-- experimental flag; the row policies use getSettingOrDefault).
+--
+-- Layout: user_study is the ONLY object the row policies read. It is itself a
+-- refreshable materialized view WITHOUT `TO`: its rows live in an implicit
+-- inner table (.inner_id.<uuid of user_study>) and its refresh is the only
+-- writer. Every source lands in its own input table and is folded in by the
+-- refresh, which builds .tmp.inner_id.<uuid> and swaps it with the inner table,
+-- so readers always see one complete snapshot.
+--   * public  - rows with email = '' for every study whose cancer_study.groups
+--               contains __PUBLIC_GROUP__. valid_until is the far future, so a
+--               failing refresh never removes public access.
+--   * manual  - user_study_manual, maintained by an admin.
+--   * (future) jwt - user_study_jwt, appended by an INSERT-only writer; the
+--               refresh keeps only each email's newest token (by issued_at).
+--               Adding it is one more UNION ALL branch in `grants` in
+--               user-study-query.sql.tmpl; no policy or user_study schema
+--               change (docs/study-filtering-design.md).
+--
+-- Why not `CREATE TABLE user_study` + `... REFRESH ... TO user_study` (the
+-- previous layout): there the refresh swaps the table named user_study itself.
+-- A running query resolves user_study early and looks its row policy up by
+-- name later; when the swap lands in between, the query holds a table now
+-- named .tmp.inner_id.<uuid>, which only the database-wide USING 0 covers, so
+-- every policy subquery `IN (SELECT ... FROM user_study)` silently returned 0
+-- rows (measured on 25.8 and 26.6). Here the swap happens behind the view:
+-- the policy is looked up on user_study, which never changes name.
+--
+-- Fail closed: private rows get valid_until = least(source valid_until,
+-- refresh time + __PRIVATE_GRACE_MINUTES__ minutes). If the refresh stops or
+-- keeps failing, user_study keeps its last snapshot, every private row expires
+-- within the grace period, and the public rows remain.
+--
+-- Idempotent: CREATE ... IF NOT EXISTS keeps user_study_manual (the manual
+-- grants) and user_study with its current snapshot. Re-apply never drops
+-- user_study: the ALTERs below change its query, interval, definer and comment
+-- in place, so readers keep the old snapshot until the next refresh, and the
+-- file then waits for one refresh. A database with the previous layout (a
+-- plain user_study table and/or user_study_refresh) is refused by apply unless
+-- --migrate is given (docs/study-filtering-design.md, "Migrating from user_study_refresh").
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS __CLICKHOUSE_DATABASE__.user_study_manual
+(
+    `email` String COMMENT 'Caller email (lower-cased by the refresh). Must not be empty.',
+    `grant_key` String COMMENT 'A cancer_study_identifier, a whole cancer_study.groups entry, or ALL / ALL_TCGA / ALL_NCI_TARGET; case-insensitive.',
+    `valid_until` DateTime64(3, 'UTC') COMMENT 'Grant ends at this instant.',
+    `note` String DEFAULT '' COMMENT 'Free text: who asked, ticket, etc.'
+)
+ENGINE = MergeTree
+ORDER BY (email, grant_key);
+
+CREATE MATERIALIZED VIEW IF NOT EXISTS __CLICKHOUSE_DATABASE__.user_study
+REFRESH EVERY __REFRESH_MINUTES__ MINUTE
+(
+    `email` String COMMENT 'Lower-cased caller email; empty string = every caller (public studies).',
+    `cancer_study_identifier` String COMMENT 'Study the email may read.',
+    `valid_until` DateTime64(3, 'UTC') COMMENT 'The row grants nothing from this instant on.',
+    `source` LowCardinality(String) COMMENT 'public | manual | jwt (future).',
+    `issued_at` DateTime64(3, 'UTC') COMMENT 'Refresh time (public/manual) or token issued-at (jwt) that produced the row.'
+)
+ENGINE = MergeTree
+ORDER BY (email, cancer_study_identifier)
+DEFINER = CURRENT_USER SQL SECURITY DEFINER
+AS
+__USER_STUDY_QUERY__;
+
+-- Re-apply: bring an existing user_study up to date without dropping it (a
+-- no-op right after the CREATE above).
+ALTER TABLE __CLICKHOUSE_DATABASE__.user_study
+    MODIFY QUERY
+__USER_STUDY_QUERY__;
+
+ALTER TABLE __CLICKHOUSE_DATABASE__.user_study
+    MODIFY REFRESH EVERY __REFRESH_MINUTES__ MINUTE;
+
+ALTER TABLE __CLICKHOUSE_DATABASE__.user_study
+    MODIFY SQL SECURITY DEFINER DEFINER = CURRENT_USER;
+
+ALTER TABLE __CLICKHOUSE_DATABASE__.user_study
+    MODIFY COMMENT 'study-authz: read by the row policies; a refreshable materialized view, its own only writer. public_group=__PUBLIC_GROUP__ app_name=__APP_NAME__ refresh_minutes=__REFRESH_MINUTES__ private_grace_minutes=__PRIVATE_GRACE_MINUTES__';
+
+SYSTEM REFRESH VIEW __CLICKHOUSE_DATABASE__.user_study;
+SYSTEM WAIT VIEW __CLICKHOUSE_DATABASE__.user_study;
