@@ -66,7 +66,7 @@ WHERE cancer_study_identifier = 'msk_chord_2024'
   AND attribute_value = 'Primary';
 -- Returns: 15,928
 
--- DO NOT use sample.sample_type column - it contains "Primary Solid Tumor" for ALL samples!
+-- Don't use sample_derived.sample_type: it holds "Primary Solid Tumor" for every sample.
 ```
 
 ### Genomic Features

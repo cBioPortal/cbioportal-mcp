@@ -714,6 +714,45 @@ def germline_guide() -> str:
 # agent's context with an unbounded result set (mirrors MAX_LIST_LIMIT below).
 # The default is CBIOPORTAL_MCP_MAX_RESULT_ROWS (100 when unset).
 MAX_SELECT_MAX_ROWS = 10000
+def _retry_dropped_connection(call):
+    """Run a SELECT, once more after a dropped connection. A timeout is not retried: the query is just too heavy."""
+    try:
+        return call()
+    except Exception as e:
+        if not query_errors.is_transient_connection_error(str(e)):
+            raise
+        logger.warning("retrying a SELECT after a dropped connection: %s", e)
+        time.sleep(0.5)
+        return call()
+
+
+def _column_names(table: str) -> list[str] | None:
+    """Column names of a table for an error hint: from the schema cache, else DESCRIBE. None when unavailable."""
+    try:
+        table = _validate_table_name(table)
+        cached = _cache_get(_schema_cache, ("columns", table))
+        if cached is not None:
+            return [c["name"] for c in cached["columns"]]
+        from mcp_clickhouse.mcp_server import run_query
+
+        raw = json.loads(run_query(f"DESCRIBE TABLE {table}"))
+        return [row[0] for row in raw.get("rows", []) if row]
+    except Exception:
+        return None
+
+
+def _table_names() -> list[str] | None:
+    try:
+        cached = _cache_get(_schema_cache, ("tables",))
+        if cached is not None:
+            return [t["name"] for t in cached["tables"]]
+        from mcp_clickhouse.mcp_server import run_query
+
+        return [row[0] for row in json.loads(run_query("SHOW TABLES")).get("rows", []) if row]
+    except Exception:
+        return None
+
+
 DEFAULT_SELECT_MAX_ROWS = min(result_format.default_max_rows(), MAX_SELECT_MAX_ROWS)
 
 
@@ -733,6 +772,10 @@ DEFAULT_SELECT_MAX_ROWS = min(result_format.default_max_rows(), MAX_SELECT_MAX_R
     - cbioportal://external-resources-guide - External linked resources such as imaging viewers
     - cbioportal://gene-resolution-guide - Ambiguous gene symbols and aliases
     - cbioportal://study-resolution-guide - Missing studies (e.g. HTAN OHSU), external portals, substitutes
+    - cbioportal://treatment-guide - Treatments and drugs given to patients
+    - cbioportal://gene-expression-guide - Expression, copy number, methylation, gene-pair correlation
+    - cbioportal://germline-guide - Germline variants
+    - cbioportal://statistical-tests-guide - Group comparisons and survival: return the data, hand off the test
     - cbioportal://faq-guide - What cancer types, data types and studies the database has
     - cbioportal://common-pitfalls - Common query mistakes and how to avoid them
 
@@ -765,8 +808,10 @@ def clickhouse_run_select_query(
         safe_max_rows = max(1, min(int(max_rows), MAX_SELECT_MAX_ROWS))
         # run_select_query returns at most safe_max_rows + 1 rows (capped in
         # ClickHouse), so one extra row signals that the result was truncated.
-        result = run_select_query(
-            query, query_label="clickhouse_run_select_query", max_rows=safe_max_rows
+        result = _retry_dropped_connection(
+            lambda: run_select_query(
+                query, query_label="clickhouse_run_select_query", max_rows=safe_max_rows
+            )
         )
         public_note = _public_only_note()
         if result_format.is_compact():
@@ -796,7 +841,9 @@ def clickhouse_run_select_query(
         return {"rows": result, **({"study_scope_note": public_note} if public_note else {})}
     except Exception as e:
         logger.error(f"clickhouse_run_select_query: {e}")
-        return query_errors.select_query_error(e)
+        return query_errors.select_query_error(
+            e, query, describe=_column_names, list_tables=_table_names
+        )
 
 
 @mcp.tool(
@@ -992,7 +1039,7 @@ STUDY_GUIDE_URI_PREFIX = "cbioportal://study-guide/"
 def list_guides() -> list[dict]:
     """List all available query guides with their URIs and descriptions.
 
-    Call this tool first to see what guides are available before answering complex queries.
+    Lists every topical guide with its URI. Use it when no guide named in the instructions fits the question.
 
     Includes:
       - Core guides baked into the MCP image (mutation-frequency, clinical-data, etc.)
