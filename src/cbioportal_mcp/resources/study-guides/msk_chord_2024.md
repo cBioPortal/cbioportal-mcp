@@ -101,7 +101,7 @@ WHERE cancer_study_identifier = 'msk_chord_2024'
 
 ## Treatment Data
 
-MSK-CHORD has **detailed treatment data** stored in clinical_event tables. This is one of the most comprehensive treatment datasets in cBioPortal.
+MSK-CHORD has **detailed treatment data** stored as clinical events (`treatment_event_agents`, `clinical_event_derived`, `clinical_event_data_derived`). This is one of the most comprehensive treatment datasets in cBioPortal.
 
 ### Treatment Event Keys
 
@@ -133,18 +133,13 @@ MSK-CHORD has **detailed treatment data** stored in clinical_event tables. This 
 
 ```sql
 -- Get treatments by subtype
-SELECT 
-    subtype.value as treatment_type,
-    agent.value as agent,
-    COUNT(DISTINCT ce.patient_id) as patients
-FROM clinical_event ce
-JOIN clinical_event_data agent ON ce.clinical_event_id = agent.clinical_event_id AND agent.key = 'AGENT'
-JOIN clinical_event_data subtype ON ce.clinical_event_id = subtype.clinical_event_id AND subtype.key = 'SUBTYPE'
-JOIN patient p ON ce.patient_id = p.internal_id
-JOIN cancer_study cs ON p.cancer_study_id = cs.cancer_study_id
-WHERE cs.cancer_study_identifier = 'msk_chord_2024'
-  AND ce.event_type IN ('Treatment', 'TREATMENT')
-GROUP BY subtype.value, agent.value
+SELECT
+    treatment_subtype AS treatment_type,
+    agent,
+    COUNT(DISTINCT patient_unique_id) AS patients
+FROM treatment_event_agents
+WHERE cancer_study_identifier = 'msk_chord_2024'
+GROUP BY treatment_subtype, agent
 ORDER BY treatment_type, patients DESC;
 ```
 

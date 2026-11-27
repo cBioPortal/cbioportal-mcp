@@ -84,13 +84,19 @@ jobs:
       contents: read
       id-token: write # Bedrock via an AWS role assumed with GitHub OIDC
     # TODO: switch to a tag (e.g. @v1) once cBioPortal/cbioportal-mcp-qa#90 merges; keep qa-ref in sync.
-    uses: cBioPortal/cbioportal-mcp-qa/.github/workflows/chat-eval.yml@4cccf30f533f9b03b53b014630192039be77ebae
+    uses: cBioPortal/cbioportal-mcp-qa/.github/workflows/chat-eval.yml@85d314fbfde0167ef952d99fbe38ab4d2e047a27
     with:
-      qa-ref: 4cccf30f533f9b03b53b014630192039be77ebae
+      qa-ref: 85d314fbfde0167ef952d99fbe38ab4d2e047a27
       repeats: ${{ fromJSON(inputs.repeats || '2') }}
       agent-model: ${{ inputs.agent-model || 'haiku' }}
       max-pass-drop: ${{ fromJSON(inputs.max-pass-drop || '10') }}
       baseline-image: ${{ inputs.baseline-image || 'cbioportal/mcp:latest' }}
+      # The server requires its study-authz switches set explicitly; no study filtering in CI.
+      server-env: |
+        CBIOPORTAL_MCP_STUDY_FILTERING=off
+        CBIOPORTAL_MCP_AUTH_ENFORCEMENT=off
+        CBIOPORTAL_MCP_AUTH_TEST_USERS=
+        CBIOPORTAL_MCP_PUBLIC_DB_CHECK=off
       # PRs from forks get no secrets: skip there; nightly and manual runs must have them.
       require-secrets: ${{ github.event_name != 'pull_request' }}
     secrets: inherit

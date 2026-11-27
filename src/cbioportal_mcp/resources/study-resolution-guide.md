@@ -15,7 +15,7 @@ Read this guide when the user mentions:
 ## Core Rules
 
 1. Resolve the requested study before substituting another study.
-2. If the requested study is not in this deployment, say so explicitly.
+2. If the requested study is not found, say so explicitly (see Workflow step 3 for wording).
 3. Do not silently analyze a substitute cohort.
 4. If the user agrees to a substitute, keep a one-line scope caveat when reporting numbers.
 
@@ -45,7 +45,7 @@ For HTAN imaging (Minerva, MxIF, H&E), continue with the external-resources-guid
 
 1. Call `list_studies(search=...)` with the user's exact study/cohort phrase and close variants.
 2. If a cancer type is mentioned, call `search_oncotree(search_term)` before disease-level study discovery.
-3. If no matching study is found, check known external instances above before declaring the study absent.
+3. If no match is found, check known external instances above, then say you could not find a study matching that name in this database. Do not mention access or permissions, and do not guess why it is missing.
 4. If proposing a substitute, describe why it is a substitute and how its scope differs.
 
 ## Substitute-Cohort Answer Pattern
@@ -60,4 +60,4 @@ When reporting numbers from a substitute:
 
 - Do not answer a PBTA question with `brain_cptac_2020` numbers without a scope warning.
 - Do not let later turns drop the substitute-cohort warning.
-- Do not claim a study does not exist globally; say it is not available in the connected deployment.
+- Do not claim a study does not exist.

@@ -76,15 +76,24 @@ def test_miss_message_never_asserts_nonexistence(monkeypatch):
     assert "does not exist" in out  # only as the instruction NOT to say it
     assert "Do not tell the user that 'totally_made_up_study' does not exist." in out
     assert "did not match any study in the database" in out
+    assert "could not find a study matching 'totally_made_up_study' in this database" in out
+    assert "not in this deployment" not in out
 
 
-def test_miss_message_lists_the_three_recoverable_causes(monkeypatch):
+def test_miss_message_never_mentions_access(monkeypatch):
+    monkeypatch.setattr(server, "run_select_query", lambda q, query_label=None: [])
+    out = _guide("totally_made_up_study").lower()
+
+    for word in ("access", "permission", "account", "restrict", "credential"):
+        assert word not in out
+
+
+def test_miss_message_lists_the_recoverable_causes(monkeypatch):
     monkeypatch.setattr(server, "run_select_query", lambda q, query_label=None: [])
     out = _guide("nbl_msk_9999")
 
     assert "Different identifier" in out
     assert "Another cBioPortal instance" in out
-    assert "Access restriction" in out
     assert "cbioportal://study-resolution-guide" in out
 
 

@@ -38,6 +38,7 @@ BEFORE ANSWERING ANY QUESTION, you MUST:
 - When the user names a site-specific subtype with an ambiguous abbreviation (e.g. salivary ACC → `ACYC`), filter every query to that OncoTree code, not the whole study. See `cbioportal://common-pitfalls#17c`
 - Use `list_studies(search)` for study discovery after resolving the cancer type
 - When an answer lists studies, include the cBioPortal study URL from `list_studies()` or render each study as `[Study Name](https://www.cbioportal.org/study/summary?id=<study_id>)`.
+- **Study not found**: when a study the user names is not in `list_studies()`, first follow `cbioportal://study-resolution-guide` (search by name, keywords and close ID variants). Only if no match is found, say you could not find a study matching that name in this database. Say nothing about access, permissions or visibility, and never speculate about why it is missing: that answer must read the same whether the study does not exist or is not visible to this user. Never say it does not exist anywhere. Do not suggest a way around access to reach it; the guide's known external portals are still fine to mention. This is about the study itself: a visible study whose query returns 0 rows is a 0 result. If a tool result says "Results cover public studies only; frequencies are computed over those studies.", relay that note.
 - Also read `cbioportal://clinical-data-guide` for clinical data query patterns
 - Do NOT hardcode study filters unless the question explicitly names a study
 - Questions may span multiple studies or all of cBioPortal

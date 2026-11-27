@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Long tool descriptions and SQL templates retain their established layout.
+# ruff: noqa: E501
 """cBioPortal MCP Server - FastMCP implementation."""
 
 import contextvars
@@ -21,34 +23,51 @@ if _dd_api_key:
         integrations_enabled=True,
     )
 
-import json
-import logging
-import re
-import sys
-import threading
-import time
-from concurrent.futures import ThreadPoolExecutor
-from functools import lru_cache
-from importlib import resources as importlib_resources
-from pathlib import Path
-from typing import Any, Optional
-from fastmcp import FastMCP
+import json  # noqa: E402
+import logging  # noqa: E402
+import re  # noqa: E402
+import sys  # noqa: E402
+import threading  # noqa: E402
+import time  # noqa: E402
+from concurrent.futures import ThreadPoolExecutor  # noqa: E402
+from contextlib import asynccontextmanager  # noqa: E402 (after LLMObs.enable)
+from functools import lru_cache  # noqa: E402
+from importlib import resources as importlib_resources  # noqa: E402
+from pathlib import Path  # noqa: E402
+from typing import Any  # noqa: E402
 
+import mcp.types as mt  # noqa: E402
+from fastmcp import FastMCP  # noqa: E402
+from starlette.responses import JSONResponse  # noqa: E402
 
-import mcp.types as mt
-
-from cbioportal_mcp.env import get_mcp_config, TransportType
-from cbioportal_mcp.authentication.permissions import ensure_db_permissions
-from cbioportal_mcp.auth import _build_auth_provider
-from cbioportal_mcp.telemetry import (
+from cbioportal_mcp import (  # noqa: E402
+    query_errors,  # noqa: E402 (after LLMObs.enable)
+    redaction,  # noqa: E402
+    result_format,  # noqa: E402 (after LLMObs.enable)
+    rollout,  # noqa: E402 (after LLMObs.enable)
+)
+from cbioportal_mcp.auth import _build_auth_provider  # noqa: E402
+from cbioportal_mcp.authentication.permissions import ensure_db_permissions  # noqa: E402
+from cbioportal_mcp.env import (  # noqa: E402 (after LLMObs.enable)
+    TransportType,
+    get_mcp_config,
+    validate_startup,
+)
+from cbioportal_mcp.identity import CombinedAuth, IdentityMiddleware  # noqa: E402
+from cbioportal_mcp.metadata_cache import MetadataCache  # noqa: E402 (after LLMObs.enable)
+from cbioportal_mcp.study_authz import availability  # noqa: E402
+from cbioportal_mcp.study_authz import request as study_request  # noqa: E402
+from cbioportal_mcp.telemetry import (  # noqa: E402
     TelemetryMiddleware,
     configure_telemetry,
     dogstatsd_metrics_configured,
     traced_db_query,
 )
-from cbioportal_mcp.metadata_cache import MetadataCache  # noqa: E402 (after LLMObs.enable)
-from cbioportal_mcp import result_format  # noqa: E402 (after LLMObs.enable)
-from cbioportal_mcp import query_errors  # noqa: E402 (after LLMObs.enable)
+
+study_request.install()
+# Scrub credentials from ClickHouse client-stack and package log records at
+# creation, before upstream workers log raw exception text (see redaction.py).
+redaction.install()
 
 logger = logging.getLogger(__name__)
 
@@ -128,13 +147,13 @@ VALID_TABLE_NAME_PATTERN = re.compile(r'^[a-zA-Z0-9_]+$')
 
 def _validate_study_id(study_id: str) -> str:
     """Validate and sanitize a study ID to prevent SQL injection.
-    
+
     Args:
         study_id: The study identifier to validate
-        
+
     Returns:
         The validated study_id if valid
-        
+
     Raises:
         ValueError: If study_id contains invalid characters
     """
@@ -297,8 +316,134 @@ def _build_hierarchy_path(code: str, entries_by_code: dict[str, dict]) -> str:
     return " > ".join(parts)
 
 
-# Create FastMCP instance
-mcp = FastMCP(
+def _validate_server_startup(transport=None):
+    """Shared startup gate for the console script, Inspector and ASGI servers."""
+    filtering, effective_transport = validate_startup(transport)
+    config = get_mcp_config()
+    # Refuse to serve if mcp-clickhouse's query pool doesn't match the cap
+    # (see query_concurrency); report the pool's actual size, not the env.
+    try:
+        query_concurrency.verify_query_pool(MAX_CONCURRENT_QUERIES)
+    except RuntimeError as e:
+        logger.critical("❌ %s", e)
+        sys.exit(2)
+    logger.info(
+        "ClickHouse query pool: %d workers", query_concurrency.query_pool_size()
+    )
+
+    enforce_public_db_check()
+    # If the public-database check failed, skip the separate permission check so an unreachable
+    # database still allows the degraded server to start.
+    if availability.reason() != "public_db_check_failed":
+        _validate_db_permissions(config)
+        if filtering == "off" and availability.reason() == "checks_pending":
+            availability.complete("ready")
+
+    enforce_study_policy_coverage(config.mcp_database)
+
+    logger.info(
+        "cBioPortal MCP startup: study_filtering=%s transport=%s", filtering, effective_transport
+    )
+    logger.info("cBioPortal MCP rollout switches: %s", rollout.summary(filtering))
+
+
+def _validate_db_permissions(config):
+    from cbioportal_mcp.study_authz.startup_check import redact
+
+    try:
+        ensure_db_permissions(config=config)
+    except PermissionError as e:
+        logger.critical("❌ ClickHouse permission check failed: %s", redact(e))
+        sys.exit(2)
+    except Exception as e:  # noqa: BLE001 - e.g. connection errors; never echo raw text
+        logger.critical(
+            "❌ ClickHouse permission check failed: %s (cannot run CHECK GRANT; "
+            "check the CLICKHOUSE_* settings)",
+            type(e).__name__,
+        )
+        sys.exit(2)
+
+
+@asynccontextmanager
+async def _startup_lifespan(server):
+    logging.basicConfig(level=logging.INFO)
+    # httpx logs full request URLs at INFO, and the OAuth token checks put the
+    # caller's access token in the query string.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    _validate_server_startup(server.startup_transport)
+    # Filtering-on study lists are request scoped; never preload them anonymously.
+    if (
+        getattr(server, "preload_studies", False)
+        and not study_request.enabled()
+        and availability.available()
+    ):
+
+        def warm():
+            _refresh_studies_cache_once()
+            _refresh_studies_cache_forever()
+
+        threading.Thread(target=warm, daemon=True).start()
+    yield
+
+
+class ConfiguredFastMCP(FastMCP):
+    """Keep alternate launchers subject to the same transport policy."""
+
+    def __init__(self, **kwargs):
+        _, self.startup_transport = validate_startup()
+        provider = kwargs.pop("auth") if "auth" in kwargs else _build_auth_provider()
+        self.identity_auth = CombinedAuth(provider)
+        # CombinedAuth mounts OAuth routes itself: FastMCP 2's bearer-only
+        # wrapper cannot admit bridge or rollout-exempt requests.
+        super().__init__(**kwargs, auth=None, lifespan=_startup_lifespan)
+        self.middleware.insert(0, IdentityMiddleware(self))
+        self.middleware.insert(1, availability.StudyDataMiddleware())
+        self.custom_route("/health", methods=["GET"])(study_data_health)
+
+    async def run_async(self, transport=None, show_banner=True, **kwargs):
+        # FastMCP's own default is stdio; use our configured HTTP default.
+        transport = transport if transport is not None else get_mcp_config().mcp_server_transport
+        validate_startup(transport)
+        await super().run_async(transport=transport, show_banner=show_banner, **kwargs)
+
+    async def run_stdio_async(self, show_banner=True, log_level=None):
+        _, self.startup_transport = validate_startup("stdio")
+        await super().run_stdio_async(show_banner=show_banner, log_level=log_level)
+
+    def http_app(self, path=None, **kwargs):
+        _, self.startup_transport = validate_startup(kwargs.get("transport", "http"))
+        app = super().http_app(path=path, **kwargs)
+        settings = self._deprecated_settings
+        if self.startup_transport == "sse":
+            paths = [path or settings.sse_path, settings.message_path]
+        else:
+            paths = [path or settings.streamable_http_path]
+        self.identity_auth.mount(app, paths)
+        return app
+
+    def sse_app(self, path=None, message_path=None, middleware=None):
+        _, self.startup_transport = validate_startup("sse")
+        app = super().sse_app(path=path, message_path=message_path, middleware=middleware)
+        self.identity_auth.mount(
+            app,
+            [path or self._deprecated_settings.sse_path,
+             message_path or self._deprecated_settings.message_path],
+        )
+        return app
+
+
+async def study_data_health(request):
+    # Degraded is a serving state: keep readiness for login/schema/OncoTree.
+    # Pending checks are not ready. Never expose check details here.
+    return JSONResponse(
+        {"study_data_available": availability.available(), "reason": availability.reason()},
+        status_code=503 if availability.reason() == "checks_pending" else 200,
+    )
+
+
+# Construction validates even when main() is bypassed by fastmcp dev / ASGI.
+mcp = ConfiguredFastMCP(
     name="cBioPortal MCP Server",
     instructions=_load_resource("system-prompt.md"),
     auth=_build_auth_provider(),
@@ -307,6 +452,61 @@ mcp = FastMCP(
         mt.Icon(src="https://avatars.githubusercontent.com/u/9876251?s=48&v=4", mimeType="image/png")
     ],
 )
+
+
+def enforce_public_db_check() -> None:
+    """Verify a filtering-off deployment once before admitting study data."""
+    from cbioportal_mcp.study_authz import public_db_check
+
+    if study_request.enabled() or availability.reason() != "checks_pending":
+        return
+    allowed_groups = rollout.get().public_db_allowed_groups
+    if allowed_groups is None:
+        return
+    try:
+        public_db_check.check(allowed_groups)
+    except public_db_check.PublicDatabaseError as e:
+        availability.complete("public_db_check_failed")
+        logger.critical("Study data unavailable: public database startup check failed: %s", e)
+
+
+def enforce_study_policy_coverage(database: str) -> None:
+    """Run once at startup; filtering failures disable study data until restart."""
+    from cbioportal_mcp.study_authz import startup_check
+
+    if not study_request.enabled() or availability.reason() != "checks_pending":
+        return
+    settings = rollout.get()
+    if (settings.auth_enforcement, settings.public_db_check) != ("enforce", "enforce"):
+        availability.complete("rollout_not_enforced")
+        logger.critical(
+            "Study data unavailable: rollout_not_enforced "
+            "(filtering requires both switches=enforce)"
+        )
+        return
+    try:
+        result = startup_check.run_startup_check(database)
+        if result is None:
+            raise RuntimeError("check did not complete")
+    except startup_check.PolicyCoverageError as e:
+        availability.complete("filtering_check_failed")
+        logger.critical("❌ study filtering startup check failed: %s", startup_check.redact(e))
+        return
+    except Exception as e:  # noqa: BLE001 - fail closed, never echo raw text
+        availability.complete("filtering_check_failed")
+        logger.critical(
+            "❌ study filtering startup check failed: unexpected %s", type(e).__name__
+        )
+        return
+    availability.complete("ready")
+    logger.info(
+        "Study filtering: %s is covered by the row policies on %s (%s %s, %d objects)",
+        result.user,
+        database,
+        "user" if result.target_is_user else "role",
+        result.target,
+        result.objects,
+    )
 
 
 def main():
@@ -321,34 +521,8 @@ def main():
     # Get config
     config = get_mcp_config()
 
-    # Refuse to serve if mcp-clickhouse's query pool doesn't match the cap
-    # (see query_concurrency); report the pool's actual size, not the env.
-    try:
-        query_concurrency.verify_query_pool(MAX_CONCURRENT_QUERIES)
-    except RuntimeError as e:
-        logger.critical("❌ %s", e)
-        sys.exit(2)
-    logger.info(
-        "ClickHouse query pool: %d workers", query_concurrency.query_pool_size()
-    )
-
-    try:
-        ensure_db_permissions(config=config)
-    except PermissionError as e:
-        logger.critical("❌ ClickHouse permission check failed: %s", e)
-        sys.exit(2)
-
-    # Warm the list_studies cache immediately, without blocking server
-    # startup on the ClickHouse round trip, then keep it proactively
-    # refreshed on the same background thread for the life of the process
-    # (see STUDIES_CACHE_REFRESH_INTERVAL_SECONDS) -- so it's not just the
-    # first caller after startup that benefits, but every caller, since a
-    # live request should almost never be the one paying for the refetch.
-    def _warm_then_keep_studies_cache_fresh():
-        _refresh_studies_cache_once()
-        _refresh_studies_cache_forever()
-
-    threading.Thread(target=_warm_then_keep_studies_cache_fresh, daemon=True).start()
+    # The lifespan starts the preload only after all startup checks.
+    mcp.preload_studies = True
 
     # Set up OpenTelemetry → Datadog agent (no-op if env vars not set or agent unreachable).
     # DogStatsD tool metrics can still use the same middleware when only the
@@ -624,6 +798,9 @@ def clickhouse_run_select_query(
     query: str, max_rows: int = DEFAULT_SELECT_MAX_ROWS
 ) -> dict[str, Any]:
     try:
+        if study_request.enabled():
+            study_request.email()
+            study_request.guard_sql(query)
         safe_max_rows = max(1, min(int(max_rows), MAX_SELECT_MAX_ROWS))
         # run_select_query returns at most safe_max_rows + 1 rows (capped in
         # ClickHouse), so one extra row signals that the result was truncated.
@@ -632,14 +809,18 @@ def clickhouse_run_select_query(
                 query, query_label="clickhouse_run_select_query", max_rows=safe_max_rows
             )
         )
-        logger.debug("clickhouse_run_select_query returns %s", result)
+        public_note = _public_only_note()
         if result_format.is_compact():
             columns, rows = _select_table(result)
-            return result_format.select_result(
+            response = result_format.select_result(
                 columns, rows, max_rows=safe_max_rows, hard_max_rows=MAX_SELECT_MAX_ROWS
             )
+            if public_note:
+                response["study_scope_note"] = public_note
+            return response
         if len(result) > safe_max_rows:
             return {
+                **({"study_scope_note": public_note} if public_note else {}),
                 "rows": result[:safe_max_rows],
                 "truncated": True,
                 "returned_rows": safe_max_rows,
@@ -653,7 +834,7 @@ def clickhouse_run_select_query(
                     f"pass a larger max_rows (up to {MAX_SELECT_MAX_ROWS}) to see more."
                 ),
             }
-        return {"rows": result}
+        return {"rows": result, **({"study_scope_note": public_note} if public_note else {})}
     except Exception as e:
         logger.error(f"clickhouse_run_select_query: {e}")
         return query_errors.select_query_error(
@@ -672,7 +853,7 @@ def clickhouse_run_select_query(
 )
 @run_off_event_loop
 def clickhouse_list_tables() -> dict[str, Any]:
-    logger.info(f"clickhouse_list_tables: called")
+    logger.info("clickhouse_list_tables: called")
 
     try:
         cached = _cache_get(_schema_cache, ("tables",))
@@ -706,7 +887,7 @@ def clickhouse_list_tables() -> dict[str, Any]:
 )
 @run_off_event_loop
 def clickhouse_list_table_columns(table: str) -> dict[str, Any]:
-    logger.info(f"clickhouse_list_table_columns: called")
+    logger.info("clickhouse_list_table_columns: called")
 
     try:
         table = _validate_table_name(table)
@@ -789,7 +970,7 @@ def run_select_query(query: str, *, query_label: str, max_rows: int | None = Non
     if max_rows is not None:
         query = _with_row_cap(query, max_rows)
     logger.debug("run_select_query: delegate the query to run_query tool of ClickHouse MCP")
-    with traced_db_query(query_label):
+    with study_request.user_query(), traced_db_query(query_label):
         ch_query_result = json.loads(run_query(query))
         result = zip_select_query_result(ch_query_result)
     return result
@@ -831,7 +1012,7 @@ def zip_select_query_result(ch_query_result) -> SelectRows:
     rows = ch_query_result["rows"]
     result = []
     for row in rows:
-        result.append({k: v for k, v in zip(columns, row) if v not in ("", None)})
+        result.append({k: v for k, v in zip(columns, row, strict=False) if v not in ("", None)})
     return SelectRows(result, columns, rows)
 
 
@@ -1042,22 +1223,21 @@ def _study_not_in_deployment_message(study_id: str) -> str:
 
     The previous wording ("Study 'X' not found") was relayed to users as "this study
     does not exist in cBioPortal", which was wrong for studies that are live on
-    cbioportal.org, restricted by permissions, or simply spelled differently.
+    another instance or simply spelled differently. The text never mentions access:
+    a study the caller cannot read must look exactly like one that is not there.
     """
     lines = [
         f"Identifier '{study_id}' did not match any study in the database this "
         f"deployment is connected to.",
         "",
-        "This is NOT proof the study does not exist. Before you tell the user it is "
-        "unavailable, rule out all three of these:",
+        "This is NOT proof the study does not exist anywhere. Before you tell the user "
+        "it was not found, rule out both of these:",
         "",
-        f"1. **Different identifier.** Search rather than guess: "
-        f"`SELECT cancer_study_identifier, name FROM cancer_study "
-        f"WHERE lower(name) LIKE '%<disease>%'`.",
+        "1. **Different identifier.** Search rather than guess: "
+        "`SELECT cancer_study_identifier, name FROM cancer_study "
+        "WHERE lower(name) LIKE '%<disease>%'`.",
         "2. **Another cBioPortal instance.** Public cbioportal.org, pedcbioportal, and "
         "GENIE hold different study sets — read `cbioportal://study-resolution-guide`.",
-        "3. **Access restriction.** A study the current credentials cannot read is "
-        "absent from these results, which is a permissions outcome, not a missing study.",
     ]
 
     candidates = _similar_study_identifiers(study_id)
@@ -1070,8 +1250,9 @@ def _study_not_in_deployment_message(study_id: str) -> str:
 
     lines += [
         "",
-        f"Do not tell the user that '{study_id}' does not exist. Say it is not in this "
-        f"deployment, and offer the candidates above or the other instances.",
+        f"Do not tell the user that '{study_id}' does not exist. If none of the above "
+        f"resolves it, say you could not find a study matching '{study_id}' in this "
+        f"database, and offer the candidates above or the other instances.",
     ]
     return "\n".join(lines)
 
@@ -1080,15 +1261,15 @@ def _study_not_in_deployment_message(study_id: str) -> str:
 @run_off_event_loop
 def get_study_guide(study_id: str) -> str:
     """Get a guide for a specific cBioPortal study.
-    
+
     First checks for a pre-generated guide in resources/study-guides/{study_id}.md.
     If not found, dynamically generates one by querying the database.
-    
+
     Pre-generated guides may include curated notes and tips specific to each study.
-    
+
     Args:
         study_id: The cancer study identifier (e.g., "msk_chord_2024", "brca_tcga_pan_can_atlas_2018")
-    
+
     Returns:
         A markdown-formatted guide specific to the requested study
     """
@@ -1113,7 +1294,17 @@ def _study_guide_text(study_id: str) -> str:
         study_id = _validate_study_id(study_id)
     except ValueError as e:
         return f"Error: {str(e)}"
-    
+
+    if study_request.enabled():
+        study_request.email()
+        visible = run_select_query(
+            f"SELECT 1 FROM cancer_study WHERE lower(cancer_study_identifier) = "
+            f"lower('{study_id}') LIMIT 1",
+            query_label="study_guide.visibility",
+        )
+        if not visible:
+            return f"Study '{study_id}' is unavailable."
+
     # First, check for a pre-generated guide file. `_load_study_guide` returns
     # None when no guide file exists (fall through to dynamic); it raises when
     # a guide was resolved but couldn't be read — that's a real problem and
@@ -1129,7 +1320,7 @@ def _study_guide_text(study_id: str) -> str:
 
     # Study ids match case-insensitively below, so key the cache the same way.
     cache_key = study_id.lower()
-    cached = _cache_get(_study_guide_cache, cache_key)
+    cached = None if study_request.enabled() else _cache_get(_study_guide_cache, cache_key)
     if cached is not None:
         return cached
 
@@ -1137,7 +1328,7 @@ def _study_guide_text(study_id: str) -> str:
     logger.info(f"Generating dynamic study guide for {study_id}")
     try:
         guide_sections = []
-        
+
         # 1. Basic study info
         # Match case-insensitively: identifiers are lowercase by convention, but a
         # user who types 'NBL_MSK_2023' must not be told the study is missing.
@@ -1265,7 +1456,7 @@ def _study_guide_text(study_id: str) -> str:
 - **Patients:** {c.get('patient_count', 'N/A'):,}
 - **Samples:** {c.get('sample_count', 'N/A'):,}
 """)
-        
+
         # 3. Available data types
         profiles = profiles_future.result()
         if profiles:
@@ -1273,7 +1464,7 @@ def _study_guide_text(study_id: str) -> str:
             for p in profiles:
                 guide_sections.append(f"- **{p.get('genetic_alteration_type', 'Unknown')}**: {p.get('name', 'N/A')}")
             guide_sections.append("")
-        
+
         # 4. Gene panels used
         panels = panels_future.result()
         if panels:
@@ -1286,7 +1477,7 @@ def _study_guide_text(study_id: str) -> str:
                 else:
                     guide_sections.append(f"- **{panel_id}**: {count:,} samples")
             guide_sections.append("")
-        
+
         # 5. Clinical attributes available
         attrs = attrs_future.result()
         if attrs:
@@ -1296,7 +1487,7 @@ def _study_guide_text(study_id: str) -> str:
             for a in attrs:
                 guide_sections.append(f"| {a.get('attribute_name', 'Unknown')} | {a.get('coverage', 0):,} |")
             guide_sections.append("")
-        
+
         # 6. Top mutated genes (if mutation data exists)
         top_genes = top_genes_future.result()
         if top_genes:
@@ -1306,7 +1497,7 @@ def _study_guide_text(study_id: str) -> str:
             for g in top_genes:
                 guide_sections.append(f"| {g.get('hugo_gene_symbol', 'Unknown')} | {g.get('altered_samples', 0):,} |")
             guide_sections.append("")
-        
+
         # 7. Sample type distribution
         sample_types = sample_types_future.result()
         if sample_types:
@@ -1314,7 +1505,7 @@ def _study_guide_text(study_id: str) -> str:
             for st in sample_types:
                 guide_sections.append(f"- **{st.get('sample_type', 'Unknown')}**: {st.get('count', 0):,} samples")
             guide_sections.append("")
-        
+
         # 8. Query tips for this study
         guide_sections.append(f"""## Query Tips for {study_id}
 
@@ -1338,11 +1529,12 @@ WHERE cancer_study_identifier = '{study_id}'
     AND attribute_name IN ('CANCER_TYPE', 'SAMPLE_TYPE', 'OS_MONTHS');
 ```
 """)
-        
+
         guide = "\n".join(guide_sections)
-        _cache_put(_study_guide_cache, cache_key, guide)
+        if not study_request.enabled():
+            _cache_put(_study_guide_cache, cache_key, guide)
         return guide
-        
+
     except Exception as e:
         logger.error(f"get_study_guide error: {e}")
         return f"Error generating study guide for '{study_id}': {str(e)}"
@@ -1355,6 +1547,22 @@ CBIOPORTAL_STUDY_SUMMARY_URL_TEMPLATE = "https://www.cbioportal.org/study/summar
 
 def _study_summary_url(study_id: str) -> str:
     return CBIOPORTAL_STUDY_SUMMARY_URL_TEMPLATE.format(study_id=study_id)
+
+
+def _public_only_note() -> str | None:
+    if not study_request.enabled():
+        return None
+    # The row policy exposes only caller + public rows; exclude the public email.
+    try:
+        rows = run_select_query(
+            "SELECT 1 FROM user_study WHERE email != '' AND valid_until > now() LIMIT 1",
+            query_label="study_scope.private_grants",
+        )
+    except Exception:
+        # Do not log database exception text: it may contain a caller's email.
+        logger.warning("Could not determine public-only study status")
+        return "Public-only study status could not be determined; interpret frequencies with care."
+    return None if rows else study_request.PUBLIC_ONLY_NOTE
 
 
 # How long a cached study snapshot is served before an on-demand call
@@ -1418,7 +1626,7 @@ def _all_studies_query() -> tuple[tuple[tuple[str, object], ...], ...]:
     list_studies() filters this single snapshot in Python by search/limit/
     verbose, so every call is a cache hit regardless of the search term used.
 
-    In steady state the background loop in main() keeps this fresh before
+    In steady state the background loop started by _startup_lifespan keeps this fresh before
     TTL ever expires (see STUDIES_CACHE_REFRESH_INTERVAL_SECONDS), so this
     on-demand path is normally only exercised on the very first call after a
     cold start, or if that background loop has stalled.
@@ -1443,6 +1651,9 @@ def _refresh_studies_cache_once() -> None:
     failed fetch is logged and left for the next cycle rather than raised,
     so one bad refresh doesn't take down the background loop.
     """
+    availability.require()
+    if study_request.enabled():
+        return
     try:
         with _studies_cache_lock:
             _fetch_and_store_studies()
@@ -1453,8 +1664,8 @@ def _refresh_studies_cache_once() -> None:
 def _refresh_studies_cache_forever() -> None:
     """Background loop: proactively refetch the study cache every
     STUDIES_CACHE_REFRESH_INTERVAL_SECONDS for the life of the process. Runs
-    on a daemon thread started from main(); see that call site for how this
-    combines with the initial startup warm-up.
+    on a daemon thread started by _startup_lifespan after startup checks,
+    when main() requests preload; it follows the initial startup warm-up.
     """
     while True:
         time.sleep(STUDIES_CACHE_REFRESH_INTERVAL_SECONDS)
@@ -1463,6 +1674,22 @@ def _refresh_studies_cache_forever() -> None:
 
 def _filter_studies(search: str | None, limit: int, verbose: bool) -> list[dict]:
     """Filter, limit, and shape the cached full study list for list_studies()."""
+    if study_request.enabled():
+        study_request.email()
+        fields = "cancer_study_identifier, name, type_of_cancer_id, sample_count"
+        if verbose:
+            fields += ", description"
+        haystack = (
+            "lower(concat(cancer_study_identifier, ' ', name, ' ', "
+            "type_of_cancer_id, ' ', coalesce(description, '')))"
+        )
+        tokens = re.findall(r"[a-z0-9]+", (search or "").lower())
+        where = " AND ".join(f"position({haystack}, '{t}') > 0" for t in tokens) or "1"
+        return run_select_query(
+            f"SELECT {fields} FROM cancer_study WHERE {where} "
+            f"ORDER BY sample_count DESC LIMIT {int(limit)}",
+            query_label="list_studies.visible",
+        )
     rows = [dict(row) for row in _all_studies_query()]
 
     if search:
@@ -1515,14 +1742,18 @@ def list_studies(search: str = None, limit: int = 20, verbose: bool = False) -> 
         with no matches returns a single {"note": ...} pointing to the study-resolution-guide.
     """
     available_guides = set(_list_available_study_guides())
-    
+
     # Clamp limit to safe bounds
     safe_limit = max(1, min(int(limit), MAX_LIST_LIMIT))
-    
+
     try:
         results = _filter_studies(search, safe_limit, bool(verbose))
+        public_note = _public_only_note()
         if search and not results:
-            return [{"note": NO_STUDY_MATCH_NOTE.format(search=search)}]
+            return [{
+                "note": NO_STUDY_MATCH_NOTE.format(search=search),
+                **({"study_scope_note": public_note} if public_note else {}),
+            }]
 
         # Add has_guide field
         for study in results:
@@ -1530,9 +1761,11 @@ def list_studies(search: str = None, limit: int = 20, verbose: bool = False) -> 
             study['has_guide'] = study_id in available_guides
             if study_id:
                 study['url'] = _study_summary_url(study_id)
-        
+
+        if public_note:
+            results.append({"note": public_note})
         return results
-        
+
     except Exception as e:
         logger.error(f"list_studies error: {e}")
         return [{"error": str(e)}]
@@ -1546,7 +1779,20 @@ def list_study_guides() -> list[str]:
     Returns:
         List of study identifiers that have curated guides in resources/study-guides/
     """
-    return _list_available_study_guides()
+    guides = _list_available_study_guides()
+    if study_request.enabled():
+        study_request.email()
+        identifiers = ", ".join(f"'{_validate_study_id(g)}'" for g in guides)
+        if not identifiers:
+            return []
+        visible = run_select_query(
+            f"SELECT cancer_study_identifier FROM cancer_study "
+            f"WHERE cancer_study_identifier IN ({identifiers})",
+            query_label="study_guides.visible",
+        )
+        allowed = {row["cancer_study_identifier"] for row in visible}
+        return [g for g in guides if g in allowed]
+    return guides
 
 
 @mcp.tool()

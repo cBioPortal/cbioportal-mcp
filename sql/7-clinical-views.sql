@@ -15,6 +15,39 @@
 -- ============================================================================
 
 -- ============================================================================
+-- treatment_event_agents — one row per Treatment event with an AGENT
+-- ============================================================================
+-- Built at clone time from clinical_event / clinical_event_data, which the
+-- clone does not leave readable: the *_derived event tables drop the event
+-- id that pairs an agent with its type and subtype. Columns: the study,
+-- the patient, the event id and start date, the AGENT value, and the
+-- type / subtype recorded on the same event (studies use different keys:
+-- TREATMENT_TYPE or Treatment_TYPE, SUBTYPE or TREATMENT_SUBTYPE).
+-- ============================================================================
+
+DROP TABLE IF EXISTS treatment_event_agents;
+
+CREATE TABLE treatment_event_agents
+ENGINE = MergeTree
+ORDER BY (cancer_study_identifier, patient_unique_id)
+AS
+SELECT
+    assumeNotNull(cs.cancer_study_identifier) AS cancer_study_identifier,
+    concat(assumeNotNull(cs.cancer_study_identifier), '_', assumeNotNull(p.stable_id)) AS patient_unique_id,
+    ce.clinical_event_id AS clinical_event_id,
+    any(ce.start_date) AS start_date,
+    maxIf(ced.value, ced.key = 'AGENT') AS agent,
+    maxIf(ced.value, ced.key IN ('TREATMENT_TYPE', 'Treatment_TYPE')) AS treatment_type,
+    maxIf(ced.value, ced.key IN ('SUBTYPE', 'TREATMENT_SUBTYPE')) AS treatment_subtype
+FROM clinical_event ce
+JOIN patient p ON ce.patient_id = p.internal_id
+JOIN cancer_study cs ON p.cancer_study_id = cs.cancer_study_id
+JOIN clinical_event_data ced ON ce.clinical_event_id = ced.clinical_event_id
+WHERE lower(ce.event_type) = 'treatment'
+GROUP BY cs.cancer_study_identifier, patient_unique_id, ce.clinical_event_id
+HAVING agent != '';
+
+-- ============================================================================
 -- treatment_counts_in_study — Treatment (patient) chart
 -- ============================================================================
 -- Distinct patients per treatment AGENT, from Treatment events
@@ -53,20 +86,9 @@ WITH study_patients AS (
     WHERE cancer_study_identifier = {study:String}
 ),
 treatment_events AS (
-    SELECT
-        ce.clinical_event_id,
-        concat(cs.cancer_study_identifier, '_', p.stable_id) AS patient_unique_id,
-        maxIf(ced.value, ced.key = 'AGENT') AS agent,
-        maxIf(ced.value, ced.key IN ('TREATMENT_TYPE', 'Treatment_TYPE')) AS treatment_type,
-        maxIf(ced.value, ced.key IN ('SUBTYPE', 'TREATMENT_SUBTYPE')) AS treatment_subtype
-    FROM clinical_event ce
-    JOIN patient p ON ce.patient_id = p.internal_id
-    JOIN cancer_study cs ON p.cancer_study_id = cs.cancer_study_id
-    JOIN clinical_event_data ced ON ce.clinical_event_id = ced.clinical_event_id
-    WHERE cs.cancer_study_identifier = {study:String}
-      AND lower(ce.event_type) = 'treatment'
-    GROUP BY ce.clinical_event_id, patient_unique_id
-    HAVING agent != ''
+    SELECT clinical_event_id, patient_unique_id, agent, treatment_type, treatment_subtype
+    FROM treatment_event_agents
+    WHERE cancer_study_identifier = {study:String}
 ),
 treated AS (
     SELECT *
@@ -123,21 +145,9 @@ WITH study_patients AS (
     WHERE cancer_study_identifier = {study:String}
 ),
 treatment_events AS (
-    SELECT
-        ce.clinical_event_id,
-        concat(cs.cancer_study_identifier, '_', p.stable_id) AS patient_unique_id,
-        any(ce.start_date) AS start_date,
-        maxIf(ced.value, ced.key = 'AGENT') AS agent,
-        maxIf(ced.value, ced.key IN ('TREATMENT_TYPE', 'Treatment_TYPE')) AS treatment_type,
-        maxIf(ced.value, ced.key IN ('SUBTYPE', 'TREATMENT_SUBTYPE')) AS treatment_subtype
-    FROM clinical_event ce
-    JOIN patient p ON ce.patient_id = p.internal_id
-    JOIN cancer_study cs ON p.cancer_study_id = cs.cancer_study_id
-    JOIN clinical_event_data ced ON ce.clinical_event_id = ced.clinical_event_id
-    WHERE cs.cancer_study_identifier = {study:String}
-      AND lower(ce.event_type) = 'treatment'
-    GROUP BY ce.clinical_event_id, patient_unique_id
-    HAVING agent != ''
+    SELECT clinical_event_id, patient_unique_id, start_date, agent, treatment_type, treatment_subtype
+    FROM treatment_event_agents
+    WHERE cancer_study_identifier = {study:String}
 ),
 systemic_events AS (
     SELECT patient_unique_id, start_date, agent
@@ -173,7 +183,7 @@ GROUP BY agents;
 -- clinical_attribute_counts — categorical clinical attribute chart
 -- ============================================================================
 -- Counts per value of one clinical attribute, at the attribute's level
--- (clinical_attribute_meta.patient_attribute): distinct patients for a
+-- (patient attributes have no sample id in clinical_data_derived): distinct patients for a
 -- patient attribute, distinct samples for a sample attribute.
 --
 -- NA handling follows the portal: values '', 'NA', 'NAN', 'N/A'
@@ -182,12 +192,12 @@ GROUP BY agents;
 -- 'Unknown' stay as their own value, as in the portal. Values are grouped
 -- exactly as stored (case-sensitive, untrimmed).
 --
--- Returns no rows when the attribute does not exist in the study.
+-- Returns no rows when the study has no data for the attribute.
 -- attribute is case-sensitive (e.g. 'SAMPLE_TYPE', 'SEX').
 --
 -- Parameters:
 --   study      — cancer_study.cancer_study_identifier
---   attribute  — clinical_attribute_meta.attr_id
+--   attribute  — clinical attribute id (clinical_data_derived.attribute_name)
 --
 -- Usage:
 --   SELECT * FROM clinical_attribute_counts(
@@ -201,11 +211,10 @@ DROP VIEW IF EXISTS clinical_attribute_counts;
 
 CREATE VIEW clinical_attribute_counts SQL SECURITY INVOKER AS
 WITH attribute_level AS (
-    SELECT max(m.patient_attribute) AS is_patient, count() AS found
-    FROM clinical_attribute_meta m
-    JOIN cancer_study cs ON m.cancer_study_id = cs.cancer_study_id
-    WHERE cs.cancer_study_identifier = {study:String}
-      AND m.attr_id = {attribute:String}
+    SELECT max(sample_unique_id = '') AS is_patient, count() AS found
+    FROM clinical_data_derived
+    WHERE cancer_study_identifier = {study:String}
+      AND attribute_name = {attribute:String}
 ),
 study_entities AS (
     SELECT DISTINCT

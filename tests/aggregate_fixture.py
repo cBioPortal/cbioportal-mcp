@@ -68,10 +68,8 @@ PROFILE_DATATYPES = {
 DDL = [
     "CREATE TABLE gene (entrez_gene_id Int64, hugo_gene_symbol String) "
     "ENGINE = MergeTree ORDER BY entrez_gene_id",
-    "CREATE TABLE gene_panel (internal_id Int64, stable_id String) "
-    "ENGINE = MergeTree ORDER BY internal_id",
-    "CREATE TABLE gene_panel_list (internal_id Int64, gene_id Int64) "
-    "ENGINE = MergeTree ORDER BY internal_id",
+    "CREATE TABLE gene_panel_to_gene_derived (gene_panel_id LowCardinality(String), gene String) "
+    "ENGINE = MergeTree ORDER BY gene_panel_id",
     "CREATE TABLE cancer_study (cancer_study_id Int64, cancer_study_identifier String, "
     "name String) ENGINE = MergeTree ORDER BY cancer_study_id",
     "CREATE TABLE genetic_profile (genetic_profile_id Int64, stable_id String, "
@@ -167,10 +165,11 @@ def generate(
     tables: dict[str, list[tuple]] = defaultdict(list)
     for sym, entrez in GENES.items():
         tables["gene"].append((entrez, sym))
-    for internal_id, (stable, genes) in PANELS.items():
-        tables["gene_panel"].append((internal_id, stable))
+    for stable, genes in PANELS.values():
         for g in genes:
-            tables["gene_panel_list"].append((internal_id, GENES[g]))
+            tables["gene_panel_to_gene_derived"].append((stable, g))
+    for g in GENES:
+        tables["gene_panel_to_gene_derived"].append(("WES", g))
     study_ids = {names.get(key, key): sid for sid, key in STUDIES.items()}
     for sid, key in STUDIES.items():
         ident = names.get(key, key)
@@ -265,8 +264,7 @@ def _datatype(profile_id: str) -> str:
 
 INSERT_COLUMNS = {
     "gene": "entrez_gene_id, hugo_gene_symbol",
-    "gene_panel": "internal_id, stable_id",
-    "gene_panel_list": "internal_id, gene_id",
+    "gene_panel_to_gene_derived": "gene_panel_id, gene",
     "cancer_study": "cancer_study_id, cancer_study_identifier, name",
     "cancer_study_query_preferences": "preference_name, cancer_study_identifier, notes",
     "genetic_profile": "genetic_profile_id, stable_id, cancer_study_id, genetic_alteration_type, "

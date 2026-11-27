@@ -1,0 +1,58 @@
+-- study-authz: the query that builds user_study. Not applied on its own:
+-- 0-user-study.sql.tmpl inlines it twice (sqlgen.user_study_template()): in
+-- the CREATE and in the ALTER ... MODIFY QUERY that re-apply uses, so the two
+-- can never drift.
+WITH
+    now64(3, 'UTC') AS refreshed_at,
+    refreshed_at + toIntervalMinute(__PRIVATE_GRACE_MINUTES__) AS private_until,
+    upperUTF8('__PUBLIC_GROUP__') AS public_group,
+    studies AS (
+        -- groups rule: split on ';', drop empty entries, whole-entry
+        -- case-insensitive comparison, no trimming.
+        SELECT
+            assumeNotNull(cancer_study_identifier) AS cancer_study_identifier,
+            upperUTF8(assumeNotNull(cancer_study_identifier)) AS study_key,
+            arrayMap(g -> upperUTF8(g), arrayFilter(g -> g != '', splitByChar(';', ifNull(`groups`, '')))) AS group_keys
+        FROM __CLICKHOUSE_DATABASE__.cancer_study
+        WHERE cancer_study_identifier IS NOT NULL AND cancer_study_identifier != ''
+    ),
+    study_keys AS (
+        -- Every grant key that unlocks a study (cBioPortal's rules).
+        SELECT
+            cancer_study_identifier,
+            arrayJoin(arrayDistinct(arrayConcat(
+                [study_key, 'ALL'],
+                group_keys,
+                if(endsWith(study_key, '_TCGA'), ['ALL_TCGA'], []),
+                if(endsWith(study_key, '_TARGET') OR study_key IN ('ALL_TARGET_PHASE1', 'ALL_TARGET_PHASE2'),
+                   ['ALL_NCI_TARGET'], [])
+            ))) AS match_key
+        FROM studies
+    ),
+    grants AS (
+        SELECT
+            lowerUTF8(email) AS email,
+            upperUTF8(grant_key) AS match_key,
+            least(valid_until, private_until) AS valid_until,
+            'manual' AS source,
+            refreshed_at AS issued_at
+        FROM __CLICKHOUSE_DATABASE__.user_study_manual
+        WHERE lowerUTF8(email) != '' AND grant_key != '' AND valid_until > refreshed_at
+    )
+SELECT
+    '' AS email,
+    cancer_study_identifier,
+    toDateTime64('2299-12-31 23:59:59.999', 3, 'UTC') AS valid_until,
+    'public' AS source,
+    refreshed_at AS issued_at
+FROM studies
+WHERE has(group_keys, public_group)
+UNION ALL
+SELECT
+    g.email AS email,
+    s.cancer_study_identifier AS cancer_study_identifier,
+    g.valid_until AS valid_until,
+    g.source AS source,
+    g.issued_at AS issued_at
+FROM grants AS g
+INNER JOIN study_keys AS s ON g.match_key = s.match_key

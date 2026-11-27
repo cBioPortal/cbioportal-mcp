@@ -28,8 +28,8 @@ ENV CLICKHOUSE_HOST=localhost \
     CLICKHOUSE_DATABASE=database \
     CLICKHOUSE_SECURE=true \
     CLICKHOUSE_VERIFY=true \
-    CLICKHOUSE_MCP_SERVER_TRANSPORT=stdio \
-    CLICKHOUSE_MCP_BIND_HOST=127.0.0.1 \
+    CLICKHOUSE_MCP_SERVER_TRANSPORT=http \
+    CLICKHOUSE_MCP_BIND_HOST=0.0.0.0 \
     CLICKHOUSE_MCP_BIND_PORT=8000
 
 # Expose port (optional — based on what the MCP server binds to; change if needed)
