@@ -772,6 +772,10 @@ DEFAULT_SELECT_MAX_ROWS = min(result_format.default_max_rows(), MAX_SELECT_MAX_R
     - cbioportal://external-resources-guide - External linked resources such as imaging viewers
     - cbioportal://gene-resolution-guide - Ambiguous gene symbols and aliases
     - cbioportal://study-resolution-guide - Missing studies (e.g. HTAN OHSU), external portals, substitutes
+    - cbioportal://treatment-guide - Treatments and drugs given to patients
+    - cbioportal://gene-expression-guide - Expression, copy number, methylation, gene-pair correlation
+    - cbioportal://germline-guide - Germline variants
+    - cbioportal://statistical-tests-guide - Group comparisons and survival: return the data, hand off the test
     - cbioportal://faq-guide - What cancer types, data types and studies the database has
     - cbioportal://common-pitfalls - Common query mistakes and how to avoid them
 
@@ -1035,7 +1039,7 @@ STUDY_GUIDE_URI_PREFIX = "cbioportal://study-guide/"
 def list_guides() -> list[dict]:
     """List all available query guides with their URIs and descriptions.
 
-    Call this tool first to see what guides are available before answering complex queries.
+    Lists every topical guide with its URI. Use it when no guide named in the instructions fits the question.
 
     Includes:
       - Core guides baked into the MCP image (mutation-frequency, clinical-data, etc.)

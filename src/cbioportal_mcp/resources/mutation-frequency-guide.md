@@ -1,7 +1,7 @@
 # Mutation Frequency Analysis Guide
 
-## IMPORTANT: Reporting Mutation Frequencies
-- **ALWAYS report frequencies as percentages**, not raw counts: `frequency = (altered_samples / total_profiled_samples) × 100`
+## Reporting Mutation Frequencies
+- Report raw counts and percentages: `frequency = (altered_samples / total_profiled_samples) × 100`
 - For quick frequency lookups, **prefer the TCGA Pan-Cancer Atlas study first**, then offer to expand to other studies
 - When reporting across multiple studies, show **ranges** (e.g., "TP53 is mutated in 30–60% of samples") rather than a single average
 - **NEVER** sum mutation events across studies to compute an aggregate frequency — this can exceed 100% due to double-counting
@@ -559,7 +559,7 @@ FROM top_mutated_genes_in_study(study = 'your_study_id', top_n = 20);
 -- os_target_gdc (WES): TP53 32/143 = 22.4%, MUC16 16/143, TTN 16/143
 ```
 
-### Method 2: Manual Per-Gene Queries (More Reliable)
+### Method 2: Manual Per-Gene Queries (when no view fits)
 **Step 1**: Get top mutated genes
 **Step 2**: For each gene, run individual profiling query
 **Step 3**: Combine results manually with proper denominators
